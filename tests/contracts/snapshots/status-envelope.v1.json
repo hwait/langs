@@ -1,0 +1,14 @@
+{
+  "command": "status",
+  "correlation_id": "<event-id>",
+  "data": {
+    "application": "linguawiki",
+    "application_version": "<application-version>",
+    "contract_schema_version": 1,
+    "persistence": "not-initialized",
+    "stage": 0
+  },
+  "generated_at": "<utc-timestamp>",
+  "ok": true,
+  "schema_version": 1
+}

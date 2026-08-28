@@ -1,0 +1,39 @@
+version = 1
+
+forbidden_filename_suffixes = [
+  ".aac",
+  ".apkg",
+  ".db",
+  ".db-shm",
+  ".db-wal",
+  ".db.lock",
+  ".duckdb",
+  ".duckdb.lock",
+  ".duckdb.tmp",
+  ".duckdb.wal",
+  ".flac",
+  ".m4a",
+  ".mp3",
+  ".ogg",
+  ".opus",
+  ".mp4",
+  ".parquet",
+  ".sqlite",
+  ".sqlite-shm",
+  ".sqlite-wal",
+  ".wav",
+  ".webm",
+]
+
+forbidden_directory_names = [
+  "artifacts",
+  "backups",
+  "exports",
+  "imports",
+  "learner-workspaces",
+  "recordings",
+]
+
+forbidden_path_sequences = [
+  "transcripts/raw",
+]

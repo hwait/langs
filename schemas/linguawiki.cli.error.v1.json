@@ -1,0 +1,111 @@
+{
+  "$defs": {
+    "ErrorDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "additionalProperties": true,
+          "title": "Context",
+          "type": "object"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "ErrorDetail",
+      "type": "object"
+    },
+    "ErrorPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "pattern": "^[a-z][a-z0-9_]+$",
+          "title": "Code",
+          "type": "string"
+        },
+        "details": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ErrorDetail"
+          },
+          "title": "Details",
+          "type": "array"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ErrorPayload",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "command": {
+      "title": "Command",
+      "type": "string"
+    },
+    "correlation_id": {
+      "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "title": "Correlation Id",
+      "type": "string"
+    },
+    "error": {
+      "$ref": "#/$defs/ErrorPayload"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "pattern": "(?:Z|\\+00:00)$",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "ok": {
+      "const": false,
+      "default": false,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "command",
+    "correlation_id",
+    "generated_at",
+    "error"
+  ],
+  "title": "ErrorEnvelope",
+  "type": "object",
+  "x-linguawiki-semantic-model": "linguawiki.cli.error.v1"
+}

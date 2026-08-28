@@ -1,0 +1,442 @@
+{
+  "$defs": {
+    "ContentOrigin": {
+      "enum": [
+        "authentic",
+        "human-authored",
+        "ai-adapted",
+        "ai-generated",
+        "learner-produced",
+        "source-derived",
+        "synthetic"
+      ],
+      "title": "ContentOrigin",
+      "type": "string"
+    },
+    "ContentProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "generation_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generation Run Id"
+        },
+        "origin": {
+          "$ref": "#/$defs/ContentOrigin"
+        },
+        "privacy": {
+          "enum": [
+            "public",
+            "private",
+            "synthetic"
+          ],
+          "title": "Privacy",
+          "type": "string"
+        },
+        "rights": {
+          "title": "Rights",
+          "type": "string"
+        },
+        "source_references": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Source References",
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "rights",
+        "privacy"
+      ],
+      "title": "ContentProvenance",
+      "type": "object"
+    },
+    "ContentReview": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "passed",
+                  "failed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "method": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "reviewed_content_hash": {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reviewed_content_hash",
+              "method"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "axis": {
+          "$ref": "#/$defs/ReviewAxis"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Method"
+        },
+        "reviewed_content_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reviewed Content Hash"
+        },
+        "state": {
+          "$ref": "#/$defs/ReviewState"
+        }
+      },
+      "required": [
+        "axis",
+        "state"
+      ],
+      "title": "ContentReview",
+      "type": "object"
+    },
+    "ReviewAxis": {
+      "enum": [
+        "linguistic",
+        "pedagogical",
+        "source-alignment",
+        "rights",
+        "privacy"
+      ],
+      "title": "ReviewAxis",
+      "type": "string"
+    },
+    "ReviewState": {
+      "enum": [
+        "not-required",
+        "pending",
+        "passed",
+        "failed"
+      ],
+      "title": "ReviewState",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "enum": [
+              "approved-personal",
+              "verified",
+              "publication-ready"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reviews": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "axis": {
+                      "const": "linguistic"
+                    },
+                    "state": {
+                      "const": "passed"
+                    }
+                  },
+                  "required": [
+                    "axis",
+                    "state"
+                  ],
+                  "type": "object"
+                },
+                "minContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "axis": {
+                      "const": "pedagogical"
+                    },
+                    "state": {
+                      "const": "passed"
+                    }
+                  },
+                  "required": [
+                    "axis",
+                    "state"
+                  ],
+                  "type": "object"
+                },
+                "minContains": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "const": "publication-ready"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reviews": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "axis": {
+                      "const": "source-alignment"
+                    },
+                    "state": {
+                      "const": "passed"
+                    }
+                  },
+                  "required": [
+                    "axis",
+                    "state"
+                  ],
+                  "type": "object"
+                },
+                "minContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "axis": {
+                      "const": "rights"
+                    },
+                    "state": {
+                      "const": "passed"
+                    }
+                  },
+                  "required": [
+                    "axis",
+                    "state"
+                  ],
+                  "type": "object"
+                },
+                "minContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "axis": {
+                      "const": "privacy"
+                    },
+                    "state": {
+                      "const": "passed"
+                    }
+                  },
+                  "required": [
+                    "axis",
+                    "state"
+                  ],
+                  "type": "object"
+                },
+                "minContains": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "enum": [
+              "approved-personal",
+              "verified",
+              "publication-ready"
+            ]
+          },
+          "risk_tier": {
+            "minimum": 3
+          }
+        },
+        "required": [
+          "lifecycle",
+          "risk_tier"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reviews": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "axis": {
+                      "const": "source-alignment"
+                    },
+                    "state": {
+                      "const": "passed"
+                    }
+                  },
+                  "required": [
+                    "axis",
+                    "state"
+                  ],
+                  "type": "object"
+                },
+                "minContains": 1
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "body": {
+      "minLength": 1,
+      "title": "Body",
+      "type": "string"
+    },
+    "content_hash": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "content_id": {
+      "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "title": "Content Id",
+      "type": "string"
+    },
+    "dependencies": {
+      "default": [],
+      "items": {
+        "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "title": "Dependencies",
+      "type": "array"
+    },
+    "kind": {
+      "enum": [
+        "concept",
+        "lexeme",
+        "sense",
+        "form",
+        "construction",
+        "grammar",
+        "pronunciation",
+        "character",
+        "pragmatics",
+        "culture",
+        "skill_strategy"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "language": {
+      "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
+      "title": "Language",
+      "type": "string"
+    },
+    "lifecycle": {
+      "enum": [
+        "needs-review",
+        "approved-personal",
+        "verified",
+        "publication-ready"
+      ],
+      "title": "Lifecycle",
+      "type": "string"
+    },
+    "provenance": {
+      "$ref": "#/$defs/ContentProvenance"
+    },
+    "reviews": {
+      "items": {
+        "$ref": "#/$defs/ContentReview"
+      },
+      "title": "Reviews",
+      "type": "array"
+    },
+    "risk_tier": {
+      "maximum": 4,
+      "minimum": 0,
+      "title": "Risk Tier",
+      "type": "integer"
+    },
+    "schema_name": {
+      "const": "lingua.content.v1",
+      "default": "lingua.content.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "title": {
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    }
+  },
+  "required": [
+    "content_id",
+    "language",
+    "kind",
+    "title",
+    "body",
+    "content_hash",
+    "lifecycle",
+    "risk_tier",
+    "provenance",
+    "reviews"
+  ],
+  "title": "ContentItem",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.content.v1"
+}

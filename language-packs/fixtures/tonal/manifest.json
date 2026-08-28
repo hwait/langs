@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "pack_id": "pak_01BX5ZZKBKACTAV9WEVGEMMVRZ",
+  "name": "Synthetic Tonal Non-Whitespace Fixture",
+  "language": "ztx-Zzzz",
+  "maturity": "fixture",
+  "frameworks": [
+    {
+      "id": "fixture-bands-v1",
+      "levels": ["L1", "L2"]
+    }
+  ],
+  "dimensions": ["reading", "listening", "spoken-production", "written-production"],
+  "capabilities": {
+    "word_segmentation": "pack-adapter",
+    "inflection": false,
+    "grammatical_case": false,
+    "tone": true,
+    "romanization": true
+  },
+  "content_files": ["content.json"]
+}

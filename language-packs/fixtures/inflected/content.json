@@ -1,0 +1,26 @@
+{
+  "schema_name": "lingua.content.v1",
+  "schema_version": 1,
+  "content_id": "cnt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "language": "qix-Latn",
+  "kind": "form",
+  "title": "Synthetic oblique form",
+  "body": "Fixture token lum changes to lumi in the synthetic oblique context.",
+  "content_hash": "e8f156806ee90a67d3062349e975a0d6cf560ebee4c12bf719a7ab7c83bd5c96",
+  "lifecycle": "verified",
+  "risk_tier": 0,
+  "provenance": {
+    "origin": "synthetic",
+    "source_references": [],
+    "generation_run_id": null,
+    "rights": "CC0 synthetic fixture",
+    "privacy": "synthetic"
+  },
+  "reviews": [
+    {"axis": "linguistic", "state": "passed", "reviewed_content_hash": "e8f156806ee90a67d3062349e975a0d6cf560ebee4c12bf719a7ab7c83bd5c96", "method": "synthetic fixture review"},
+    {"axis": "pedagogical", "state": "passed", "reviewed_content_hash": "e8f156806ee90a67d3062349e975a0d6cf560ebee4c12bf719a7ab7c83bd5c96", "method": "synthetic fixture review"},
+    {"axis": "rights", "state": "passed", "reviewed_content_hash": "e8f156806ee90a67d3062349e975a0d6cf560ebee4c12bf719a7ab7c83bd5c96", "method": "fixture policy"},
+    {"axis": "privacy", "state": "passed", "reviewed_content_hash": "e8f156806ee90a67d3062349e975a0d6cf560ebee4c12bf719a7ab7c83bd5c96", "method": "fixture policy"}
+  ],
+  "dependencies": []
+}

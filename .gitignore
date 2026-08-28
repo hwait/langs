@@ -1,0 +1,51 @@
+# Python and development tools
+__pycache__/
+*.py[cod]
+.venv/
+.tools/
+.uv-cache/
+.python/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# LinguaWiki learner state and private artifacts
+# BEGIN GENERATED LINGUAWIKI PRIVACY RULES
+**/transcripts/raw/
+*.aac
+*.apkg
+*.db
+*.db-shm
+*.db-wal
+*.db.lock
+*.duckdb
+*.duckdb.lock
+*.duckdb.tmp
+*.duckdb.wal
+*.flac
+*.m4a
+*.mp3
+*.mp4
+*.ogg
+*.opus
+*.parquet
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.wav
+*.webm
+artifacts/
+backups/
+exports/
+imports/
+learner-workspaces/
+recordings/
+# END GENERATED LINGUAWIKI PRIVACY RULES
+
+# Operating-system files
+.DS_Store

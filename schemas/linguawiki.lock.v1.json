@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "PackPin": {
+      "additionalProperties": false,
+      "properties": {
+        "pack_id": {
+          "pattern": "^pak_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Pack Id",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "sha256",
+        "pack_id"
+      ],
+      "title": "PackPin",
+      "type": "object"
+    },
+    "VersionPin": {
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "sha256"
+      ],
+      "title": "VersionPin",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "core": {
+      "$ref": "#/$defs/VersionPin"
+    },
+    "database_schema": {
+      "$ref": "#/$defs/VersionPin"
+    },
+    "packs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PackPin"
+      },
+      "title": "Packs",
+      "type": "array"
+    },
+    "schema_name": {
+      "const": "linguawiki.lock.v1",
+      "default": "linguawiki.lock.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "skill_bundle": {
+      "$ref": "#/$defs/VersionPin"
+    }
+  },
+  "required": [
+    "core",
+    "database_schema",
+    "skill_bundle"
+  ],
+  "title": "LockManifest",
+  "type": "object",
+  "x-linguawiki-semantic-model": "linguawiki.lock.v1"
+}

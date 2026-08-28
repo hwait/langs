@@ -1,0 +1,26 @@
+{
+  "schema_name": "lingua.content.v1",
+  "schema_version": 1,
+  "content_id": "cnt_01BX5ZZKBKACTAV9WEVGEMMVRZ",
+  "language": "ztx-Zzzz",
+  "kind": "pronunciation",
+  "title": "Synthetic tone contrast",
+  "body": "Fixture symbol ◇ with tone 1 contrasts with ◇ marked tone 3; no natural-language claim is made.",
+  "content_hash": "6b94459650cb789b51b7cecef6e39aad9161975df974ee5937cac9625ffdc28f",
+  "lifecycle": "verified",
+  "risk_tier": 0,
+  "provenance": {
+    "origin": "synthetic",
+    "source_references": [],
+    "generation_run_id": null,
+    "rights": "CC0 synthetic fixture",
+    "privacy": "synthetic"
+  },
+  "reviews": [
+    {"axis": "linguistic", "state": "passed", "reviewed_content_hash": "6b94459650cb789b51b7cecef6e39aad9161975df974ee5937cac9625ffdc28f", "method": "synthetic fixture review"},
+    {"axis": "pedagogical", "state": "passed", "reviewed_content_hash": "6b94459650cb789b51b7cecef6e39aad9161975df974ee5937cac9625ffdc28f", "method": "synthetic fixture review"},
+    {"axis": "rights", "state": "passed", "reviewed_content_hash": "6b94459650cb789b51b7cecef6e39aad9161975df974ee5937cac9625ffdc28f", "method": "fixture policy"},
+    {"axis": "privacy", "state": "passed", "reviewed_content_hash": "6b94459650cb789b51b7cecef6e39aad9161975df974ee5937cac9625ffdc28f", "method": "fixture policy"}
+  ],
+  "dependencies": []
+}

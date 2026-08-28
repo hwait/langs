@@ -1,0 +1,62 @@
+{
+  "schema_name": "lingua.session.v1",
+  "schema_version": 1,
+  "package_id": "pkg_synthetic_manual_001",
+  "external_session_id": "synthetic-provider-session",
+  "session_id": null,
+  "track_hint": "trk_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "target_language": "qix-Latn",
+  "mode": "completed",
+  "started_at": "2026-01-02T10:00:00Z",
+  "ended_at": "2026-01-02T10:02:00Z",
+  "learning_targets": ["cnt_01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+  "transcript_layers": [
+    {
+      "kind": "raw",
+      "derived_from": null,
+      "utterances": [
+        {
+          "utterance_id": "utt_001",
+          "speaker": "learner",
+          "started_at": "2026-01-02T10:00:10Z",
+          "ended_at": "2026-01-02T10:00:14Z",
+          "text": "lum lumi"
+        }
+      ]
+    },
+    {
+      "kind": "normalized",
+      "derived_from": "raw",
+      "utterances": [
+        {
+          "utterance_id": "utt_001",
+          "speaker": "learner",
+          "started_at": "2026-01-02T10:00:10Z",
+          "ended_at": "2026-01-02T10:00:14Z",
+          "text": "lum, lumi"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "event_id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "kind": "pronunciation.assessment",
+      "occurred_at": "2026-01-02T10:00:15Z",
+      "payload": {
+        "status": "confirmed",
+        "audio_artifact_id": "art_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "utterance_id": "utt_001"
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "art_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "kind": "audio",
+      "relative_path": "audio/synthetic.wav",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "retained": false
+    }
+  ]
+}

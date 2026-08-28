@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "WorkspaceRuntime": {
+      "additionalProperties": false,
+      "properties": {
+        "core_version": {
+          "minLength": 1,
+          "title": "Core Version",
+          "type": "string"
+        },
+        "python": {
+          "pattern": "^>=3\\.12(?:,[^\\s]+)?$",
+          "title": "Python",
+          "type": "string"
+        }
+      },
+      "required": [
+        "python",
+        "core_version"
+      ],
+      "title": "WorkspaceRuntime",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "backup_root": {
+      "minLength": 1,
+      "title": "Backup Root",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "pattern": "(?:Z|\\+00:00)$",
+      "title": "Created At",
+      "type": "string"
+    },
+    "history_policy": {
+      "const": "git-wiki",
+      "default": "git-wiki",
+      "title": "History Policy",
+      "type": "string"
+    },
+    "runtime": {
+      "$ref": "#/$defs/WorkspaceRuntime"
+    },
+    "schema_name": {
+      "const": "lingua.workspace.v1",
+      "default": "lingua.workspace.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "timezone": {
+      "title": "Timezone",
+      "type": "string"
+    },
+    "workspace_id": {
+      "pattern": "^wsp_[0-9A-HJKMNP-TV-Z]{26}$",
+      "title": "Workspace Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "workspace_id",
+    "created_at",
+    "timezone",
+    "backup_root",
+    "runtime"
+  ],
+  "title": "WorkspaceManifest",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.workspace.v1"
+}

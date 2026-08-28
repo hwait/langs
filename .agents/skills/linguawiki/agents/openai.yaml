@@ -1,0 +1,7 @@
+interface:
+  display_name: "LinguaWiki"
+  short_description: "Operate a local language-learning workspace"
+  default_prompt: "Use $linguawiki to check this LinguaWiki workspace's status."
+
+policy:
+  allow_implicit_invocation: true

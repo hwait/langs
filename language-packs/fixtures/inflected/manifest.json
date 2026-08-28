@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "pack_id": "pak_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "name": "Synthetic Inflected Fixture",
+  "language": "qix-Latn",
+  "maturity": "fixture",
+  "frameworks": [
+    {
+      "id": "fixture-bands-v1",
+      "levels": ["L1", "L2"]
+    }
+  ],
+  "dimensions": ["reading", "listening", "spoken-production", "written-production"],
+  "capabilities": {
+    "word_segmentation": "whitespace",
+    "inflection": true,
+    "grammatical_case": true,
+    "tone": false,
+    "romanization": false
+  },
+  "content_files": ["content.json"]
+}

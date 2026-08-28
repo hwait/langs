@@ -1,0 +1,617 @@
+{
+  "$defs": {
+    "ArtifactKind": {
+      "enum": [
+        "audio",
+        "transcript",
+        "other"
+      ],
+      "title": "ArtifactKind",
+      "type": "string"
+    },
+    "AttemptObservedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "attempt.observed",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/UtteranceLinkedPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "AttemptObservedEvent",
+      "type": "object"
+    },
+    "ConfirmedPronunciationPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "audio_artifact_id": {
+          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Audio Artifact Id",
+          "type": "string"
+        },
+        "status": {
+          "const": "confirmed",
+          "title": "Status",
+          "type": "string"
+        },
+        "utterance_id": {
+          "pattern": "^utt_[A-Za-z0-9_-]+$",
+          "title": "Utterance Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "utterance_id",
+        "audio_artifact_id"
+      ],
+      "title": "ConfirmedPronunciationPayload",
+      "type": "object"
+    },
+    "CorrectionGivenEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "correction.given",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/UtteranceLinkedPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "CorrectionGivenEvent",
+      "type": "object"
+    },
+    "FollowUpEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "follow_up",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/FollowUpPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "FollowUpEvent",
+      "type": "object"
+    },
+    "FollowUpPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "FollowUpPayload",
+      "type": "object"
+    },
+    "PronunciationAssessmentEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "pronunciation.assessment",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "discriminator": {
+            "mapping": {
+              "confirmed": "#/$defs/ConfirmedPronunciationPayload",
+              "observed": "#/$defs/UnconfirmedPronunciationPayload",
+              "uncertain": "#/$defs/UnconfirmedPronunciationPayload"
+            },
+            "propertyName": "status"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/UnconfirmedPronunciationPayload"
+            },
+            {
+              "$ref": "#/$defs/ConfirmedPronunciationPayload"
+            }
+          ],
+          "title": "Payload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "PronunciationAssessmentEvent",
+      "type": "object"
+    },
+    "SessionArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "relative_path": {
+          "minLength": 1,
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "retained": {
+          "title": "Retained",
+          "type": "boolean"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "kind",
+        "relative_path",
+        "sha256",
+        "retained"
+      ],
+      "title": "SessionArtifact",
+      "type": "object"
+    },
+    "SpeakerRole": {
+      "enum": [
+        "learner",
+        "tutor",
+        "other"
+      ],
+      "title": "SpeakerRole",
+      "type": "string"
+    },
+    "TranscriptLayer": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "raw"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "derived_from": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "normalized"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "derived_from": {
+                "const": "raw"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "reviewed-hearing"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "derived_from": {
+                "enum": [
+                  "raw",
+                  "normalized"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "derived_from": {
+          "anyOf": [
+            {
+              "enum": [
+                "raw",
+                "normalized"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Derived From"
+        },
+        "kind": {
+          "enum": [
+            "raw",
+            "normalized",
+            "reviewed-hearing"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "utterances": {
+          "items": {
+            "$ref": "#/$defs/TranscriptUtterance"
+          },
+          "title": "Utterances",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "utterances"
+      ],
+      "title": "TranscriptLayer",
+      "type": "object"
+    },
+    "TranscriptUtterance": {
+      "additionalProperties": false,
+      "properties": {
+        "ended_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Ended At",
+          "type": "string"
+        },
+        "speaker": {
+          "$ref": "#/$defs/SpeakerRole"
+        },
+        "started_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Started At",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "utterance_id": {
+          "pattern": "^utt_[A-Za-z0-9_-]+$",
+          "title": "Utterance Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "utterance_id",
+        "speaker",
+        "started_at",
+        "ended_at",
+        "text"
+      ],
+      "title": "TranscriptUtterance",
+      "type": "object"
+    },
+    "UnconfirmedPronunciationPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "audio_artifact_id": {
+          "anyOf": [
+            {
+              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio Artifact Id"
+        },
+        "status": {
+          "enum": [
+            "observed",
+            "uncertain"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "utterance_id": {
+          "pattern": "^utt_[A-Za-z0-9_-]+$",
+          "title": "Utterance Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "utterance_id"
+      ],
+      "title": "UnconfirmedPronunciationPayload",
+      "type": "object"
+    },
+    "UtteranceLinkedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "utterance_id": {
+          "pattern": "^utt_[A-Za-z0-9_-]+$",
+          "title": "Utterance Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "utterance_id"
+      ],
+      "title": "UtteranceLinkedPayload",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SessionArtifact"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "ended_at": {
+      "format": "date-time",
+      "pattern": "(?:Z|\\+00:00)$",
+      "title": "Ended At",
+      "type": "string"
+    },
+    "events": {
+      "default": [],
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "attempt.observed": "#/$defs/AttemptObservedEvent",
+            "correction.given": "#/$defs/CorrectionGivenEvent",
+            "follow_up": "#/$defs/FollowUpEvent",
+            "pronunciation.assessment": "#/$defs/PronunciationAssessmentEvent"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/AttemptObservedEvent"
+          },
+          {
+            "$ref": "#/$defs/CorrectionGivenEvent"
+          },
+          {
+            "$ref": "#/$defs/PronunciationAssessmentEvent"
+          },
+          {
+            "$ref": "#/$defs/FollowUpEvent"
+          }
+        ]
+      },
+      "title": "Events",
+      "type": "array"
+    },
+    "external_session_id": {
+      "minLength": 1,
+      "title": "External Session Id",
+      "type": "string"
+    },
+    "learning_targets": {
+      "default": [],
+      "items": {
+        "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$",
+        "type": "string"
+      },
+      "title": "Learning Targets",
+      "type": "array"
+    },
+    "mode": {
+      "enum": [
+        "checkpoint",
+        "completed"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "package_id": {
+      "pattern": "^pkg_[A-Za-z0-9_-]+$",
+      "title": "Package Id",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "lingua.session.v1",
+      "default": "lingua.session.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "started_at": {
+      "format": "date-time",
+      "pattern": "(?:Z|\\+00:00)$",
+      "title": "Started At",
+      "type": "string"
+    },
+    "target_language": {
+      "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
+      "title": "Target Language",
+      "type": "string"
+    },
+    "track_hint": {
+      "anyOf": [
+        {
+          "pattern": "^trk_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Track Hint"
+    },
+    "transcript_layers": {
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "kind": {
+                "const": "raw"
+              }
+            },
+            "type": "object"
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "kind": {
+                "const": "normalized"
+              }
+            },
+            "type": "object"
+          },
+          "maxContains": 1,
+          "minContains": 0
+        },
+        {
+          "contains": {
+            "properties": {
+              "kind": {
+                "const": "reviewed-hearing"
+              }
+            },
+            "type": "object"
+          },
+          "maxContains": 1,
+          "minContains": 0
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/TranscriptLayer"
+      },
+      "minItems": 1,
+      "title": "Transcript Layers",
+      "type": "array"
+    }
+  },
+  "required": [
+    "package_id",
+    "external_session_id",
+    "target_language",
+    "mode",
+    "started_at",
+    "ended_at",
+    "transcript_layers"
+  ],
+  "title": "SessionPackage",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.session.v1"
+}

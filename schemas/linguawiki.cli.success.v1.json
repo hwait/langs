@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "command": {
+      "title": "Command",
+      "type": "string"
+    },
+    "correlation_id": {
+      "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "title": "Correlation Id",
+      "type": "string"
+    },
+    "data": {
+      "title": "Data"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "pattern": "(?:Z|\\+00:00)$",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "ok": {
+      "const": true,
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "command",
+    "correlation_id",
+    "generated_at",
+    "data"
+  ],
+  "title": "GenericSuccessEnvelope",
+  "type": "object",
+  "x-linguawiki-semantic-model": "linguawiki.cli.success.v1"
+}

@@ -1,0 +1,85 @@
+{
+  "$defs": {
+    "StatusData": {
+      "additionalProperties": false,
+      "properties": {
+        "application": {
+          "const": "linguawiki",
+          "default": "linguawiki",
+          "title": "Application",
+          "type": "string"
+        },
+        "application_version": {
+          "title": "Application Version",
+          "type": "string"
+        },
+        "contract_schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Contract Schema Version",
+          "type": "integer"
+        },
+        "persistence": {
+          "const": "not-initialized",
+          "default": "not-initialized",
+          "title": "Persistence",
+          "type": "string"
+        },
+        "stage": {
+          "const": 0,
+          "default": 0,
+          "title": "Stage",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "application_version"
+      ],
+      "title": "StatusData",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "command": {
+      "title": "Command",
+      "type": "string"
+    },
+    "correlation_id": {
+      "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "title": "Correlation Id",
+      "type": "string"
+    },
+    "data": {
+      "$ref": "#/$defs/StatusData"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "pattern": "(?:Z|\\+00:00)$",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "ok": {
+      "const": true,
+      "default": true,
+      "title": "Ok",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "command",
+    "correlation_id",
+    "generated_at",
+    "data"
+  ],
+  "title": "StatusEnvelope",
+  "type": "object",
+  "x-linguawiki-semantic-model": "linguawiki.cli.status.v1"
+}
