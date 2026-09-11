@@ -1,0 +1,1369 @@
+{
+  "$defs": {
+    "StagedAttemptEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "activity": {
+          "anyOf": [
+            {
+              "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "pattern": "^blk_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block"
+        },
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "attempt.observed",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/StagedAttemptPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "StagedAttemptEvent",
+      "type": "object"
+    },
+    "StagedAttemptPayload": {
+      "additionalProperties": false,
+      "description": "One observed attempt: what was asked, what help was given, how it went.",
+      "properties": {
+        "assessor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assessor"
+        },
+        "assessor_kind": {
+          "default": "ai",
+          "enum": [
+            "deterministic",
+            "ai",
+            "learner",
+            "human"
+          ],
+          "title": "Assessor Kind",
+          "type": "string"
+        },
+        "claims": {
+          "default": [],
+          "items": {
+            "enum": [
+              "recognition",
+              "comprehension",
+              "controlled-production",
+              "spontaneous-production",
+              "delayed-transfer",
+              "intelligibility"
+            ],
+            "type": "string"
+          },
+          "title": "Claims",
+          "type": "array"
+        },
+        "confidence": {
+          "default": "medium",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context"
+        },
+        "correction_mode": {
+          "default": "none",
+          "enum": [
+            "none",
+            "delayed",
+            "immediate",
+            "recast",
+            "explicit"
+          ],
+          "title": "Correction Mode",
+          "type": "string"
+        },
+        "delay_hours": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delay Hours"
+        },
+        "dimension": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dimension"
+        },
+        "help_level": {
+          "default": "none",
+          "enum": [
+            "none",
+            "prompted",
+            "hinted",
+            "scaffolded",
+            "full-answer"
+          ],
+          "title": "Help Level",
+          "type": "string"
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latency Ms"
+        },
+        "modality": {
+          "enum": [
+            "text",
+            "audio",
+            "speech",
+            "writing"
+          ],
+          "title": "Modality",
+          "type": "string"
+        },
+        "package_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Id"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response"
+        },
+        "response_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Hash"
+        },
+        "response_visibility": {
+          "anyOf": [
+            {
+              "enum": [
+                "withheld",
+                "excerpt",
+                "full"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Visibility"
+        },
+        "retrieval": {
+          "default": "immediate",
+          "enum": [
+            "immediate",
+            "same-session",
+            "delayed"
+          ],
+          "title": "Retrieval",
+          "type": "string"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "package",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "task_type": {
+          "enum": [
+            "objective",
+            "short-response",
+            "extended-productive",
+            "pronunciation-target",
+            "connected-speech",
+            "meaning-focused-exchange",
+            "reading-comprehension",
+            "listening-comprehension",
+            "recall-prompt"
+          ],
+          "title": "Task Type",
+          "type": "string"
+        },
+        "transcript_layer": {
+          "anyOf": [
+            {
+              "enum": [
+                "raw",
+                "normalized",
+                "reviewed-hearing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transcript Layer"
+        },
+        "utterance_id": {
+          "anyOf": [
+            {
+              "pattern": "^utt_[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Utterance Id"
+        }
+      },
+      "required": [
+        "task_type",
+        "modality",
+        "score"
+      ],
+      "title": "StagedAttemptPayload",
+      "type": "object"
+    },
+    "StagedCorrectionEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "activity": {
+          "anyOf": [
+            {
+              "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "pattern": "^blk_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block"
+        },
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "correction.given",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/StagedCorrectionPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "StagedCorrectionEvent",
+      "type": "object"
+    },
+    "StagedCorrectionPayload": {
+      "additionalProperties": false,
+      "description": "One correction given: the learner's form, the target form, and the pattern.",
+      "properties": {
+        "attach_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attach To"
+        },
+        "category": {
+          "minLength": 1,
+          "title": "Category",
+          "type": "string"
+        },
+        "classification": {
+          "default": "learner-error",
+          "title": "Classification",
+          "type": "string"
+        },
+        "confidence": {
+          "default": "medium",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        },
+        "corrected_form": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Corrected Form"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "distinct": {
+          "default": false,
+          "title": "Distinct",
+          "type": "boolean"
+        },
+        "explanation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Explanation"
+        },
+        "learner_form": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Learner Form"
+        },
+        "meaning_impact": {
+          "default": "minor",
+          "title": "Meaning Impact",
+          "type": "string"
+        },
+        "package_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Id"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response"
+        },
+        "response_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Hash"
+        },
+        "response_visibility": {
+          "anyOf": [
+            {
+              "enum": [
+                "withheld",
+                "excerpt",
+                "full"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Visibility"
+        },
+        "severity": {
+          "default": "medium",
+          "title": "Severity",
+          "type": "string"
+        },
+        "signature": {
+          "minLength": 1,
+          "title": "Signature",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "package",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "transcript_layer": {
+          "anyOf": [
+            {
+              "enum": [
+                "raw",
+                "normalized",
+                "reviewed-hearing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transcript Layer"
+        },
+        "utterance_id": {
+          "anyOf": [
+            {
+              "pattern": "^utt_[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Utterance Id"
+        }
+      },
+      "required": [
+        "category",
+        "signature",
+        "description"
+      ],
+      "title": "StagedCorrectionPayload",
+      "type": "object"
+    },
+    "StagedFollowUpEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "activity": {
+          "anyOf": [
+            {
+              "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "pattern": "^blk_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block"
+        },
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "follow_up",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/StagedFollowUpPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "StagedFollowUpEvent",
+      "type": "object"
+    },
+    "StagedFollowUpPayload": {
+      "additionalProperties": false,
+      "description": "Something to come back to, with an optional due window.",
+      "properties": {
+        "action": {
+          "minLength": 1,
+          "title": "Action",
+          "type": "string"
+        },
+        "due_by": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "(?:Z|\\+00:00)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Due By"
+        },
+        "due_from": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "(?:Z|\\+00:00)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Due From"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "package_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Id"
+        },
+        "priority": {
+          "default": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response"
+        },
+        "response_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Hash"
+        },
+        "response_visibility": {
+          "anyOf": [
+            {
+              "enum": [
+                "withheld",
+                "excerpt",
+                "full"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Visibility"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "package",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "transcript_layer": {
+          "anyOf": [
+            {
+              "enum": [
+                "raw",
+                "normalized",
+                "reviewed-hearing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transcript Layer"
+        },
+        "utterance_id": {
+          "anyOf": [
+            {
+              "pattern": "^utt_[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Utterance Id"
+        }
+      },
+      "required": [
+        "kind",
+        "action"
+      ],
+      "title": "StagedFollowUpPayload",
+      "type": "object"
+    },
+    "StagedObservationEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "activity": {
+          "anyOf": [
+            {
+              "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "pattern": "^blk_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block"
+        },
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "observation.noted",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/StagedObservationPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "StagedObservationEvent",
+      "type": "object"
+    },
+    "StagedObservationPayload": {
+      "additionalProperties": false,
+      "description": "A note about the session rather than about an item: fatigue, strategy, confidence.",
+      "properties": {
+        "category": {
+          "enum": [
+            "fatigue",
+            "confidence",
+            "strategy",
+            "notable-success",
+            "note"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "note": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Note",
+          "type": "string"
+        },
+        "package_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Id"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response"
+        },
+        "response_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Hash"
+        },
+        "response_visibility": {
+          "anyOf": [
+            {
+              "enum": [
+                "withheld",
+                "excerpt",
+                "full"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Visibility"
+        },
+        "salience": {
+          "default": "medium",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Salience",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "package",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "transcript_layer": {
+          "anyOf": [
+            {
+              "enum": [
+                "raw",
+                "normalized",
+                "reviewed-hearing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transcript Layer"
+        },
+        "utterance_id": {
+          "anyOf": [
+            {
+              "pattern": "^utt_[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Utterance Id"
+        }
+      },
+      "required": [
+        "category",
+        "note"
+      ],
+      "title": "StagedObservationPayload",
+      "type": "object"
+    },
+    "StagedPronunciationEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "activity": {
+          "anyOf": [
+            {
+              "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "pattern": "^blk_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block"
+        },
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "pronunciation.assessment",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/StagedPronunciationPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "StagedPronunciationEvent",
+      "type": "object"
+    },
+    "StagedPronunciationPayload": {
+      "additionalProperties": false,
+      "description": "One pronunciation observation, and what it is based on.\n\n`confirmed` requires audio. A correct transcript proves nothing about how something\nsounded, so a transcript-based observation is recorded as `observed` or `uncertain`\nand never becomes a confirmed pronunciation claim at close.",
+      "properties": {
+        "audio_artifact_id": {
+          "anyOf": [
+            {
+              "pattern": "^art_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audio Artifact Id"
+        },
+        "dimension": {
+          "default": "pronunciation",
+          "title": "Dimension",
+          "type": "string"
+        },
+        "note": {
+          "minLength": 1,
+          "title": "Note",
+          "type": "string"
+        },
+        "package_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Id"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response"
+        },
+        "response_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Hash"
+        },
+        "response_visibility": {
+          "anyOf": [
+            {
+              "enum": [
+                "withheld",
+                "excerpt",
+                "full"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Visibility"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "package",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "status": {
+          "enum": [
+            "observed",
+            "uncertain",
+            "confirmed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "transcript_layer": {
+          "anyOf": [
+            {
+              "enum": [
+                "raw",
+                "normalized",
+                "reviewed-hearing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transcript Layer"
+        },
+        "utterance_id": {
+          "anyOf": [
+            {
+              "pattern": "^utt_[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Utterance Id"
+        }
+      },
+      "required": [
+        "status",
+        "note"
+      ],
+      "title": "StagedPronunciationPayload",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One flush: an ordered, bounded set of observations from one block.\n\nThe sequence number and the idempotency key are what make a retry safe. A batch that\narrives twice with the same key and the same content is accepted once; the same key\nwith different content is a conflict rather than an overwrite, because the second\ncall would otherwise silently discard the first call's observations.",
+  "properties": {
+    "block": {
+      "anyOf": [
+        {
+          "pattern": "^blk_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Block"
+    },
+    "content_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Content Hash"
+    },
+    "events": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "attempt.observed": "#/$defs/StagedAttemptEvent",
+            "correction.given": "#/$defs/StagedCorrectionEvent",
+            "follow_up": "#/$defs/StagedFollowUpEvent",
+            "observation.noted": "#/$defs/StagedObservationEvent",
+            "pronunciation.assessment": "#/$defs/StagedPronunciationEvent"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/StagedAttemptEvent"
+          },
+          {
+            "$ref": "#/$defs/StagedCorrectionEvent"
+          },
+          {
+            "$ref": "#/$defs/StagedPronunciationEvent"
+          },
+          {
+            "$ref": "#/$defs/StagedObservationEvent"
+          },
+          {
+            "$ref": "#/$defs/StagedFollowUpEvent"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Events",
+      "type": "array"
+    },
+    "idempotency_key": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "lingua.session.events.v1",
+      "default": "lingua.session.events.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sequence": {
+      "minimum": 1,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    }
+  },
+  "required": [
+    "sequence",
+    "idempotency_key",
+    "events"
+  ],
+  "title": "SessionEventBatch",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.session.events.v1"
+}

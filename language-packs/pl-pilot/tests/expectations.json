@@ -1,0 +1,36 @@
+{
+  "maturity": "pilot",
+  "minimum_counts": {
+    "activity_templates": 6,
+    "descriptors": 21,
+    "examples": 30,
+    "grammar": 18,
+    "objective_tasks": 24,
+    "productive_prompts": 8,
+    "reviewed_knowledge": 80,
+    "script": 11,
+    "source_recommendations": 4
+  },
+  "refuses_maturity": [
+    "onboarding-ready",
+    "placement-ready"
+  ],
+  "required_dimensions": [
+    "reading",
+    "listening",
+    "vocabulary-control",
+    "grammar-control",
+    "writing",
+    "spoken-production",
+    "pronunciation"
+  ],
+  "required_themes": [
+    "podróże",
+    "jedzenie",
+    "praca i biuro",
+    "zdrowie",
+    "dom i codzienność"
+  ],
+  "schema_name": "lingua.pack.expectations.v1",
+  "schema_version": 1
+}

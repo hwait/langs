@@ -1,0 +1,609 @@
+{
+  "application_version": "0.1.0",
+  "database_schema_version": 7,
+  "duckdb_version": "1.5.5",
+  "exported_at": "2026-01-01T00:00:17Z",
+  "migrations": [
+    [
+      1,
+      "0001_schema_migration_history",
+      "0298a8fa36fdcad22f4f2bc9cc883748c489a5b5328ce32164494a8c4b78c293"
+    ],
+    [
+      2,
+      "0002_workspace_identity",
+      "908130a370d0e917f19f05548f26a3b1b45f4a66de30fd70f3753980a41a7cb5"
+    ],
+    [
+      3,
+      "0003_users_and_languages",
+      "2aa2070ce15ff77c40fd410b4249c99aaf450a210a8f050b982efb3059806f97"
+    ],
+    [
+      4,
+      "0004_tracks_preferences_settings",
+      "f160260106c8c119a7d69f43c7b0c8bbaa80668c5f34097fff0e54f414755941"
+    ],
+    [
+      5,
+      "0005_pack_and_framework_registry",
+      "d7fe609f7764965912eaf2723ea0272d81d0d8d0a9cf3e2fbd9f0988268c1bde"
+    ],
+    [
+      6,
+      "0006_domain_events_and_audit",
+      "2b8cd579b2b1a5487908381940e1ba99c11e853f4f7f98cf64f354bbbd512402"
+    ],
+    [
+      7,
+      "0007_projection_and_job_state",
+      "4db504bdc4fa413ddf520b5471e3bf0932f915d4b92c3776b50e3be0a4d1ee24"
+    ]
+  ],
+  "schema_name": "linguawiki.portable-export.v1",
+  "schema_version": 1,
+  "tables": [
+    {
+      "columns": [
+        [
+          "version",
+          "INTEGER"
+        ],
+        [
+          "migration_id",
+          "VARCHAR"
+        ],
+        [
+          "checksum",
+          "VARCHAR"
+        ],
+        [
+          "application_version",
+          "VARCHAR"
+        ],
+        [
+          "applied_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "schema_migrations.parquet",
+      "row_count": 7,
+      "table": "schema_migrations"
+    },
+    {
+      "columns": [
+        [
+          "workspace_id",
+          "VARCHAR"
+        ],
+        [
+          "is_singleton",
+          "BOOLEAN"
+        ],
+        [
+          "name",
+          "VARCHAR"
+        ],
+        [
+          "normalized_name",
+          "VARCHAR"
+        ],
+        [
+          "history_policy",
+          "VARCHAR"
+        ],
+        [
+          "track_policy",
+          "VARCHAR"
+        ],
+        [
+          "timezone",
+          "VARCHAR"
+        ],
+        [
+          "created_at",
+          "TIMESTAMP"
+        ],
+        [
+          "updated_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "workspaces.parquet",
+      "row_count": 1,
+      "table": "workspaces"
+    },
+    {
+      "columns": [
+        [
+          "workspace_id",
+          "VARCHAR"
+        ],
+        [
+          "component",
+          "VARCHAR"
+        ],
+        [
+          "component_key",
+          "VARCHAR"
+        ],
+        [
+          "version",
+          "VARCHAR"
+        ],
+        [
+          "sha256",
+          "VARCHAR"
+        ],
+        [
+          "applied_at",
+          "TIMESTAMP"
+        ],
+        [
+          "audit_event_id",
+          "VARCHAR"
+        ]
+      ],
+      "file": "workspace_versions.parquet",
+      "row_count": 3,
+      "table": "workspace_versions"
+    },
+    {
+      "columns": [
+        [
+          "user_id",
+          "VARCHAR"
+        ],
+        [
+          "workspace_id",
+          "VARCHAR"
+        ],
+        [
+          "display_name",
+          "VARCHAR"
+        ],
+        [
+          "timezone",
+          "VARCHAR"
+        ],
+        [
+          "status",
+          "VARCHAR"
+        ],
+        [
+          "created_at",
+          "TIMESTAMP"
+        ],
+        [
+          "updated_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "users.parquet",
+      "row_count": 0,
+      "table": "users"
+    },
+    {
+      "columns": [
+        [
+          "user_id",
+          "VARCHAR"
+        ],
+        [
+          "language_tag",
+          "VARCHAR"
+        ],
+        [
+          "role",
+          "VARCHAR"
+        ],
+        [
+          "preference_order",
+          "INTEGER"
+        ],
+        [
+          "created_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "user_languages.parquet",
+      "row_count": 0,
+      "table": "user_languages"
+    },
+    {
+      "columns": [
+        [
+          "track_id",
+          "VARCHAR"
+        ],
+        [
+          "user_id",
+          "VARCHAR"
+        ],
+        [
+          "target_language",
+          "VARCHAR"
+        ],
+        [
+          "region",
+          "VARCHAR"
+        ],
+        [
+          "script",
+          "VARCHAR"
+        ],
+        [
+          "proficiency_framework",
+          "VARCHAR"
+        ],
+        [
+          "declared_level",
+          "VARCHAR"
+        ],
+        [
+          "current_level",
+          "VARCHAR"
+        ],
+        [
+          "target_level",
+          "VARCHAR"
+        ],
+        [
+          "goal",
+          "VARCHAR"
+        ],
+        [
+          "status",
+          "VARCHAR"
+        ],
+        [
+          "is_primary",
+          "BOOLEAN"
+        ],
+        [
+          "weekly_minutes",
+          "INTEGER"
+        ],
+        [
+          "timezone",
+          "VARCHAR"
+        ],
+        [
+          "created_at",
+          "TIMESTAMP"
+        ],
+        [
+          "updated_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "learning_tracks.parquet",
+      "row_count": 0,
+      "table": "learning_tracks"
+    },
+    {
+      "columns": [
+        [
+          "track_id",
+          "VARCHAR"
+        ],
+        [
+          "key",
+          "VARCHAR"
+        ],
+        [
+          "value_json",
+          "VARCHAR"
+        ],
+        [
+          "updated_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "track_preferences.parquet",
+      "row_count": 0,
+      "table": "track_preferences"
+    },
+    {
+      "columns": [
+        [
+          "scope",
+          "VARCHAR"
+        ],
+        [
+          "scope_id",
+          "VARCHAR"
+        ],
+        [
+          "key",
+          "VARCHAR"
+        ],
+        [
+          "value_json",
+          "VARCHAR"
+        ],
+        [
+          "schema_version",
+          "INTEGER"
+        ],
+        [
+          "updated_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "settings.parquet",
+      "row_count": 1,
+      "table": "settings"
+    },
+    {
+      "columns": [
+        [
+          "framework_id",
+          "VARCHAR"
+        ],
+        [
+          "name",
+          "VARCHAR"
+        ],
+        [
+          "version",
+          "VARCHAR"
+        ],
+        [
+          "source",
+          "VARCHAR"
+        ],
+        [
+          "created_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "proficiency_frameworks.parquet",
+      "row_count": 0,
+      "table": "proficiency_frameworks"
+    },
+    {
+      "columns": [
+        [
+          "framework_id",
+          "VARCHAR"
+        ],
+        [
+          "level_code",
+          "VARCHAR"
+        ],
+        [
+          "sequence",
+          "INTEGER"
+        ]
+      ],
+      "file": "proficiency_framework_levels.parquet",
+      "row_count": 0,
+      "table": "proficiency_framework_levels"
+    },
+    {
+      "columns": [
+        [
+          "pack_id",
+          "VARCHAR"
+        ],
+        [
+          "pack_name",
+          "VARCHAR"
+        ],
+        [
+          "language_tag",
+          "VARCHAR"
+        ],
+        [
+          "version",
+          "VARCHAR"
+        ],
+        [
+          "checksum",
+          "VARCHAR"
+        ],
+        [
+          "maturity",
+          "VARCHAR"
+        ],
+        [
+          "framework_id",
+          "VARCHAR"
+        ],
+        [
+          "capabilities_json",
+          "VARCHAR"
+        ],
+        [
+          "installed_at",
+          "TIMESTAMP"
+        ],
+        [
+          "updated_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "language_packs.parquet",
+      "row_count": 0,
+      "table": "language_packs"
+    },
+    {
+      "columns": [
+        [
+          "event_id",
+          "VARCHAR"
+        ],
+        [
+          "event_type",
+          "VARCHAR"
+        ],
+        [
+          "aggregate_type",
+          "VARCHAR"
+        ],
+        [
+          "aggregate_id",
+          "VARCHAR"
+        ],
+        [
+          "schema_version",
+          "INTEGER"
+        ],
+        [
+          "payload_json",
+          "VARCHAR"
+        ],
+        [
+          "correlation_id",
+          "VARCHAR"
+        ],
+        [
+          "idempotency_key",
+          "VARCHAR"
+        ],
+        [
+          "occurred_at",
+          "TIMESTAMP"
+        ],
+        [
+          "recorded_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "domain_events.parquet",
+      "row_count": 1,
+      "table": "domain_events"
+    },
+    {
+      "columns": [
+        [
+          "audit_id",
+          "VARCHAR"
+        ],
+        [
+          "actor",
+          "VARCHAR"
+        ],
+        [
+          "command",
+          "VARCHAR"
+        ],
+        [
+          "correlation_id",
+          "VARCHAR"
+        ],
+        [
+          "outcome",
+          "VARCHAR"
+        ],
+        [
+          "affected_records_json",
+          "VARCHAR"
+        ],
+        [
+          "before_summary",
+          "VARCHAR"
+        ],
+        [
+          "after_summary",
+          "VARCHAR"
+        ],
+        [
+          "recorded_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "audit_log.parquet",
+      "row_count": 1,
+      "table": "audit_log"
+    },
+    {
+      "columns": [
+        [
+          "projection",
+          "VARCHAR"
+        ],
+        [
+          "projection_version",
+          "INTEGER"
+        ],
+        [
+          "last_event_id",
+          "VARCHAR"
+        ],
+        [
+          "content_hash",
+          "VARCHAR"
+        ],
+        [
+          "stale",
+          "BOOLEAN"
+        ],
+        [
+          "generated_at",
+          "TIMESTAMP"
+        ],
+        [
+          "updated_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "projection_state.parquet",
+      "row_count": 1,
+      "table": "projection_state"
+    },
+    {
+      "columns": [
+        [
+          "job_id",
+          "VARCHAR"
+        ],
+        [
+          "kind",
+          "VARCHAR"
+        ],
+        [
+          "status",
+          "VARCHAR"
+        ],
+        [
+          "correlation_id",
+          "VARCHAR"
+        ],
+        [
+          "error_code",
+          "VARCHAR"
+        ],
+        [
+          "error_message",
+          "VARCHAR"
+        ],
+        [
+          "error_details_json",
+          "VARCHAR"
+        ],
+        [
+          "started_at",
+          "TIMESTAMP"
+        ],
+        [
+          "finished_at",
+          "TIMESTAMP"
+        ],
+        [
+          "created_at",
+          "TIMESTAMP"
+        ],
+        [
+          "updated_at",
+          "TIMESTAMP"
+        ]
+      ],
+      "file": "jobs.parquet",
+      "row_count": 0,
+      "table": "jobs"
+    }
+  ],
+  "workspace_id": "wsp_01M1H6WPVXDYMNZPWETG4AS8HT"
+}

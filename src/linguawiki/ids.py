@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 import time
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Any, ClassVar, Self
 
@@ -27,11 +29,20 @@ class IdPrefix(StrEnum):
     ATTEMPT = "att"
     EVIDENCE = "evd"
     ERROR = "err"
+    OBSERVATION = "obs"
+    FOLLOWUP = "fup"
+    ESTIMATE = "est"
     REVIEW = "rev"
     ASSESSMENT = "asm"
     ANKI_NOTE = "ank"
     EVENT = "evt"
     ARTIFACT = "art"
+    # Stage 4: the session engine's own rows. A batch, one staged event, the record that
+    # a close happened, and one ingestion of an externally produced package.
+    BATCH = "bat"
+    STAGED_EVENT = "sev"
+    FINALIZATION = "fin"
+    INGESTION = "ing"
 
 
 def _encode_ulid(value: int) -> str:
@@ -50,6 +61,31 @@ def new_id(prefix: IdPrefix, *, timestamp_ms: int | None = None) -> str:
         raise ValueError("timestamp_ms must fit in 48 bits")
     payload = (current_ms << 80) | secrets.randbits(80)
     return f"{prefix}_{_encode_ulid(payload)}"
+
+
+def derive_id(prefix: IdPrefix, *parts: str) -> str:
+    """Create a deterministic identifier from a namespace path.
+
+    Pack content is content-addressed, so reinstalling the same pack version must
+    produce the same identifiers or every learner annotation would be orphaned by a
+    reinstall. The digest of the joined parts is encoded in the same alphabet as a
+    generated ULID, so a derived ID is indistinguishable from a random one at the type
+    boundary and needs no separate validation rule. Parts are NUL-separated, so
+    ('a', 'bc') and ('ab', 'c') cannot collide.
+    """
+
+    if not parts or any(not part for part in parts):
+        raise ValueError("derive_id requires at least one non-empty part")
+    digest = hashlib.sha256("\0".join(parts).encode("utf-8")).digest()
+    # 26 Crockford characters hold 130 bits; take the leading 130 of the digest.
+    value = int.from_bytes(digest[:17], "big") >> 6
+    return f"{prefix}_{_encode_ulid(value)}"
+
+
+def derive_ids(prefix: IdPrefix, namespaces: Iterable[tuple[str, ...]]) -> tuple[str, ...]:
+    """Derive several identifiers from their namespace paths."""
+
+    return tuple(derive_id(prefix, *namespace) for namespace in namespaces)
 
 
 def validate_id(value: str, prefix: IdPrefix) -> str:
@@ -72,6 +108,12 @@ class OpaqueId(str):
     @classmethod
     def new(cls) -> Self:
         return cls(new_id(cls.prefix))
+
+    @classmethod
+    def derive(cls, *parts: str) -> Self:
+        """Derive this ID deterministically from a namespace path."""
+
+        return cls(derive_id(cls.prefix, *parts))
 
     @classmethod
     def __get_pydantic_core_schema__(cls, _source_type: Any, _handler: Any) -> CoreSchema:
@@ -129,6 +171,18 @@ class ErrorId(OpaqueId):
     prefix = IdPrefix.ERROR
 
 
+class ObservationId(OpaqueId):
+    prefix = IdPrefix.OBSERVATION
+
+
+class FollowUpId(OpaqueId):
+    prefix = IdPrefix.FOLLOWUP
+
+
+class EstimateId(OpaqueId):
+    prefix = IdPrefix.ESTIMATE
+
+
 class ReviewId(OpaqueId):
     prefix = IdPrefix.REVIEW
 
@@ -147,3 +201,19 @@ class EventId(OpaqueId):
 
 class ArtifactId(OpaqueId):
     prefix = IdPrefix.ARTIFACT
+
+
+class BatchId(OpaqueId):
+    prefix = IdPrefix.BATCH
+
+
+class StagedEventId(OpaqueId):
+    prefix = IdPrefix.STAGED_EVENT
+
+
+class FinalizationId(OpaqueId):
+    prefix = IdPrefix.FINALIZATION
+
+
+class IngestionId(OpaqueId):
+    prefix = IdPrefix.INGESTION

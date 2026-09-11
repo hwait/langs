@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What the language needs, asked as capability questions rather than by name.",
+  "properties": {
+    "adapters": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Adapters",
+      "type": "object"
+    },
+    "aspect": {
+      "default": false,
+      "title": "Aspect",
+      "type": "boolean"
+    },
+    "extensions": {
+      "additionalProperties": true,
+      "title": "Extensions",
+      "type": "object"
+    },
+    "grammatical_case": {
+      "title": "Grammatical Case",
+      "type": "boolean"
+    },
+    "inflection": {
+      "title": "Inflection",
+      "type": "boolean"
+    },
+    "pronunciation_contrasts": {
+      "default": false,
+      "title": "Pronunciation Contrasts",
+      "type": "boolean"
+    },
+    "romanization": {
+      "default": false,
+      "title": "Romanization",
+      "type": "boolean"
+    },
+    "schema_name": {
+      "const": "lingua.pack.capabilities.v1",
+      "default": "lingua.pack.capabilities.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "script_learning_required": {
+      "default": false,
+      "title": "Script Learning Required",
+      "type": "boolean"
+    },
+    "tone": {
+      "default": false,
+      "title": "Tone",
+      "type": "boolean"
+    },
+    "word_segmentation": {
+      "enum": [
+        "whitespace",
+        "pack-adapter",
+        "none"
+      ],
+      "title": "Word Segmentation",
+      "type": "string"
+    }
+  },
+  "required": [
+    "word_segmentation",
+    "inflection",
+    "grammatical_case"
+  ],
+  "title": "PackCapabilities",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.pack.capabilities.v1"
+}

@@ -1,0 +1,13 @@
+[
+  {
+    "created_at": "2026-01-01T00:00:01Z",
+    "history_policy": "git-wiki",
+    "is_singleton": true,
+    "name": "Synthetic LinguaWiki",
+    "normalized_name": "synthetic-linguawiki",
+    "timezone": "UTC",
+    "track_policy": "single",
+    "updated_at": "2026-01-01T00:00:11Z",
+    "workspace_id": "wsp_01M1H6WPVXDYMNZPWETG4AS8HT"
+  }
+]

@@ -1,0 +1,163 @@
+[
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.634953Z",
+    "checksum": "0298a8fa36fdcad22f4f2bc9cc883748c489a5b5328ce32164494a8c4b78c293",
+    "migration_id": "0001_schema_migration_history",
+    "version": 1
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.640120Z",
+    "checksum": "908130a370d0e917f19f05548f26a3b1b45f4a66de30fd70f3753980a41a7cb5",
+    "migration_id": "0002_workspace_identity",
+    "version": 2
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.641579Z",
+    "checksum": "2aa2070ce15ff77c40fd410b4249c99aaf450a210a8f050b982efb3059806f97",
+    "migration_id": "0003_users_and_languages",
+    "version": 3
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.642528Z",
+    "checksum": "f160260106c8c119a7d69f43c7b0c8bbaa80668c5f34097fff0e54f414755941",
+    "migration_id": "0004_tracks_preferences_settings",
+    "version": 4
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.643630Z",
+    "checksum": "d7fe609f7764965912eaf2723ea0272d81d0d8d0a9cf3e2fbd9f0988268c1bde",
+    "migration_id": "0005_pack_and_framework_registry",
+    "version": 5
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.644566Z",
+    "checksum": "2b8cd579b2b1a5487908381940e1ba99c11e853f4f7f98cf64f354bbbd512402",
+    "migration_id": "0006_domain_events_and_audit",
+    "version": 6
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.645385Z",
+    "checksum": "4db504bdc4fa413ddf520b5471e3bf0932f915d4b92c3776b50e3be0a4d1ee24",
+    "migration_id": "0007_projection_and_job_state",
+    "version": 7
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.647281Z",
+    "checksum": "62a25ff09337c85c8c91d85d19f6a938fbf5466b38fcb1fd664ed4629e63338f",
+    "migration_id": "0008_pack_registry",
+    "version": 8
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.649279Z",
+    "checksum": "ded1355a42e60ceaf210018bd76eb30c8eecc6cf89f672442f1fb64f5f9c06b9",
+    "migration_id": "0009_content_provenance",
+    "version": 9
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.651008Z",
+    "checksum": "c7a6fb0cff29f4ccde3f4e45a5924746765aa583d5d63b72a9f0cf7a27076f50",
+    "migration_id": "0010_pack_catalog",
+    "version": 10
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.652838Z",
+    "checksum": "f4e22bd7338d06f2abe19ca48ee8759d71cc6446105ce186d8b9d1a288737567",
+    "migration_id": "0011_knowledge_graph",
+    "version": 11
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.655464Z",
+    "checksum": "9d2eee72e500d3a8d0e1580787ad07b3c5209ac79ab68cb80c06814c916629eb",
+    "migration_id": "0012_assessment_bank",
+    "version": 12
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.657376Z",
+    "checksum": "809772de20c012de1c3b2a50289fe7567384a4ce2a1456a2fb50ce2ccceaaad5",
+    "migration_id": "0013_onboarding_and_resources",
+    "version": 13
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.659397Z",
+    "checksum": "04d4f904a05f8c95d1206576a67aad47f98764ed0b9e0dc1f039d042461ab956",
+    "migration_id": "0014_curriculum",
+    "version": 14
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.660272Z",
+    "checksum": "4b947c4d281c6664b8ee31a2dcbb8bb7beff5933d659125312191f14a0032da0",
+    "migration_id": "0015_track_pack_binding",
+    "version": 15
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.666844Z",
+    "checksum": "d9c71e75c5ca0943b98097715f29347e3881965a36b15cc8a74bd66baf5fbbac",
+    "migration_id": "0016_run_task_facts_and_pack_levels",
+    "version": 16
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.667520Z",
+    "checksum": "919c5c1cfcc95dd753ee91a392cd7fd4e9995c9825fc0899ec52aea6ef4f12bf",
+    "migration_id": "0017_track_replacement",
+    "version": 17
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.668115Z",
+    "checksum": "1c865efe74f7490b4b1eefa4bbd5e0d00d3478b5705c3ff1cc3150ae4d6d88ff",
+    "migration_id": "0018_definition_status",
+    "version": 18
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.669502Z",
+    "checksum": "f62ce207ee2c9a76b84c880f70497b27086c85922ce6dcf2b54d82b4bb4ef05b",
+    "migration_id": "0019_attempts_and_evidence",
+    "version": 19
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.670973Z",
+    "checksum": "f46c06b8d9bff30ebcbdff3d69c178ac7fe0ccf56e63294739d2c8f6c2c7df27",
+    "migration_id": "0020_error_model",
+    "version": 20
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.672602Z",
+    "checksum": "5fd36ffafd9a910cb52d61860b739d4160247a9c54226be38a1e031d69ca6612",
+    "migration_id": "0021_mastery_and_estimate_history",
+    "version": 21
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.673298Z",
+    "checksum": "aef267ca623346bf4d295767f1acbd70d9e96d8aa166300b9947890c00400e87",
+    "migration_id": "0022_served_task_targets",
+    "version": 22
+  },
+  {
+    "application_version": "0.1.0",
+    "applied_at": "2026-09-10T11:04:13.676453Z",
+    "checksum": "5fdbf71406454777fbfb602576410644d34c117aa1d2dc8d944ebe680b44ad26",
+    "migration_id": "0023_session_engine",
+    "version": 23
+  }
+]

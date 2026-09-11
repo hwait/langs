@@ -1,0 +1,7 @@
+interface:
+  display_name: "LinguaWiki setup"
+  short_description: "Set up a learner, a language track, and its first two weeks"
+  default_prompt: "Use $linguawiki-init to set up a new language for this learner."
+
+policy:
+  allow_implicit_invocation: true

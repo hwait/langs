@@ -1,0 +1,7 @@
+interface:
+  display_name: "LinguaWiki assessment"
+  short_description: "Run a bounded calibration or placement and report its uncertainty"
+  default_prompt: "Use $linguawiki-assess to calibrate this learner's level."
+
+policy:
+  allow_implicit_invocation: true

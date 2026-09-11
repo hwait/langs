@@ -1,0 +1,464 @@
+{
+  "$defs": {
+    "OriginClass": {
+      "description": "Controlled item-level origin classes from the pack-authoring workflow.",
+      "enum": [
+        "authentic-source",
+        "learner-produced",
+        "source-derived",
+        "ai-adapted",
+        "ai-generated",
+        "synthetic-media",
+        "human-authored"
+      ],
+      "title": "OriginClass",
+      "type": "string"
+    },
+    "PackBundleDeclaration": {
+      "additionalProperties": false,
+      "properties": {
+        "bundle_key": {
+          "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+          "title": "Bundle Key",
+          "type": "string"
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "file": {
+          "minLength": 1,
+          "title": "File",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bundle_key",
+        "file"
+      ],
+      "title": "PackBundleDeclaration",
+      "type": "object"
+    },
+    "PackFramework": {
+      "additionalProperties": false,
+      "properties": {
+        "framework_id": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "title": "Framework Id",
+          "type": "string"
+        },
+        "levels": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Levels",
+          "type": "array"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "framework_id",
+        "name",
+        "version",
+        "levels"
+      ],
+      "title": "PackFramework",
+      "type": "object"
+    },
+    "PackItemOrigin": {
+      "additionalProperties": false,
+      "description": "One origin of a persistent pack item.",
+      "properties": {
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locator"
+        },
+        "origin_class": {
+          "$ref": "#/$defs/OriginClass"
+        },
+        "origin_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin Hash"
+        },
+        "privacy": {
+          "enum": [
+            "public",
+            "private",
+            "synthetic"
+          ],
+          "title": "Privacy",
+          "type": "string"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
+        },
+        "rights": {
+          "minLength": 1,
+          "title": "Rights",
+          "type": "string"
+        },
+        "transformation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transformation"
+        }
+      },
+      "required": [
+        "origin_class",
+        "rights",
+        "privacy"
+      ],
+      "title": "PackItemOrigin",
+      "type": "object"
+    },
+    "PackItemReview": {
+      "additionalProperties": false,
+      "description": "One review axis of one item, in that axis's own state vocabulary.\n\nThe state vocabulary differs per axis on purpose: `cleared` means something for\nrights and nothing for pronunciation correctness. `services.provenance` maps each\nstate onto the pass/pending/fail gate the frozen content contract enforces.",
+      "properties": {
+        "evidence_reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Reference"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Method"
+        },
+        "reviewer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reviewer"
+        },
+        "reviewer_kind": {
+          "$ref": "#/$defs/ReviewerKind"
+        },
+        "state": {
+          "minLength": 1,
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "reviewer_kind"
+      ],
+      "title": "PackItemReview",
+      "type": "object"
+    },
+    "PackMaturity": {
+      "description": "What a pack may promise. Onboarding offers only what the level supports.",
+      "enum": [
+        "fixture",
+        "pilot",
+        "onboarding-ready",
+        "placement-ready"
+      ],
+      "title": "PackMaturity",
+      "type": "string"
+    },
+    "ReviewerKind": {
+      "enum": [
+        "machine",
+        "ai",
+        "learner",
+        "human",
+        "not-applicable"
+      ],
+      "title": "ReviewerKind",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`manifest.json`: the pack's identity, promises, and content address.",
+  "properties": {
+    "bands": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Bands",
+      "type": "array"
+    },
+    "bundles": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PackBundleDeclaration"
+      },
+      "title": "Bundles",
+      "type": "array"
+    },
+    "content_address": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Content Address"
+    },
+    "data_format_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Data Format Version",
+      "type": "integer"
+    },
+    "dimension_kinds": {
+      "additionalProperties": {
+        "enum": [
+          "receptive",
+          "productive",
+          "form",
+          "pronunciation"
+        ],
+        "type": "string"
+      },
+      "title": "Dimension Kinds",
+      "type": "object"
+    },
+    "dimensions": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Dimensions",
+      "type": "array"
+    },
+    "files": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Files",
+      "type": "object"
+    },
+    "frameworks": {
+      "items": {
+        "$ref": "#/$defs/PackFramework"
+      },
+      "minItems": 1,
+      "title": "Frameworks",
+      "type": "array"
+    },
+    "language": {
+      "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
+      "title": "Language",
+      "type": "string"
+    },
+    "license": {
+      "minLength": 1,
+      "title": "License",
+      "type": "string"
+    },
+    "maintainers": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Maintainers",
+      "type": "array"
+    },
+    "maturity": {
+      "$ref": "#/$defs/PackMaturity"
+    },
+    "modalities": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Modalities",
+      "type": "array"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "origin_profiles": {
+      "additionalProperties": {
+        "items": {
+          "$ref": "#/$defs/PackItemOrigin"
+        },
+        "type": "array"
+      },
+      "title": "Origin Profiles",
+      "type": "object"
+    },
+    "pack_key": {
+      "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+      "title": "Pack Key",
+      "type": "string"
+    },
+    "review_profiles": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "$ref": "#/$defs/PackItemReview"
+        },
+        "propertyNames": {
+          "enum": [
+            "linguistic",
+            "pedagogical",
+            "source-alignment",
+            "rights",
+            "privacy"
+          ]
+        },
+        "type": "object"
+      },
+      "title": "Review Profiles",
+      "type": "object"
+    },
+    "schema_name": {
+      "const": "lingua.pack.v1",
+      "default": "lingua.pack.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "scripts": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Scripts",
+      "type": "array"
+    },
+    "support_languages": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Support Languages",
+      "type": "array"
+    },
+    "themes": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Themes",
+      "type": "array"
+    },
+    "version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$",
+      "title": "Version",
+      "type": "string"
+    },
+    "writing_direction": {
+      "default": "ltr",
+      "enum": [
+        "ltr",
+        "rtl",
+        "ttb"
+      ],
+      "title": "Writing Direction",
+      "type": "string"
+    }
+  },
+  "required": [
+    "pack_key",
+    "name",
+    "version",
+    "language",
+    "license",
+    "maintainers",
+    "maturity",
+    "frameworks",
+    "bands",
+    "dimensions",
+    "dimension_kinds",
+    "modalities"
+  ],
+  "title": "PackManifest",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.pack.v1"
+}

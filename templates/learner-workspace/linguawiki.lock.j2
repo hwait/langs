@@ -1,8 +1,8 @@
 {
   "schema_name": "linguawiki.lock.v1",
   "schema_version": 1,
-  "core": {"version": "{{ core_version }}", "sha256": "{{ core_sha256 }}"},
-  "database_schema": {"version": "{{ database_schema_version }}", "sha256": "{{ database_schema_sha256 }}"},
-  "skill_bundle": {"version": "{{ skill_bundle_version }}", "sha256": "{{ skill_bundle_sha256 }}"},
+  "core": {"version": {{ core_version | jsonstr }}, "sha256": {{ core_sha256 | jsonstr }}},
+  "database_schema": {"version": {{ database_schema_version | jsonstr }}, "sha256": {{ database_schema_sha256 | jsonstr }}},
+  "skill_bundle": {"version": {{ skill_bundle_version | jsonstr }}, "sha256": {{ skill_bundle_sha256 | jsonstr }}},
   "packs": []
 }

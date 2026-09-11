@@ -217,3 +217,159 @@ def test_every_published_date_time_is_structurally_restricted_to_utc() -> None:
 
     assert nodes
     assert all(node.get("pattern") == r"(?:Z|\+00:00)$" for node in nodes)
+
+
+# --- Model output must satisfy its own published schema -----------------------------
+
+
+def staged_event(kind: str, payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "event_id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "kind": kind,
+        "occurred_at": "2026-01-01T09:00:00Z",
+        "payload": payload,
+    }
+
+
+#: One of every staged event kind, each with only its required fields, so the defaults
+#: are the values under test. The defect this guards was exactly a default: a nullable
+#: vocabulary field dumped `null`, which its own published schema rejected.
+MINIMAL_EVENTS: tuple[dict[str, object], ...] = (
+    staged_event(
+        "attempt.observed",
+        {"task_type": "objective", "modality": "text", "score": 1.0, "dimension": "reading"},
+    ),
+    staged_event(
+        "correction.given",
+        {
+            "category": "case-government",
+            "signature": "szukam bilet",
+            "description": "Accusative where the verb governs the genitive.",
+        },
+    ),
+    staged_event(
+        "pronunciation.assessment", {"status": "uncertain", "note": "Nasal vowel flattened."}
+    ),
+    staged_event("observation.noted", {"category": "fatigue", "note": "Flagging near the end."}),
+    staged_event("follow_up", {"kind": "practice", "action": "Drill the genitive again."}),
+)
+
+
+@pytest.mark.parametrize("event", MINIMAL_EVENTS, ids=lambda event: str(event["kind"]))
+def test_a_batch_the_model_accepts_satisfies_its_published_schema(
+    event: dict[str, object],
+) -> None:
+    """Runtime validation and the published schema must agree in both directions.
+
+    They disagreed: `response_visibility` is `str | None`, and the vocabulary was
+    published as a sibling `type: string` + `enum` on a field whose own type was
+    `anyOf: [string, null]`. JSON Schema reads siblings conjunctively, so `null` --
+    the field's *default* -- satisfied the union and failed the constraints beside it,
+    and a model's own valid output did not validate against its own contract.
+    """
+
+    from linguawiki.contracts import SessionEventBatch
+
+    batch = SessionEventBatch.model_validate(
+        {"sequence": 1, "idempotency_key": "parity", "events": [event]}
+    )
+
+    validator("lingua.session.events.v1").validate(batch.model_dump(mode="json"))
+
+
+def test_a_fully_populated_batch_satisfies_its_published_schema() -> None:
+    """The defaults are one half; a payload that sets every optional field is the other."""
+
+    from linguawiki.contracts import SessionEventBatch
+
+    batch = SessionEventBatch.model_validate(
+        {
+            "sequence": 2,
+            "idempotency_key": "parity-full",
+            "block": "blk_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "events": [
+                {
+                    "event_id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                    "kind": "attempt.observed",
+                    "occurred_at": "2026-01-01T09:00:00Z",
+                    "activity": "act_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    "payload": {
+                        "task_type": "extended-productive",
+                        "modality": "writing",
+                        "score": 0.75,
+                        "target": "pl.lex.dworzec",
+                        "dimension": "writing",
+                        "claims": ["controlled-production"],
+                        "help_level": "hinted",
+                        "correction_mode": "immediate",
+                        "retrieval": "delayed",
+                        "delay_hours": 48.0,
+                        "latency_ms": 4200,
+                        "context": "essay:one",
+                        "response": "Jestem na dworcu.",
+                        "response_visibility": "excerpt",
+                        "response_hash": "a" * 64,
+                        "assessor_kind": "ai",
+                        "assessor": "claude",
+                        "confidence": "low",
+                    },
+                }
+            ],
+        }
+    )
+
+    validator("lingua.session.events.v1").validate(batch.model_dump(mode="json"))
+
+
+def test_every_published_vocabulary_is_enforced_at_runtime_and_in_the_schema() -> None:
+    """Both readers see the same declaration, so neither can accept what the other refuses.
+
+    Walks the annotations rather than a hand-written list, so a field added later is
+    covered without anyone remembering to cover it.
+    """
+
+    from linguawiki.contracts import STAGED_PAYLOAD_KINDS, field_vocabulary
+
+    schema = read_json(SCHEMAS / "lingua.session.events.v1.json")
+    checked = 0
+    for kind, model in STAGED_PAYLOAD_KINDS.items():
+        definition = schema["$defs"][model.__name__]
+        for name, field in model.model_fields.items():
+            permitted = field_vocabulary(field)
+            if permitted is None:
+                continue
+            checked += 1
+            published = definition["properties"][name]  # type: ignore[index]
+            # Wherever the enum sits -- the property, a nullable branch, or an array's
+            # items -- it must be there, and it must be these values.
+            assert json.dumps(list(permitted)) in json.dumps(published), (
+                f"{model.__name__}.{name} does not publish its vocabulary: {published}"
+            )
+            with pytest.raises(PydanticValidationError) as failure:
+                model.model_validate(
+                    {
+                        **MINIMAL_PAYLOADS[kind],
+                        name: ["nonsense"] if name == "claims" else "nonsense",
+                    }
+                )
+            assert "nonsense" in str(failure.value)
+            assert "not a known" in str(failure.value)
+    assert checked >= 16, f"only {checked} vocabularies were checked"
+
+
+MINIMAL_PAYLOADS: dict[str, dict[str, object]] = {
+    "attempt.observed": {
+        "task_type": "objective",
+        "modality": "text",
+        "score": 1.0,
+        "dimension": "reading",
+    },
+    "correction.given": {
+        "category": "case-government",
+        "signature": "szukam bilet",
+        "description": "Accusative where the verb governs the genitive.",
+    },
+    "pronunciation.assessment": {"status": "uncertain", "note": "Flattened."},
+    "observation.noted": {"category": "fatigue", "note": "Tired."},
+    "follow_up": {"kind": "practice", "action": "Drill it."},
+}

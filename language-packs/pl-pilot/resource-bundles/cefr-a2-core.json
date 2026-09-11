@@ -1,0 +1,694 @@
+{
+  "bundle_key": "cefr-a2-core",
+  "bundle_type": "core",
+  "depends_on": [
+    "cefr-a1-core"
+  ],
+  "framework": "cefr",
+  "items": [
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.dworzec"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.peron"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.bilet"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.opoznienie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.rozklad-jazdy"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.przesiadka"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.lotnisko"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.sniadanie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.obiad"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.kolacja"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.rachunek"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.kelner"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.danie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.przepis"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.spotkanie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.umowa"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.kolega"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.szef"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.biuro"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.wynagrodzenie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.urlop"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.lekarz"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.recepta"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.apteka"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.goraczka"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.bol"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.przychodnia"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.ubezpieczenie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.mieszkanie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.czynsz"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.pralka"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.sasiad"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.klucz"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.smieci"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.remont"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.sense.rachunek-bill"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.sense.rachunek-account"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.form.dworcu"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.form.biurze"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.concept.godziny"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.lokatywny-miejsce"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.narzednik-z"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.dopelniacz-negacja"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.biernik-dopelnienie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.celownik"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.aspekt"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.czas-przeszly"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.czas-przyszly"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.tryb-rozkazujacy"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.sie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.stopniowanie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.liczebniki"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.constr.modalne"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.constr.czy-moge"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.constr.boli-mnie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.constr.ile-kosztuje"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.nosowki"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.sz-s"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.cz-c"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.dz-series"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.rz-z"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.o-u"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.ch-h"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.l-kreska"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.akcent"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.pron.wyglos"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.orto.diakrytyki"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.prag.pan-ty"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.prag.przepraszam"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.prag.zamawianie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.culture.smacznego"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.strategy.omowienie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.draft.kolokacje-biurowe"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.draft.zwroty-podrozne"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.draft.dolegliwosci"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.reading.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.listening.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.vocabulary-control.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.grammar-control.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.writing.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.spoken-production.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.pronunciation.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.reading.ru"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.listening.ru"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.vocabulary-control.ru"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.grammar-control.ru"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.writing.ru"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.spoken-production.ru"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a2.pronunciation.ru"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.dworzec.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.dworzec.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.bilet.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.bilet.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.opoznienie.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.opoznienie.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.rachunek.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.rachunek.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.spotkanie.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.spotkanie.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.lekarz.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.lekarz.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.mieszkanie.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.mieszkanie.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.goraczka.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.lex.goraczka.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.gram.lokatywny-miejsce.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.gram.lokatywny-miejsce.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.gram.dopelniacz-negacja.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.gram.dopelniacz-negacja.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.gram.liczebniki.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.gram.liczebniki.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.constr.boli-mnie.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.constr.boli-mnie.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.prag.zamawianie.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.prag.zamawianie.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.prag.pan-ty.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.prag.pan-ty.ex2"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.pron.akcent.ex1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "pl.pron.wyglos.ex1"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.reading.01"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.reading.02"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.reading.03"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.reading.04"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.reading.05"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.reading.06"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.listening.01"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.listening.02"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.listening.03"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.listening.04"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.listening.05"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.listening.06"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.vocabulary-control.01"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.vocabulary-control.02"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.vocabulary-control.03"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.vocabulary-control.04"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.vocabulary-control.05"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.vocabulary-control.06"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.grammar-control.01"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.grammar-control.02"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.grammar-control.03"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.grammar-control.04"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.grammar-control.05"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.grammar-control.06"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.writing.01"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.writing.02"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.writing.03"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.writing.04"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.spoken-production.01"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.spoken-production.02"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.spoken-production.03"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.spoken-production.04"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.pronunciation.01"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.pronunciation.02"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.pronunciation.03"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.pronunciation.04"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.pronunciation.05"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.pronunciation.06"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "pl.task.pronunciation.07"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "pl.act.retrieval"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "pl.act.reading"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "pl.act.listening"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "pl.act.speaking"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "pl.act.writing"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "pl.act.grammar"
+    },
+    {
+      "item_kind": "source_recommendation",
+      "item_ref": "pl.src.wolne-lektury"
+    },
+    {
+      "item_kind": "source_recommendation",
+      "item_ref": "pl.src.polskie-radio"
+    },
+    {
+      "item_kind": "source_recommendation",
+      "item_ref": "pl.src.wymiana-jezykowa"
+    },
+    {
+      "item_kind": "source_recommendation",
+      "item_ref": "pl.src.dziennik"
+    }
+  ],
+  "level": "A2",
+  "license": "CC-BY-4.0",
+  "provenance": {
+    "content_hash": "1c2555351a7749d74afdcdf4972083e67d4252321bdeb31ce323dc1a459c247f",
+    "lifecycle": "verified",
+    "origin_profile": "authored-original",
+    "review_profile": "authored-verified",
+    "risk_tier": 2
+  },
+  "schema_name": "lingua.pack.bundle.v1",
+  "schema_version": 1,
+  "title": "CEFR A2 core for the Polish pilot"
+}

@@ -1,0 +1,82 @@
+{
+  "recommendations": [
+    {
+      "creator": "Fundacja Nowoczesna Polska",
+      "level": "A2",
+      "license": "public domain and CC",
+      "locator": "https://wolnelektury.pl",
+      "modality": "text",
+      "notes": "Free Polish literature. Choose short prose; most texts are above A2, so extract short passages.",
+      "provenance": {
+        "content_hash": "eecc90ca246d807770d3f91a0904e7b504e3b69bdab82415fa131440bc007681",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "rights_status": "cleared",
+      "stable_key": "pl.src.wolne-lektury",
+      "support_language": "en",
+      "title": "Wolne Lektury"
+    },
+    {
+      "creator": "Polskie Radio",
+      "level": "A2",
+      "license": "all rights reserved",
+      "locator": "https://www.polskieradio.pl",
+      "modality": "audio",
+      "notes": "Broadcast Polish. Use short news items; store only your own notes, never the audio.",
+      "provenance": {
+        "content_hash": "29c285b3513e4034cd928474deed61244c58467fe3a06c36191f94b31506152c",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "rights_status": "personal-use-only",
+      "stable_key": "pl.src.polskie-radio",
+      "support_language": "en",
+      "title": "Polskie Radio"
+    },
+    {
+      "creator": null,
+      "level": "A2",
+      "license": "not applicable",
+      "locator": null,
+      "modality": "speech",
+      "notes": "A recurring 30-minute exchange on the covered themes. Record only with the other person's consent.",
+      "provenance": {
+        "content_hash": "cd7408d26996ad774d8c8fa13b517235b4ca705ae8f11c6bc1654aeacc9fc382",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "rights_status": "personal-use-only",
+      "stable_key": "pl.src.wymiana-jezykowa",
+      "support_language": "en",
+      "title": "Regular conversation exchange with a Polish speaker"
+    },
+    {
+      "creator": null,
+      "level": "A2",
+      "license": "learner-owned",
+      "locator": null,
+      "modality": "writing",
+      "notes": "Three short entries a week from the writing templates; corrections become error candidates.",
+      "provenance": {
+        "content_hash": "a6f406a4a93cbe981524e8bc49269170119d8dac0b27db7841e2a19014094708",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "rights_status": "cleared",
+      "stable_key": "pl.src.dziennik",
+      "support_language": "en",
+      "title": "Own Polish journal driven by the pack's writing prompts"
+    }
+  ],
+  "schema_name": "lingua.pack.references.v1",
+  "schema_version": 1
+}

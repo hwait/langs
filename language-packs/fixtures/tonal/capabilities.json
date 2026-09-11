@@ -1,0 +1,17 @@
+{
+  "adapters": {
+    "romanization": "fixture.roman.v1",
+    "segmentation": "fixture.segmenter.v1"
+  },
+  "aspect": false,
+  "extensions": {},
+  "grammatical_case": false,
+  "inflection": false,
+  "pronunciation_contrasts": true,
+  "romanization": true,
+  "schema_name": "lingua.pack.capabilities.v1",
+  "schema_version": 1,
+  "script_learning_required": true,
+  "tone": true,
+  "word_segmentation": "pack-adapter"
+}

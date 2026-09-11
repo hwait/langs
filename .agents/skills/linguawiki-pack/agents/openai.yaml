@@ -1,0 +1,7 @@
+interface:
+  display_name: "LinguaWiki packs"
+  short_description: "Author, validate, and publish a language pack"
+  default_prompt: "Use $linguawiki-pack to validate and measure this language pack."
+
+policy:
+  allow_implicit_invocation: true

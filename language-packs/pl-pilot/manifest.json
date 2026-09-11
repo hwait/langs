@@ -1,0 +1,223 @@
+{
+  "schema_name": "lingua.pack.v1",
+  "schema_version": 1,
+  "data_format_version": 1,
+  "pack_key": "pl-pilot",
+  "name": "Polish A2 Pilot",
+  "version": "0.1.0",
+  "language": "pl",
+  "scripts": [
+    "Latn"
+  ],
+  "writing_direction": "ltr",
+  "license": "CC-BY-4.0",
+  "maintainers": [
+    "LinguaWiki contributors"
+  ],
+  "maturity": "pilot",
+  "frameworks": [
+    {
+      "framework_id": "cefr",
+      "name": "Common European Framework of Reference for Languages",
+      "version": "2020",
+      "source": "Council of Europe, CEFR Companion Volume (2020)",
+      "levels": [
+        "A1",
+        "A2",
+        "B1",
+        "B2",
+        "C1",
+        "C2"
+      ]
+    }
+  ],
+  "bands": [
+    "A2"
+  ],
+  "dimensions": [
+    "reading",
+    "listening",
+    "vocabulary-control",
+    "grammar-control",
+    "writing",
+    "spoken-production",
+    "pronunciation"
+  ],
+  "dimension_kinds": {
+    "grammar-control": "form",
+    "listening": "receptive",
+    "pronunciation": "pronunciation",
+    "reading": "receptive",
+    "spoken-production": "productive",
+    "vocabulary-control": "form",
+    "writing": "productive"
+  },
+  "modalities": [
+    "text",
+    "audio",
+    "speech",
+    "writing"
+  ],
+  "support_languages": [
+    "en",
+    "ru"
+  ],
+  "themes": [
+    "podróże",
+    "jedzenie",
+    "praca i biuro",
+    "zdrowie",
+    "dom i codzienność"
+  ],
+  "bundles": [
+    {
+      "bundle_key": "cefr-a1-core",
+      "file": "resource-bundles/cefr-a1-core.json",
+      "depends_on": []
+    },
+    {
+      "bundle_key": "cefr-a2-core",
+      "file": "resource-bundles/cefr-a2-core.json",
+      "depends_on": [
+        "cefr-a1-core"
+      ]
+    }
+  ],
+  "origin_profiles": {
+    "ai-drafted": [
+      {
+        "origin_class": "ai-generated",
+        "reference": null,
+        "locator": null,
+        "transformation": "drafted from the pack's declared themes; not yet reviewed",
+        "origin_hash": null,
+        "rights": "CC-BY-4.0 pack content",
+        "privacy": "public"
+      }
+    ],
+    "authored-lexical": [
+      {
+        "origin_class": "human-authored",
+        "reference": "Słownik języka polskiego PWN (sjp.pwn.pl)",
+        "locator": null,
+        "transformation": "written for this pack, checked against the cited dictionary",
+        "origin_hash": null,
+        "rights": "CC-BY-4.0 pack content; cited references remain their owners'",
+        "privacy": "public"
+      }
+    ],
+    "authored-norm": [
+      {
+        "origin_class": "human-authored",
+        "reference": "Wielki słownik poprawnej polszczyzny PWN (red. A. Markowski)",
+        "locator": null,
+        "transformation": "written for this pack, checked against the cited usage reference",
+        "origin_hash": null,
+        "rights": "CC-BY-4.0 pack content; cited references remain their owners'",
+        "privacy": "public"
+      }
+    ],
+    "authored-original": [
+      {
+        "origin_class": "human-authored",
+        "reference": null,
+        "locator": null,
+        "transformation": "written for this pack",
+        "origin_hash": null,
+        "rights": "CC-BY-4.0 pack content",
+        "privacy": "public"
+      }
+    ]
+  },
+  "review_profiles": {
+    "ai-draft-unreviewed": {
+      "linguistic": {
+        "state": "unreviewed",
+        "reviewer_kind": "not-applicable",
+        "reviewer": null,
+        "method": null,
+        "evidence_reference": null
+      },
+      "pedagogical": {
+        "state": "unreviewed",
+        "reviewer_kind": "not-applicable",
+        "reviewer": null,
+        "method": null,
+        "evidence_reference": null
+      },
+      "privacy": {
+        "state": "shareable",
+        "reviewer_kind": "human",
+        "reviewer": "pack-author",
+        "method": "contains no learner data",
+        "evidence_reference": null
+      },
+      "rights": {
+        "state": "unknown",
+        "reviewer_kind": "not-applicable",
+        "reviewer": null,
+        "method": null,
+        "evidence_reference": null
+      },
+      "source-alignment": {
+        "state": "unchecked",
+        "reviewer_kind": "not-applicable",
+        "reviewer": null,
+        "method": null,
+        "evidence_reference": null
+      }
+    },
+    "authored-verified": {
+      "linguistic": {
+        "state": "reference-verified",
+        "reviewer_kind": "human",
+        "reviewer": "pack-author",
+        "method": "checked against the cited normative reference",
+        "evidence_reference": null
+      },
+      "pedagogical": {
+        "state": "learner-approved",
+        "reviewer_kind": "learner",
+        "reviewer": "pack-author",
+        "method": "level, usefulness and answerability review for the pilot",
+        "evidence_reference": null
+      },
+      "privacy": {
+        "state": "shareable",
+        "reviewer_kind": "human",
+        "reviewer": "pack-author",
+        "method": "contains no learner data",
+        "evidence_reference": null
+      },
+      "rights": {
+        "state": "personal-use-only",
+        "reviewer_kind": "human",
+        "reviewer": "pack-author",
+        "method": "pilot pack distribution policy: dogfood use only",
+        "evidence_reference": null
+      },
+      "source-alignment": {
+        "state": "machine-checked",
+        "reviewer_kind": "machine",
+        "reviewer": "linguawiki pack validate",
+        "method": "reference and internal-reference resolution",
+        "evidence_reference": null
+      }
+    }
+  },
+  "files": {
+    "activities/pl-a2-activities.json": "58dfde870431c76fb64c83826f2e993aa87af10cf5e36505c54994abcf249fe4",
+    "assessments/pl-a2-calibration.json": "4c8bac53b2d384582e57741e002f5508cee7ab88206925683735c553478a38b4",
+    "capabilities.json": "3c5da78aa3879401c8f9e8088c716a595070f829fdee02cabbbf3607fb523b5b",
+    "proficiency/cefr.json": "92d139981ee20032ed0f69752115b3b76a3347a85b8e33fba0c0f9763e873ec2",
+    "references/pl-a2-sources.json": "6407a01a9cb269432e23cc6287bd93e7844ceeaf440869ba40907ac2d34bfe15",
+    "resource-bundles/cefr-a1-core.json": "e4fdf80c2172f71e87166a7eace41d76ea3c3cf649dadae125523b60bd5b23ab",
+    "resource-bundles/cefr-a2-core.json": "3f94dbc051ee9c4b1268840689c8d2824c59989a489f283c11511b0f66b28b97",
+    "seed/examples.jsonl": "befb290eb097b46bffcb9896ac248a1f1c697470cd91fe6a2217fb5518838512",
+    "seed/knowledge.jsonl": "5516e37bd9f7d1c08643c89e5f02d492d191c7798c568899adc8b7c9efcdbefb",
+    "seed/relations.jsonl": "9da81337db78086fa7a2b34ddf9af0e97153495fa4678e4e9b5f19f196978f4d",
+    "source-policy.json": "f8301f5b92063b22432c9dd6724c172829b40b3868d9df803855e47b490bb51c",
+    "tests/expectations.json": "2ae012d7ebb35cec8b4a8da880f63937526f08fd8bbdd84abe2b3d9641e4a667"
+  },
+  "content_address": "4a2efd6db7d3b8f2990e8beac90a8a02a05a8338476d602d9b0c248fca0a81af"
+}

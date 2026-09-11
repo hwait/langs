@@ -1,0 +1,22 @@
+{
+  "escalation": [
+    "Escalate any real-language claim: this pack has none."
+  ],
+  "prohibited": [
+    "Any material copied from a natural language."
+  ],
+  "schema_name": "lingua.pack.source-policy.v1",
+  "schema_version": 1,
+  "source_classes": [
+    {
+      "description": "The synthetic fixture specification in this repository.",
+      "rank": 1,
+      "source_class": "fixture-specification"
+    },
+    {
+      "description": "Illustrations generated from the specification.",
+      "rank": 2,
+      "source_class": "generated-illustration"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+[
+  {
+    "applied_at": "2026-09-09T20:47:47.579807Z",
+    "audit_event_id": "evt_01M23YTFVTZJN2DBS2TP7EESWG",
+    "component": "core",
+    "component_key": "core",
+    "sha256": "0fa8efb0b78aca5f4c2c2b7f8632e77a75f0833a81eec43d1acef0aa45958810",
+    "version": "0.1.0",
+    "workspace_id": "wsp_01M23YTFR5KZ30YE0CTVA5ND3Y"
+  },
+  {
+    "applied_at": "2026-09-09T20:47:47.579807Z",
+    "audit_event_id": "evt_01M23YTFVTZJN2DBS2TP7EESWG",
+    "component": "database_schema",
+    "component_key": "database_schema",
+    "sha256": "de07f71fcbeeda10491a4707543ac045d441dda2348b5a9d815a6008e7b88e7a",
+    "version": "22",
+    "workspace_id": "wsp_01M23YTFR5KZ30YE0CTVA5ND3Y"
+  },
+  {
+    "applied_at": "2026-09-09T20:47:47.579807Z",
+    "audit_event_id": "evt_01M23YTFVTZJN2DBS2TP7EESWG",
+    "component": "skill_bundle",
+    "component_key": "skill_bundle",
+    "sha256": "a769f66f0e0d3377b0b8ad8144813390107534ecb7b0fc93f4c05968157c1261",
+    "version": "0.1.0",
+    "workspace_id": "wsp_01M23YTFR5KZ30YE0CTVA5ND3Y"
+  }
+]

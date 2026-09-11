@@ -1,0 +1,82 @@
+{
+  "recommendations": [
+    {
+      "creator": "LinguaWiki fixtures",
+      "level": "L2",
+      "license": "CC0-1.0",
+      "locator": null,
+      "modality": "text",
+      "notes": "Synthetic placeholder; nothing to download.",
+      "provenance": {
+        "content_hash": "206500d29a090b8a6baf3d09bb06e3b639207c058a03547ac1fc4cb98ad15ebf",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rights_status": "cleared",
+      "stable_key": "qix.src.text",
+      "support_language": "en",
+      "title": "Fixture text source"
+    },
+    {
+      "creator": "LinguaWiki fixtures",
+      "level": "L2",
+      "license": "CC0-1.0",
+      "locator": null,
+      "modality": "audio",
+      "notes": "Synthetic placeholder; nothing to download.",
+      "provenance": {
+        "content_hash": "6fe5c871dafb8ccfc66909869b4675b8e21d0a65c94a6de744a4032ee975c865",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rights_status": "cleared",
+      "stable_key": "qix.src.audio",
+      "support_language": "en",
+      "title": "Fixture audio source"
+    },
+    {
+      "creator": "LinguaWiki fixtures",
+      "level": "L2",
+      "license": "CC0-1.0",
+      "locator": null,
+      "modality": "speech",
+      "notes": "Synthetic placeholder; nothing to download.",
+      "provenance": {
+        "content_hash": "c9075a999d2a6787fe0efafd1f6daf3697b5a97bb9e7cc1a2420db042064a334",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rights_status": "cleared",
+      "stable_key": "qix.src.speech",
+      "support_language": "en",
+      "title": "Fixture speech source"
+    },
+    {
+      "creator": "LinguaWiki fixtures",
+      "level": "L2",
+      "license": "CC0-1.0",
+      "locator": null,
+      "modality": "writing",
+      "notes": "Synthetic placeholder; nothing to download.",
+      "provenance": {
+        "content_hash": "ecdf16752699769f301f23d920edef374f19393a34490292779ec8726d25d9fa",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rights_status": "cleared",
+      "stable_key": "qix.src.writing",
+      "support_language": "en",
+      "title": "Fixture writing source"
+    }
+  ],
+  "schema_name": "lingua.pack.references.v1",
+  "schema_version": 1
+}

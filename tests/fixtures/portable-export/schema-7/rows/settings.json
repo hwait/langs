@@ -1,0 +1,10 @@
+[
+  {
+    "key": "remote_privacy_confirmed",
+    "schema_version": 1,
+    "scope": "workspace",
+    "scope_id": "wsp_01M1H6WPVXDYMNZPWETG4AS8HT",
+    "updated_at": "2026-01-01T00:00:11Z",
+    "value_json": "false"
+  }
+]

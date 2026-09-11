@@ -1,0 +1,90 @@
+{
+  "schema_name": "lingua.pack.activities.v1",
+  "schema_version": 1,
+  "templates": [
+    {
+      "level": "L2",
+      "minutes": 10,
+      "mode": "retrieval",
+      "provenance": {
+        "content_hash": "c3f3521529c7751076abf9fd9f9f1ef92868280821f08ba5b17f48b3001571ec",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.act.retrieval",
+      "structure": {
+        "steps": [
+          "present",
+          "practise",
+          "check"
+        ]
+      },
+      "title": "Fixture retrieval activity"
+    },
+    {
+      "level": "L2",
+      "minutes": 10,
+      "mode": "reading",
+      "provenance": {
+        "content_hash": "91444cf2d4c6001aa0f46e6a111baa67a890993f73897d8fa7dfc87fffce425b",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.act.reading",
+      "structure": {
+        "steps": [
+          "present",
+          "practise",
+          "check"
+        ]
+      },
+      "title": "Fixture reading activity"
+    },
+    {
+      "level": "L2",
+      "minutes": 10,
+      "mode": "listening",
+      "provenance": {
+        "content_hash": "8c65e76998ebe5286f3b0fdbd2fc3369d3fd25330ec669b4bb3c7d148b4d9d2b",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.act.listening",
+      "structure": {
+        "steps": [
+          "present",
+          "practise",
+          "check"
+        ]
+      },
+      "title": "Fixture listening activity"
+    },
+    {
+      "level": "L2",
+      "minutes": 10,
+      "mode": "speaking",
+      "provenance": {
+        "content_hash": "c5191a3184b090d11b5d3b2da6ee75b4b2c1c0309a85aa452574951e66d1b299",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.act.speaking",
+      "structure": {
+        "steps": [
+          "present",
+          "practise",
+          "check"
+        ]
+      },
+      "title": "Fixture speaking activity"
+    }
+  ]
+}

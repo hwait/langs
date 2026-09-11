@@ -1,0 +1,28 @@
+{
+  "bundle_key": "fixture-l1-core",
+  "bundle_type": "core",
+  "depends_on": [],
+  "framework": "fixture-bands-v1",
+  "items": [
+    {
+      "item_kind": "knowledge",
+      "item_ref": "ztx.char.diamond"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "ztx.culture.marker"
+    }
+  ],
+  "level": "L1",
+  "license": "CC0-1.0",
+  "provenance": {
+    "content_hash": "9bcdcd2288f5f883e27ef9118d3e3c3404639e8df171969ed816ab379277d8fe",
+    "lifecycle": "verified",
+    "origin_profile": "synthetic",
+    "review_profile": "fixture-verified",
+    "risk_tier": 0
+  },
+  "schema_name": "lingua.pack.bundle.v1",
+  "schema_version": 1,
+  "title": "Fixture L1 core"
+}

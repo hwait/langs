@@ -1,0 +1,301 @@
+{
+  "descriptors": [
+    {
+      "descriptor": "Can understand very short, simple texts such as signs, menus and timetables, one phrase at a time.",
+      "dimension": "reading",
+      "level": "A1",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "12fdf55ad50a574d45f1af7e73befc40346c2ae20bc89686c39a1ec1da8af0c8",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a1.reading.en"
+    },
+    {
+      "descriptor": "Can catch familiar words and very basic phrases in slow, clear speech about immediate needs.",
+      "dimension": "listening",
+      "level": "A1",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "3a139e84b0a4b3b0d31182790b48730ffc061ed780678002d9b562298f988543",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a1.listening.en"
+    },
+    {
+      "descriptor": "Controls a small stock of everyday words and fixed phrases with frequent errors.",
+      "dimension": "vocabulary-control",
+      "level": "A1",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "7a8ffcc16eb519e67b27e01ab02e5452d115253210cf4d21384ff34014ffed4a",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a1.vocabulary-control.en"
+    },
+    {
+      "descriptor": "Uses a few memorised patterns correctly; case endings are still largely unmarked.",
+      "dimension": "grammar-control",
+      "level": "A1",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "8aaee66e7846d8fa00d5fe08f59dc5f08c03d64cf17df2f0702136c14f48235a",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a1.grammar-control.en"
+    },
+    {
+      "descriptor": "Can write short formulaic notes, a greeting or a simple form entry.",
+      "dimension": "writing",
+      "level": "A1",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "8977072dcf52876d1804c7480ecba7c3bc58f36820bb9eb908c9c2ab5c00ac14",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a1.writing.en"
+    },
+    {
+      "descriptor": "Can produce short memorised phrases about self and immediate surroundings.",
+      "dimension": "spoken-production",
+      "level": "A1",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "ce8cf03077c5004864c52cb30029e18c739361ef0061f514dc7f90d3b6b51407",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a1.spoken-production.en"
+    },
+    {
+      "descriptor": "Pronunciation is heavily accented; individual sounds are approximated and often need repetition.",
+      "dimension": "pronunciation",
+      "level": "A1",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "17e40d627a21d5c7352749b50bbd43530ffd27885574b32f9ef996c51f1048ef",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a1.pronunciation.en"
+    },
+    {
+      "descriptor": "Can understand short everyday texts on familiar matters -- notices, messages and simple articles -- and find specific information in them.",
+      "dimension": "reading",
+      "level": "A2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "13bf612455ed5935dcfa14302c46288bb437b0936f1fd6c84a8591afd7f150e1",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.reading.en"
+    },
+    {
+      "descriptor": "Can understand the main point of clear, slow speech about familiar everyday topics such as travel, shopping and health.",
+      "dimension": "listening",
+      "level": "A2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "9cc6950450dc3933e6c07f085cb3df4b3ecf3eefeb597e5443c464c594c0e85f",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.listening.en"
+    },
+    {
+      "descriptor": "Controls enough everyday vocabulary for routine transactions, with errors when expressing something less familiar.",
+      "dimension": "vocabulary-control",
+      "level": "A2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "abb4fb39eb27b5312df7f96372183ce512a7b3b1d3e23e85d62f07d73cd43ce4",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.vocabulary-control.en"
+    },
+    {
+      "descriptor": "Uses frequent case, tense and aspect patterns with reasonable accuracy in familiar contexts; errors return under pressure.",
+      "dimension": "grammar-control",
+      "level": "A2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "9f45c44707f630450670c203075357b305a5fca81e063009b221bada5f62b706",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.grammar-control.en"
+    },
+    {
+      "descriptor": "Can write short connected texts about familiar matters -- a message, a short description or a simple email.",
+      "dimension": "writing",
+      "level": "A2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "396156d53dd82d2ce7d13de566d89c9780b6c3d4f3980845e22224acc3086463",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.writing.en"
+    },
+    {
+      "descriptor": "Can describe familiar things and routines in a series of simple sentences, and handle predictable exchanges.",
+      "dimension": "spoken-production",
+      "level": "A2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "e8284d5226d302bde802f5410c3c9ab6f7eb84aa010792ef46567e9dcf492857",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.spoken-production.en"
+    },
+    {
+      "descriptor": "Pronunciation is generally intelligible; the main Polish contrasts are attempted, with recurring lapses in sibilants and nasals.",
+      "dimension": "pronunciation",
+      "level": "A2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "534cca24da760801b6ca7cbdeee64d384cde4f49d81d45198b47570e6f25d88a",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.pronunciation.en"
+    },
+    {
+      "descriptor": "Понимает короткие бытовые тексты на знакомые темы и находит в них нужную информацию.",
+      "dimension": "reading",
+      "level": "A2",
+      "locale": "ru",
+      "provenance": {
+        "content_hash": "ed9239b205ed441562cd0744cc6b2f18fee5baa1271588de8ac9e83e4c252465",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.reading.ru"
+    },
+    {
+      "descriptor": "Понимает основную мысль медленной ясной речи о знакомых бытовых темах.",
+      "dimension": "listening",
+      "level": "A2",
+      "locale": "ru",
+      "provenance": {
+        "content_hash": "347996f49cac8ffbc7c4d5d6375e35591dac315744d7ec264d62c30ed93bb220",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.listening.ru"
+    },
+    {
+      "descriptor": "Владеет бытовой лексикой для типичных ситуаций; ошибается при выражении менее знакомого.",
+      "dimension": "vocabulary-control",
+      "level": "A2",
+      "locale": "ru",
+      "provenance": {
+        "content_hash": "21d0d7326f82e1bb86ecea1c74cc3f1b50ecf04dad29278fd9694729bf07f49d",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.vocabulary-control.ru"
+    },
+    {
+      "descriptor": "Использует частотные падежные, временные и видовые модели достаточно точно в знакомых контекстах.",
+      "dimension": "grammar-control",
+      "level": "A2",
+      "locale": "ru",
+      "provenance": {
+        "content_hash": "3cb90b2877bdd8acd55072358a66175c6702abe0a34e4f24f067253dae5d9aa0",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.grammar-control.ru"
+    },
+    {
+      "descriptor": "Пишет короткие связные тексты на знакомые темы: сообщение, описание, простое письмо.",
+      "dimension": "writing",
+      "level": "A2",
+      "locale": "ru",
+      "provenance": {
+        "content_hash": "de9f22964f732dc7eadf4c02e48f21ea00e411ae4a6cf9eb7798cfef28403a07",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.writing.ru"
+    },
+    {
+      "descriptor": "Описывает знакомые вещи и распорядок дня простыми предложениями.",
+      "dimension": "spoken-production",
+      "level": "A2",
+      "locale": "ru",
+      "provenance": {
+        "content_hash": "9f1e2d6a1cb237c56654a89b6e2ee7651cdfec96256a7c0cf470cbc320a4203e",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.spoken-production.ru"
+    },
+    {
+      "descriptor": "Речь в целом понятна; основные польские противопоставления воспроизводит с повторяющимися ошибками.",
+      "dimension": "pronunciation",
+      "level": "A2",
+      "locale": "ru",
+      "provenance": {
+        "content_hash": "d87985c8412fc3f173a0ec32d625963b55a4dab0a2c9e6a59986503aea6e8e5f",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "cefr.a2.pronunciation.ru"
+    }
+  ],
+  "framework": "cefr",
+  "schema_name": "lingua.pack.proficiency.v1",
+  "schema_version": 1
+}

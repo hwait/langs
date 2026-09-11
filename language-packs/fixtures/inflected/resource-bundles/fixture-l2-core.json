@@ -1,0 +1,118 @@
+{
+  "bundle_key": "fixture-l2-core",
+  "bundle_type": "core",
+  "depends_on": [
+    "fixture-l1-core"
+  ],
+  "framework": "fixture-bands-v1",
+  "items": [
+    {
+      "item_kind": "knowledge",
+      "item_ref": "qix.form.lumi"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "qix.gram.oblique"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "qix.pron.contrast"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "qix.desc.l2.reading"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "qix.desc.l2.listening"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "qix.desc.l2.spoken-production"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "qix.desc.l2.written-production"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "qix.desc.l2.form-control"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "qix.task.read-1"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "qix.task.listen-1"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "qix.task.form-1"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "qix.task.speak-1"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "qix.task.write-1"
+    },
+    {
+      "item_kind": "assessment_task",
+      "item_ref": "qix.task.pron-1"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "qix.act.retrieval"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "qix.act.reading"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "qix.act.listening"
+    },
+    {
+      "item_kind": "activity_template",
+      "item_ref": "qix.act.speaking"
+    },
+    {
+      "item_kind": "source_recommendation",
+      "item_ref": "qix.src.text"
+    },
+    {
+      "item_kind": "source_recommendation",
+      "item_ref": "qix.src.audio"
+    },
+    {
+      "item_kind": "source_recommendation",
+      "item_ref": "qix.src.speech"
+    },
+    {
+      "item_kind": "source_recommendation",
+      "item_ref": "qix.src.writing"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "qix.ex.lum-1"
+    },
+    {
+      "item_kind": "example",
+      "item_ref": "qix.ex.lumi-1"
+    }
+  ],
+  "level": "L2",
+  "license": "CC0-1.0",
+  "provenance": {
+    "content_hash": "e6149ad734c9c9e6b0782342a0c293486bd68b6e4e67801f70c1249adf72b34a",
+    "lifecycle": "verified",
+    "origin_profile": "synthetic",
+    "review_profile": "fixture-verified",
+    "risk_tier": 0
+  },
+  "schema_name": "lingua.pack.bundle.v1",
+  "schema_version": 1,
+  "title": "Fixture L2 core"
+}

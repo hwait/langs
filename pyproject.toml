@@ -11,8 +11,10 @@ requires-python = ">=3.12"
 authors = [{ name = "LinguaWiki contributors" }]
 license = "MIT"
 dependencies = [
+  "duckdb==1.5.5",
   "jinja2==3.1.6",
   "jsonschema==4.25.1",
+  "packaging==26.3",
   "pydantic==2.11.7",
   "rfc3339-validator==0.1.4",
 ]
@@ -37,6 +39,7 @@ packages = ["src/linguawiki"]
 [tool.hatch.build.targets.wheel.force-include]
 ".agents/skills" = "linguawiki/resources/skills"
 "config/privacy-policy.toml" = "linguawiki/resources/config/privacy-policy.toml"
+"language-packs" = "linguawiki/resources/language-packs"
 "schemas" = "linguawiki/resources/schemas"
 "templates" = "linguawiki/resources/templates"
 

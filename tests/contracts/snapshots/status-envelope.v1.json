@@ -5,10 +5,12 @@
     "application": "linguawiki",
     "application_version": "<application-version>",
     "contract_schema_version": 1,
-    "persistence": "not-initialized",
-    "stage": 0
+    "database_schema_version": 23,
+    "persistence": "available",
+    "stage": 4
   },
   "generated_at": "<utc-timestamp>",
   "ok": true,
-  "schema_version": 1
+  "schema_version": 1,
+  "warnings": []
 }

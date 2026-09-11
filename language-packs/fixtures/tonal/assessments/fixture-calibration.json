@@ -1,0 +1,153 @@
+{
+  "form_key": "fixture-calibration",
+  "framework": "fixture-bands-v1",
+  "level_max": "L2",
+  "level_min": "L1",
+  "purpose": "pilot-calibration",
+  "schema_name": "lingua.pack.assessment.v1",
+  "schema_version": 1,
+  "tasks": [
+    {
+      "content_family": "fixture-objects",
+      "difficulty": 2.0,
+      "dimension": "reading",
+      "expected": {
+        "answers": [
+          "lumi",
+          "◇○"
+        ]
+      },
+      "level": "L2",
+      "modality": "text",
+      "prompt": "Which fixture token is the oblique form?",
+      "provenance": {
+        "content_hash": "3b4da24d9acb76df40894dfdfc7d77637ef33d99a49542be62f4c9db79e9f000",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "ztx.task.read-1",
+      "task_type": "objective"
+    },
+    {
+      "content_family": "fixture-sound",
+      "difficulty": 2.0,
+      "dimension": "listening",
+      "expected": {
+        "answers": [
+          "lum",
+          "◇"
+        ]
+      },
+      "level": "L2",
+      "modality": "audio",
+      "prompt": "Write the fixture token you heard.",
+      "provenance": {
+        "content_hash": "0420f7fdbaeecb24a7350ba3b6b8ea92b75569e5c20d6497856799f9e6f43716",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "ztx.task.listen-1",
+      "task_type": "short-response"
+    },
+    {
+      "content_family": "fixture-structure",
+      "difficulty": 2.5,
+      "dimension": "form-control",
+      "expected": {
+        "answers": [
+          "ka"
+        ]
+      },
+      "is_anchor": true,
+      "level": "L2",
+      "modality": "text",
+      "prompt": "Complete the fixture frame.",
+      "provenance": {
+        "content_hash": "9a8f2cbb142731da7c4bc736f31f6ed198bd25bc083ffd9ff3a439438c8c5aca",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "ztx.task.form-1",
+      "task_type": "objective"
+    },
+    {
+      "content_family": "fixture-interaction",
+      "difficulty": 2.0,
+      "dimension": "spoken-production",
+      "level": "L2",
+      "modality": "speech",
+      "prompt": "Say three fixture sentences about a diamond.",
+      "provenance": {
+        "content_hash": "9408ffda9df28faaa6c99dd094d85379bf4f6e545ab4128c0a4119d042492ab1",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rubric": {
+        "dimensions": [
+          "accuracy",
+          "fluency"
+        ],
+        "version": 1
+      },
+      "stable_key": "ztx.task.speak-1",
+      "task_type": "extended-productive"
+    },
+    {
+      "content_family": "fixture-objects",
+      "difficulty": 2.0,
+      "dimension": "written-production",
+      "level": "L2",
+      "modality": "writing",
+      "prompt": "Write three fixture sentences.",
+      "provenance": {
+        "content_hash": "672f37e6c34ec33b60802ebb76c6938f9d0c63ea1eca26fd315a24de28b65ef3",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rubric": {
+        "dimensions": [
+          "accuracy",
+          "range"
+        ],
+        "version": 1
+      },
+      "stable_key": "ztx.task.write-1",
+      "task_type": "extended-productive"
+    },
+    {
+      "content_family": "fixture-sound",
+      "difficulty": 2.0,
+      "dimension": "spoken-production",
+      "level": "L2",
+      "modality": "speech",
+      "prompt": "Produce the fixture length contrast.",
+      "provenance": {
+        "content_hash": "1a05dcb93724fb63f81a20eaeb817d8aaeeaadff9964956148d5fa2c0bf00bbd",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rubric": {
+        "dimensions": [
+          "contrast"
+        ],
+        "version": 1
+      },
+      "stable_key": "ztx.task.pron-1",
+      "task_type": "pronunciation-target"
+    }
+  ],
+  "title": "Fixture calibration form",
+  "version": 1
+}

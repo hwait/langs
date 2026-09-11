@@ -40,13 +40,33 @@ class RenderedWorkspaceContracts(ContractModel):
     files: dict[str, str]
 
 
+def toml_string(value: str) -> str:
+    """Render a TOML basic string, escaping quotes, backslashes, and control characters.
+
+    A workspace path is arbitrary text, so interpolating it raw produced files that
+    tomllib could not parse. TOML basic strings use JSON's escape rules for exactly
+    the characters that matter here.
+    """
+
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def json_string(value: str) -> str:
+    """Render a JSON string literal for the templates that emit JSON."""
+
+    return json.dumps(str(value), ensure_ascii=False)
+
+
 def _environment(template_root: Path) -> Environment:
-    return Environment(
+    environment = Environment(
         loader=None,
         undefined=StrictUndefined,
         autoescape=False,
         keep_trailing_newline=True,
     )
+    environment.filters["tomlstr"] = toml_string
+    environment.filters["jsonstr"] = json_string
+    return environment
 
 
 def _render(template_root: Path, name: str, values: dict[str, str]) -> str:

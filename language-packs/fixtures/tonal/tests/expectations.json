@@ -1,0 +1,28 @@
+{
+  "maturity": "fixture",
+  "minimum_counts": {
+    "activity_templates": 4,
+    "assessment_tasks": 6,
+    "descriptors": 5,
+    "knowledge": 5,
+    "source_recommendations": 4
+  },
+  "refuses_maturity": [
+    "pilot",
+    "onboarding-ready",
+    "placement-ready"
+  ],
+  "required_dimensions": [
+    "reading",
+    "listening",
+    "spoken-production",
+    "written-production",
+    "form-control"
+  ],
+  "required_themes": [
+    "fixture-objects",
+    "fixture-sound"
+  ],
+  "schema_name": "lingua.pack.expectations.v1",
+  "schema_version": 1
+}

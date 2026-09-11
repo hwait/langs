@@ -1,0 +1,41 @@
+{
+  "escalation": [
+    "A normative claim about case, aspect, or pronunciation needs a rank 1 source.",
+    "A claim about current usage or register needs a rank 1 or rank 4 source, never AI output alone.",
+    "A minimal pair may only be confirmed with audio or phonetic evidence."
+  ],
+  "prohibited": [
+    "Copying course-book text or exercises into this pack.",
+    "Storing more than a short excerpt of a rights-reserved source.",
+    "Presenting AI-generated normative claims as verified."
+  ],
+  "schema_name": "lingua.pack.source-policy.v1",
+  "schema_version": 1,
+  "source_classes": [
+    {
+      "description": "PWN dictionaries and usage guides, and the CEFR Companion Volume for descriptors.",
+      "rank": 1,
+      "source_class": "normative-reference"
+    },
+    {
+      "description": "Published Polish course books and graded readers.",
+      "rank": 2,
+      "source_class": "established-teaching-material"
+    },
+    {
+      "description": "Polish broadcasters and public-domain literature, used as short excerpts only.",
+      "rank": 3,
+      "source_class": "authentic-public-media"
+    },
+    {
+      "description": "Frequency and collocation evidence from a Polish corpus.",
+      "rank": 4,
+      "source_class": "corpus-usage"
+    },
+    {
+      "description": "The learner's own utterances and writing, used as evidence rather than as a norm.",
+      "rank": 5,
+      "source_class": "learner-produced"
+    }
+  ]
+}

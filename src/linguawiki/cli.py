@@ -1,21 +1,56 @@
-"""Small Stage 0 CLI surface with a stable JSON envelope."""
+"""CLI surface with a stable JSON envelope for people and agents."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import traceback
 from collections.abc import Sequence
-from typing import Never
+from pathlib import Path
+from typing import Any, Never
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from linguawiki import __version__
+from linguawiki import __version__, error_model
+from linguawiki import evidence as evidence_module
+from linguawiki import session as session_policy
 from linguawiki.clock import Clock, SystemClock
-from linguawiki.contracts import ErrorEnvelope, StatusData, StatusEnvelope
+from linguawiki.contracts import (
+    ErrorEnvelope,
+    GenericSuccessEnvelope,
+    StatusData,
+    StatusEnvelope,
+)
+from linguawiki.db import backup as backup_module
+from linguawiki.db import migrations as migration_module
 from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.ids import EventId
+from linguawiki.packs import stamp as stamp_module
+from linguawiki.paths import require_initialized_workspace, workspace_paths
+from linguawiki.services import assessment as assessment_service
+from linguawiki.services import authoring as authoring_service
+from linguawiki.services import context as context_service
+from linguawiki.services import curriculum as curriculum_service
+from linguawiki.services import database as database_service
+from linguawiki.services import errors as error_service
+from linguawiki.services import estimates as estimate_service
+from linguawiki.services import evidence as evidence_service
+from linguawiki.services import knowledge as knowledge_service
+from linguawiki.services import learners as learner_service
+from linguawiki.services import onboarding as onboarding_service
+from linguawiki.services import packs as pack_service
+from linguawiki.services import resources as resource_service
+from linguawiki.services import sessions as session_service
+from linguawiki.services import skills as skills_service
+from linguawiki.services import wiki as wiki_service
+from linguawiki.services import workspace as workspace_service
+
+FORMATS = ("human", "json")
+# 0 succeeded, 1 ran but reported failures, 2 the command itself failed.
+EXIT_REPORTED_FAILURE = 1
+EXIT_ERROR = 2
 
 
 class ParserExit(Exception):
@@ -33,17 +68,841 @@ class ContractArgumentParser(argparse.ArgumentParser):
         raise ParserExit(status, message)
 
 
+def _add_format(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--format", choices=FORMATS, default="human")
+
+
+def _add_workspace(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--workspace", default=".", help="learner workspace root")
+    _add_format(parser)
+
+
+def _workspace_parser(subcommands: Any) -> None:
+    workspace = subcommands.add_parser("workspace", help="create and diagnose learner workspaces")
+    actions = workspace.add_subparsers(dest="action", required=True)
+    initialize = actions.add_parser("init", help="render an independent learner workspace")
+    initialize.add_argument("path")
+    initialize.add_argument("--backup-root", required=True, help="verified backup root outside Git")
+    initialize.add_argument("--name")
+    initialize.add_argument("--timezone", default="UTC")
+    initialize.add_argument(
+        "--history",
+        default="git-wiki",
+        help="learner history policy; the frozen contract supports git-wiki",
+    )
+    initialize.add_argument("--git-init", action="store_true")
+    initialize.add_argument(
+        "--uv-lock",
+        action="store_true",
+        help="resolve the workspace uv.lock with uv",
+    )
+    initialize.add_argument(
+        "--find-links",
+        help="extra artifact directory uv may resolve the pinned core from",
+    )
+    _add_format(initialize)
+    for name, help_text in (
+        ("status", "show workspace identity, pins, and database state"),
+        ("doctor", "run every workspace diagnostic"),
+        ("privacy-check", "list private files that could reach Git"),
+    ):
+        _add_workspace(actions.add_parser(name, help=help_text))
+    lock_dependencies = actions.add_parser(
+        "lock-dependencies", help="resolve the workspace uv.lock with uv"
+    )
+    lock_dependencies.add_argument(
+        "--find-links",
+        help="extra artifact directory uv may resolve the pinned core from",
+    )
+    _add_workspace(lock_dependencies)
+    confirm = actions.add_parser("confirm-remote", help="record a Git remote privacy decision")
+    confirm.add_argument("--private", dest="private", action="store_true", default=None)
+    confirm.add_argument("--not-private", dest="private", action="store_false")
+    _add_workspace(confirm)
+
+
+def _db_parser(subcommands: Any) -> None:
+    database = subcommands.add_parser("db", help="learner database lifecycle")
+    actions = database.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("init", "create and migrate the learner database"),
+        ("status", "show applied and pending migrations"),
+        ("check", "run integrity and drift checks"),
+    ):
+        _add_workspace(actions.add_parser(name, help=help_text))
+    migrate = actions.add_parser("migrate", help="apply pending migrations")
+    migrate.add_argument("--dry-run", action="store_true")
+    _add_workspace(migrate)
+    backup = actions.add_parser("backup", help="create a verified native and portable backup")
+    backup.add_argument("--reason", default="manual")
+    layers = backup.add_mutually_exclusive_group()
+    layers.add_argument("--native-only", action="store_true")
+    layers.add_argument("--portable-only", action="store_true")
+    _add_workspace(backup)
+    export = actions.add_parser("export-portable", help="write a standalone portable export")
+    export.add_argument("--to", required=True)
+    _add_workspace(export)
+    restore = actions.add_parser("restore", help="restore a backup into a new path")
+    restore.add_argument("--from", dest="source", required=True)
+    restore.add_argument("--to", dest="target", required=True)
+    restore.add_argument("--kind", choices=("auto", "native", "portable"), default="auto")
+    _add_workspace(restore)
+
+
+def _skills_parser(subcommands: Any) -> None:
+    skills = subcommands.add_parser("skills", help="generated Codex skill snapshot")
+    actions = skills.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("install", "regenerate the committed skill snapshot"),
+        ("check", "verify the snapshot against the pinned bundle"),
+    ):
+        _add_workspace(actions.add_parser(name, help=help_text))
+
+
+def _add_track_selector(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--track", help="learning track; the only active track by default")
+
+
+def _add_input(parser: argparse.ArgumentParser, *, required: bool = True) -> None:
+    """Structured payloads arrive through a file or stdin, never as a shell argument.
+
+    Learner text and pack drafts are arbitrary Unicode; passing them as argv leaves them
+    in shell history and breaks on quoting.
+    """
+
+    parser.add_argument(
+        "--input",
+        dest="input_path",
+        required=required,
+        help="JSON payload file, or - to read stdin",
+    )
+
+
+def _read_input(path: str | None) -> Any:
+    if path is None:
+        raise LinguaWikiError("invalid_arguments", "this command needs --input")
+    text = sys.stdin.read() if path == "-" else Path(path).expanduser().read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise LinguaWikiError(
+            "invalid_input",
+            "the --input payload is not valid JSON",
+            details=(ErrorDetail(field="input", reason=str(exc)),),
+        ) from exc
+
+
+def _pack_parser(subcommands: Any) -> None:
+    pack = subcommands.add_parser("pack", help="validate, install, measure, and author packs")
+    actions = pack.add_subparsers(dest="action", required=True)
+    scaffold = actions.add_parser("scaffold", help="create the declared pack structure")
+    scaffold.add_argument("path", help="new, empty directory for the pack")
+    scaffold.add_argument("--pack-key", required=True)
+    scaffold.add_argument("--name", required=True, help="display name")
+    scaffold.add_argument("--language", required=True, help="BCP-47 target language tag")
+    scaffold.add_argument("--framework", required=True, help="proficiency framework identifier")
+    scaffold.add_argument("--framework-name", required=True)
+    scaffold.add_argument("--framework-version", required=True)
+    scaffold.add_argument(
+        "--level",
+        action="append",
+        default=[],
+        required=True,
+        help="framework level, in order, repeated",
+    )
+    scaffold.add_argument(
+        "--band", action="append", default=[], required=True, help="level this pack will cover"
+    )
+    scaffold.add_argument(
+        "--theme", action="append", default=[], required=True, help="practical theme"
+    )
+    scaffold.add_argument("--support", action="append", default=[], help="support language tag")
+    scaffold.add_argument("--maintainer", action="append", default=[])
+    scaffold.add_argument("--license", dest="license_name", default="CC-BY-4.0")
+    _add_format(scaffold)
+    validate = actions.add_parser("validate", help="fully validate a pack directory")
+    validate.add_argument("pack", help="pack directory, or the key of a bundled pack")
+    _add_format(validate)
+    coverage = actions.add_parser("coverage", help="measure coverage and maturity gates")
+    coverage.add_argument("pack")
+    _add_format(coverage)
+    publish = actions.add_parser("publish", help="stamp checksums after the maturity gate passes")
+    publish.add_argument("pack")
+    publish.add_argument("--maturity", help="maturity to publish as; the manifest's by default")
+    _add_format(publish)
+    stamp = actions.add_parser("stamp", help="recompute the content hashes a pack declares")
+    stamp.add_argument("pack")
+    stamp.add_argument("--check", action="store_true", help="fail instead of rewriting")
+    _add_format(stamp)
+    install = actions.add_parser("install", help="install a pack into the learner database")
+    install.add_argument("pack")
+    install.add_argument("--dry-run", action="store_true")
+    _add_workspace(install)
+    update = actions.add_parser("update", help="update an installed pack to another version")
+    update.add_argument("pack")
+    update.add_argument("--apply", action="store_true", help="apply after reviewing the preview")
+    _add_workspace(update)
+    diff = actions.add_parser("diff", help="preview what installing a pack would change")
+    diff.add_argument("pack")
+    _add_workspace(diff)
+    _add_workspace(actions.add_parser("list", help="list installed packs"))
+    _pack_author_parser(actions)
+    _pack_template_parser(actions)
+
+
+def _pack_author_parser(actions: Any) -> None:
+    author = actions.add_parser("author", help="draft, review, and promote pack content")
+    author_actions = author.add_subparsers(dest="author_action", required=True)
+    draft = author_actions.add_parser(
+        "generate-draft", help="open a bounded drafting batch; it never approves output"
+    )
+    draft.add_argument("--template-key", required=True)
+    draft.add_argument("--template-version", type=int, required=True)
+    draft.add_argument("--count", type=int, required=True, help="items the batch may hold")
+    draft.add_argument("--pack")
+    draft.add_argument("--provider")
+    draft.add_argument("--model")
+    draft.add_argument("--model-version")
+    draft.add_argument("--privacy", choices=("public", "private", "synthetic"), default="public")
+    _add_workspace(draft)
+    imported = author_actions.add_parser("import", help="record drafted or imported items")
+    _add_input(imported)
+    imported.add_argument("--batch", help="generation batch these items came from")
+    imported.add_argument("--pack")
+    imported.add_argument(
+        "--origin",
+        default="human-authored",
+        help="origin class for a non-batch import",
+    )
+    imported.add_argument("--rights", default="pack content, not cleared for redistribution")
+    imported.add_argument("--privacy", choices=("public", "private", "synthetic"), default="public")
+    _add_workspace(imported)
+    queue = author_actions.add_parser("review-queue", help="unfinished content, worst first")
+    queue.add_argument("--pack")
+    queue.add_argument("--limit", type=int, default=authoring_service.DEFAULT_QUEUE_LIMIT)
+    _add_workspace(queue)
+    review = author_actions.add_parser("review", help="record one review axis")
+    review.add_argument("--content", required=True)
+    review.add_argument("--axis", required=True)
+    review.add_argument("--state", required=True)
+    review.add_argument("--reviewer-kind", required=True)
+    review.add_argument("--reviewer")
+    review.add_argument("--method")
+    review.add_argument("--evidence")
+    review.add_argument("--inspection", choices=("accepted", "defective"))
+    review.add_argument("--finding")
+    _add_workspace(review)
+    approve = author_actions.add_parser("approve", help="promote content through its gate")
+    approve.add_argument("--content", required=True)
+    approve.add_argument(
+        "--lifecycle",
+        default="approved-personal",
+        choices=("approved-personal", "verified", "publication-ready"),
+    )
+    _add_workspace(approve)
+    reject = author_actions.add_parser("reject", help="reject content, keeping its reviews")
+    reject.add_argument("--content", required=True)
+    reject.add_argument("--reason", required=True)
+    _add_workspace(reject)
+    invalidate = author_actions.add_parser(
+        "invalidate", help="mark content and its dependents needs-review"
+    )
+    invalidate.add_argument("--content", action="append", default=[])
+    invalidate.add_argument("--batch")
+    invalidate.add_argument("--reason", required=True)
+    _add_workspace(invalidate)
+
+
+def _pack_template_parser(actions: Any) -> None:
+    template = actions.add_parser("template", help="manage generation-template sampling")
+    template_actions = template.add_subparsers(dest="template_action", required=True)
+    validate = template_actions.add_parser(
+        "validate", help="register or re-validate a versioned template"
+    )
+    _add_input(validate, required=False)
+    validate.add_argument("--template-key")
+    validate.add_argument("--template-version", type=int)
+    _add_workspace(validate)
+    stabilize = template_actions.add_parser(
+        "stabilize", help="mark a template stable after three clean inspected runs"
+    )
+    stabilize.add_argument("--template-key", required=True)
+    stabilize.add_argument("--template-version", type=int, required=True)
+    _add_workspace(stabilize)
+    quarantine = template_actions.add_parser(
+        "quarantine", help="quarantine a template and everything it produced"
+    )
+    quarantine.add_argument("--template-key", required=True)
+    quarantine.add_argument("--template-version", type=int, required=True)
+    quarantine.add_argument("--reason", required=True)
+    _add_workspace(quarantine)
+
+
+def _user_parser(subcommands: Any) -> None:
+    user = subcommands.add_parser("user", help="learner profiles")
+    actions = user.add_subparsers(dest="action", required=True)
+    create = actions.add_parser("create", help="create a learner")
+    create.add_argument("--name", required=True)
+    create.add_argument("--timezone", required=True, help="IANA timezone of the learner")
+    create.add_argument("--native", action="append", default=[], help="native language tag")
+    create.add_argument("--support", action="append", default=[], help="support language tag")
+    _add_workspace(create)
+    update = actions.add_parser("update", help="change a learner profile")
+    update.add_argument("--user")
+    update.add_argument("--name")
+    update.add_argument("--timezone")
+    update.add_argument("--native", action="append")
+    update.add_argument("--support", action="append")
+    update.add_argument("--status", choices=("active", "archived"))
+    _add_workspace(update)
+    show = actions.add_parser("show", help="show one learner")
+    show.add_argument("--user")
+    _add_workspace(show)
+    _add_workspace(actions.add_parser("list", help="list learners"))
+
+
+def _track_parser(subcommands: Any) -> None:
+    track = subcommands.add_parser("track", help="learning tracks")
+    actions = track.add_subparsers(dest="action", required=True)
+    create = actions.add_parser("create", help="bind a learner to one target language")
+    create.add_argument("--target-language", required=True)
+    create.add_argument("--framework", required=True, help="a framework the pack declares")
+    create.add_argument("--user")
+    create.add_argument("--pack")
+    create.add_argument("--region")
+    create.add_argument("--script")
+    create.add_argument("--declared-level")
+    create.add_argument("--target-level")
+    create.add_argument("--goal")
+    _add_input(create, required=False)
+    _add_workspace(create)
+    update = actions.add_parser("update", help="change a track's goal, target, or preferences")
+    _add_track_selector(update)
+    update.add_argument("--goal")
+    update.add_argument("--target-level")
+    update.add_argument("--declared-level")
+    _add_input(update, required=False)
+    _add_workspace(update)
+    show = actions.add_parser("show", help="show one track")
+    _add_track_selector(show)
+    _add_workspace(show)
+    _add_workspace(actions.add_parser("list", help="list tracks"))
+    for name, help_text in (
+        ("activate", "make a track active"),
+        ("pause", "pause a track"),
+        ("archive", "archive a track"),
+    ):
+        entry = actions.add_parser(name, help=help_text)
+        _add_track_selector(entry)
+        _add_workspace(entry)
+
+
+def _onboard_parser(subcommands: Any) -> None:
+    onboard = subcommands.add_parser("onboard", help="resumable language onboarding")
+    actions = onboard.add_subparsers(dest="action", required=True)
+    start = actions.add_parser("start", help="open onboarding and seed provisional estimates")
+    _add_track_selector(start)
+    start.add_argument("--mode", choices=("declared-level", "placement"), default="declared-level")
+    start.add_argument("--declared-level")
+    start.add_argument("--idempotency-key")
+    _add_workspace(start)
+    record = actions.add_parser("record", help="record one self-report answer")
+    record.add_argument("--key", required=True)
+    _add_input(record)
+    record.add_argument("--onboarding")
+    _add_track_selector(record)
+    _add_workspace(record)
+    status = actions.add_parser("status", help="show onboarding state and the next step")
+    status.add_argument("--onboarding")
+    _add_track_selector(status)
+    _add_workspace(status)
+    finalize = actions.add_parser(
+        "finalize", help="prepare resources and build the calibration queue"
+    )
+    finalize.add_argument("--onboarding")
+    _add_track_selector(finalize)
+    finalize.add_argument("--weeks", type=int, default=resource_service.DEFAULT_WEEKS)
+    finalize.add_argument("--item-budget", type=int, default=resource_service.DEFAULT_ITEM_BUDGET)
+    finalize.add_argument(
+        "--calibration-sample", type=int, default=onboarding_service.CALIBRATION_SAMPLE
+    )
+    finalize.add_argument("--no-calibration", action="store_true")
+    _add_workspace(finalize)
+    abandon = actions.add_parser("abandon", help="abandon onboarding, keeping its answers")
+    abandon.add_argument("--onboarding")
+    _add_track_selector(abandon)
+    _add_workspace(abandon)
+
+
+def _resources_parser(subcommands: Any) -> None:
+    resources = subcommands.add_parser("resources", help="bounded resource preparation")
+    actions = resources.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("plan", "show the plan without writing it"),
+        ("prepare", "apply the plan and import reference items as unseen"),
+    ):
+        entry = actions.add_parser(name, help=help_text)
+        _add_track_selector(entry)
+        entry.add_argument(
+            "--mode", choices=("declared-level", "placement"), default="declared-level"
+        )
+        entry.add_argument(
+            "--level", action="append", default=[], help="framework level to prepare"
+        )
+        entry.add_argument("--weeks", type=int, default=resource_service.DEFAULT_WEEKS)
+        entry.add_argument("--item-budget", type=int, default=resource_service.DEFAULT_ITEM_BUDGET)
+        if name == "prepare":
+            entry.add_argument("--dry-run", action="store_true")
+        _add_workspace(entry)
+    status = actions.add_parser("status", help="show the applied plan")
+    _add_track_selector(status)
+    _add_workspace(status)
+
+
+def _curriculum_parser(subcommands: Any) -> None:
+    curriculum = subcommands.add_parser("curriculum", help="prior-course import and audit")
+    actions = curriculum.add_subparsers(dest="action", required=True)
+    imported = actions.add_parser("import", help="store a permissible course outline")
+    _add_input(imported)
+    _add_track_selector(imported)
+    _add_workspace(imported)
+    show = actions.add_parser("show", help="show an imported outline and its gaps")
+    show.add_argument("--curriculum")
+    _add_track_selector(show)
+    _add_workspace(show)
+    position = actions.add_parser("position", help="record which units the learner claims")
+    position.add_argument("--completed", action="append", default=[], help="unit code")
+    position.add_argument("--current", action="append", default=[], help="unit code")
+    position.add_argument("--curriculum")
+    _add_track_selector(position)
+    _add_workspace(position)
+    audit_start = actions.add_parser("audit-start", help="select a risk-weighted audit sample")
+    audit_start.add_argument("--curriculum")
+    audit_start.add_argument(
+        "--sample-size", type=int, default=curriculum_service.DEFAULT_AUDIT_SAMPLE
+    )
+    audit_start.add_argument("--idempotency-key")
+    _add_track_selector(audit_start)
+    _add_workspace(audit_start)
+    audit_record = actions.add_parser("audit-record", help="record a batch of audit results")
+    _add_input(audit_record)
+    audit_record.add_argument("--audit")
+    _add_track_selector(audit_record)
+    _add_workspace(audit_record)
+    audit_finalize = actions.add_parser(
+        "audit-finalize", help="turn audit misses into an evidence-gap queue"
+    )
+    audit_finalize.add_argument("--audit")
+    audit_finalize.add_argument("--stop-reason", default="completed")
+    _add_track_selector(audit_finalize)
+    _add_workspace(audit_finalize)
+    audit_report = actions.add_parser("audit-report", help="show an audit's state")
+    audit_report.add_argument("--audit")
+    _add_track_selector(audit_report)
+    _add_workspace(audit_report)
+
+
+def _assessment_parser(subcommands: Any) -> None:
+    assessment = subcommands.add_parser("assessment", help="calibration and placement runs")
+    actions = assessment.add_subparsers(dest="action", required=True)
+    start = actions.add_parser("start", help="open a bounded calibration or placement run")
+    _add_track_selector(start)
+    start.add_argument(
+        "--run-type", choices=("pilot-calibration", "placement"), default="pilot-calibration"
+    )
+    start.add_argument("--dimension", action="append", default=[])
+    start.add_argument("--modality", action="append", default=[])
+    start.add_argument("--idempotency-key")
+    _add_workspace(start)
+    nxt = actions.add_parser("next", help="serve the next task")
+    nxt.add_argument("--run")
+    _add_track_selector(nxt)
+    _add_workspace(nxt)
+    record = actions.add_parser("record", help="score one served task")
+    record.add_argument("--run")
+    _add_track_selector(record)
+    record.add_argument("--content", required=True)
+    record.add_argument("--score", type=float, required=True)
+    _add_input(record, required=False)
+    record.add_argument("--excerpt")
+    record.add_argument(
+        "--assessor-kind",
+        choices=("deterministic", "ai", "learner", "human"),
+        default="deterministic",
+    )
+    record.add_argument("--assessor")
+    record.add_argument("--confidence", choices=("low", "medium", "high"), default="medium")
+    record.add_argument("--idempotency-key")
+    _add_workspace(record)
+    for name, help_text, status in (
+        ("pause", "pause a run so it can resume later", "paused"),
+        ("resume", "resume a paused run", "in-progress"),
+        ("abandon", "abandon a run", "abandoned"),
+    ):
+        entry = actions.add_parser(name, help=help_text)
+        entry.add_argument("--run")
+        entry.set_defaults(run_status=status)
+        _add_track_selector(entry)
+        _add_workspace(entry)
+    finalize = actions.add_parser("finalize", help="close a run and write its estimates")
+    finalize.add_argument("--run")
+    _add_track_selector(finalize)
+    finalize.add_argument("--reason", default="completed")
+    finalize.add_argument("--idempotency-key")
+    _add_workspace(finalize)
+    report = actions.add_parser("report", help="show a run's per-dimension estimates")
+    report.add_argument("--run")
+    _add_track_selector(report)
+    _add_workspace(report)
+
+
+def _knowledge_parser(subcommands: Any) -> None:
+    knowledge = subcommands.add_parser("knowledge", help="the language-agnostic knowledge graph")
+    actions = knowledge.add_subparsers(dest="action", required=True)
+    get = actions.add_parser("get", help="one item with its edges, examples, and stage")
+    get.add_argument("item", help="content ID, stable key, or exact alias")
+    _add_track_selector(get)
+    _add_workspace(get)
+    search = actions.add_parser("search", help="find items by text, kind, tag, level, or relation")
+    search.add_argument("--query")
+    search.add_argument("--kind")
+    search.add_argument("--tag")
+    search.add_argument("--level")
+    search.add_argument("--relation")
+    search.add_argument("--related-to")
+    search.add_argument("--limit", type=int)
+    _add_track_selector(search)
+    _add_workspace(search)
+    upsert = actions.add_parser("upsert", help="create or replace one learner-authored item")
+    _add_input(upsert)
+    _add_track_selector(upsert)
+    _add_workspace(upsert)
+    link = actions.add_parser("link", help="add one typed edge between items")
+    link.add_argument("--source", required=True)
+    link.add_argument("--relation", required=True)
+    link.add_argument("--target")
+    link.add_argument("--target-ref")
+    _add_track_selector(link)
+    _add_workspace(link)
+    merge = actions.add_parser("merge", help="fold a duplicate learner item into another")
+    merge.add_argument("--source", required=True)
+    merge.add_argument("--into", required=True)
+    # A merge moves evidence, errors, and follow-ups and is not reversible, so the dry
+    # run is the default and applying it has to be asked for.
+    merge.add_argument("--apply", action="store_true", help="apply the merge, not a dry run")
+    _add_track_selector(merge)
+    _add_workspace(merge)
+
+
+def _evidence_parser(subcommands: Any) -> None:
+    evidence = subcommands.add_parser(
+        "evidence", help="attempts, atomic evidence, and mastery recomputation"
+    )
+    actions = evidence.add_subparsers(dest="action", required=True)
+    record = actions.add_parser("record", help="record one attempt and the evidence it justifies")
+    # Not required: a bank task is authoritative about what it demanded, so naming one
+    # supplies both. Passing a value the bank contradicts is refused rather than obeyed.
+    record.add_argument("--task-type", choices=evidence_module.TASK_TYPES)
+    record.add_argument("--modality", choices=evidence_module.MODALITIES)
+    record.add_argument("--score", type=float, required=True)
+    record.add_argument("--target", help="knowledge item the attempt was about")
+    record.add_argument("--dimension", help="skill dimension the attempt bears on")
+    record.add_argument(
+        "--claim",
+        action="append",
+        default=[],
+        choices=evidence_module.CLAIMS,
+        help="what the attempt proves; defaults to the weakest claim the task supports",
+    )
+    record.add_argument("--help-level", choices=evidence_module.HELP_LEVELS, default="none")
+    record.add_argument(
+        "--correction-mode", choices=evidence_module.CORRECTION_MODES, default="none"
+    )
+    record.add_argument(
+        "--retrieval", choices=evidence_module.RETRIEVAL_CLASSES, default="immediate"
+    )
+    record.add_argument("--delay-hours", type=float)
+    record.add_argument("--latency-ms", type=int)
+    record.add_argument("--difficulty", type=float)
+    record.add_argument("--context", help="the setting; diversity is counted in these")
+    # The learner's own words are a payload, not an argument: argv leaves them in shell
+    # history, and what is retained depends on consent.
+    _add_input(record, required=False)
+    record.add_argument("--response-visibility", choices=evidence_service.RESPONSE_VISIBILITIES)
+    record.add_argument(
+        "--assessor-kind", choices=evidence_module.ASSESSOR_KINDS, default="deterministic"
+    )
+    record.add_argument("--assessor")
+    record.add_argument("--confidence", choices=evidence_module.CONFIDENCE_LEVELS, default="medium")
+    record.add_argument(
+        "--origin",
+        choices=evidence_service.SUPPORTED_ORIGINS,
+        default="import",
+        help="live-session attempts belong to the session engine",
+    )
+    record.add_argument("--assessment-run")
+    record.add_argument("--task", help="assessment bank task the attempt answered")
+    record.add_argument("--idempotency-key")
+    _add_track_selector(record)
+    _add_workspace(record)
+    observe = actions.add_parser("observe", help="record one qualitative observation")
+    observe.add_argument(
+        "--category", required=True, choices=evidence_service.OBSERVATION_CATEGORIES
+    )
+    observe.add_argument("--note", required=True)
+    observe.add_argument("--salience", choices=("low", "medium", "high"), default="medium")
+    observe.add_argument("--attempt")
+    _add_track_selector(observe)
+    _add_workspace(observe)
+    listing = actions.add_parser("list", help="the evidence behind an item or a dimension")
+    listing.add_argument("--item")
+    listing.add_argument("--dimension")
+    listing.add_argument("--limit", type=int, default=50)
+    _add_track_selector(listing)
+    _add_workspace(listing)
+    recompute = actions.add_parser(
+        "recompute", help="recompute stages and estimates from raw evidence"
+    )
+    recompute.add_argument("--item")
+    recompute.add_argument("--dry-run", action="store_true")
+    recompute.add_argument("--no-dimensions", dest="dimensions", action="store_false", default=True)
+    _add_track_selector(recompute)
+    _add_workspace(recompute)
+
+
+def _errors_parser(subcommands: Any) -> None:
+    errors = subcommands.add_parser("errors", help="recurring errors and the follow-up queue")
+    actions = errors.add_subparsers(dest="action", required=True)
+    record = actions.add_parser("record", help="record one occurrence of a recurring error")
+    record.add_argument("--category", required=True)
+    record.add_argument("--signature", required=True, help="the form; normalized for identity")
+    record.add_argument("--description", required=True)
+    record.add_argument("--target")
+    record.add_argument("--learner-form")
+    record.add_argument("--corrected-form")
+    record.add_argument("--explanation")
+    record.add_argument(
+        "--meaning-impact", choices=("none", "minor", "major", "breakdown"), default="minor"
+    )
+    record.add_argument(
+        "--classification",
+        choices=("learner-error", "transcription-artifact", "uncertain"),
+        default="learner-error",
+    )
+    record.add_argument("--confidence", choices=("low", "medium", "high"), default="medium")
+    record.add_argument("--severity", choices=("low", "medium", "high"), default="medium")
+    record.add_argument("--attempt")
+    # The two remedies for an uncertain match. Exactly one, never both.
+    record.add_argument("--attach-to", help="file this against an existing error pattern")
+    record.add_argument("--distinct", action="store_true", help="record it as a new pattern")
+    _add_track_selector(record)
+    _add_workspace(record)
+    show = actions.add_parser("show", help="one error with its history and what it still needs")
+    show.add_argument("error")
+    _add_track_selector(show)
+    _add_workspace(show)
+    listing = actions.add_parser("list", help="the track's errors, worst first")
+    listing.add_argument("--status", choices=error_model.STATUSES)
+    listing.add_argument("--live", dest="live_only", action="store_true")
+    listing.add_argument("--limit", type=int, default=50)
+    _add_track_selector(listing)
+    _add_workspace(listing)
+    followup = actions.add_parser("followup", help="queue one follow-up")
+    followup.add_argument("--kind", required=True, choices=error_service.FOLLOWUP_KINDS)
+    followup.add_argument("--action", dest="followup_action", required=True)
+    followup.add_argument("--target")
+    followup.add_argument("--error")
+    followup.add_argument("--attempt")
+    followup.add_argument("--priority", type=int, default=0)
+    _add_track_selector(followup)
+    _add_workspace(followup)
+    queue = actions.add_parser("queue", help="the follow-up queue")
+    queue.add_argument("--status", choices=error_service.FOLLOWUP_STATUSES, default="open")
+    queue.add_argument("--limit", type=int, default=50)
+    _add_track_selector(queue)
+    _add_workspace(queue)
+
+
+def _estimate_parser(subcommands: Any) -> None:
+    estimate = subcommands.add_parser(
+        "estimate", help="the multidimensional profile and its history"
+    )
+    actions = estimate.add_subparsers(dest="action", required=True)
+    show = actions.add_parser("show", help="one estimate per dimension, never one global level")
+    show.add_argument(
+        "--summary",
+        action="store_true",
+        help="also offer a single summary level, labelled as a summary",
+    )
+    _add_track_selector(show)
+    _add_workspace(show)
+    history = actions.add_parser("history", help="the immutable snapshots behind a dimension")
+    history.add_argument("--dimension")
+    history.add_argument("--limit", type=int, default=50)
+    _add_track_selector(history)
+    _add_workspace(history)
+
+
+def _context_parser(subcommands: Any) -> None:
+    context = subcommands.add_parser("context", help="bounded, privacy-aware context bundles")
+    actions = context.add_subparsers(dest="action", required=True)
+    for scope in context_service.SCOPES:
+        entry = actions.add_parser(scope, help=f"context for {scope} work")
+        entry.set_defaults(scope=scope)
+        if scope == "concept":
+            entry.add_argument("--item", required=True)
+        entry.add_argument("--max-records", type=int)
+        entry.add_argument("--max-tokens", type=int)
+        entry.add_argument(
+            "--include-responses",
+            action="store_true",
+            help="include the learner's own words; needs transcript consent",
+        )
+        _add_track_selector(entry)
+        _add_workspace(entry)
+
+
+def _plan_parser(subcommands: Any) -> None:
+    plan = subcommands.add_parser("plan", help="plan one lesson and explain every block")
+    actions = plan.add_subparsers(dest="action", required=True)
+    create = actions.add_parser("create", help="choose the blocks for one session")
+    create.add_argument("--minutes", type=int, required=True)
+    create.add_argument(
+        "--mode",
+        choices=sorted(session_policy.MODES),
+        default=session_policy.DEFAULT_MODE,
+        help="an explicit mode is honoured unless it is impossible, which is then explained",
+    )
+    create.add_argument("--energy", choices=session_policy.ENERGY_LEVELS, default="normal")
+    create.add_argument("--intent", help="what the learner said they want from this session")
+    create.add_argument(
+        "--correction-mode",
+        choices=session_policy.CORRECTION_MODES,
+        help="defaults to the track's declared preference",
+    )
+    create.add_argument("--idempotency-key")
+    _add_track_selector(create)
+    _add_workspace(create)
+    show = actions.add_parser("show", help="the plan, its ranking, and what it is holding")
+    show.add_argument("--session")
+    _add_track_selector(show)
+    _add_workspace(show)
+
+
+def _session_parser(subcommands: Any) -> None:
+    session = subcommands.add_parser(
+        "session", help="run, stage, close, and recover learning sessions"
+    )
+    actions = session.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("start", "begin a planned session"),
+        ("status", "what the session is and what it is holding"),
+        ("resume", "pick a session back up after an interruption"),
+    ):
+        entry = actions.add_parser(name, help=help_text)
+        entry.add_argument("--session")
+        _add_track_selector(entry)
+        _add_workspace(entry)
+    log_action = actions.add_parser(
+        "log", help="store one bounded batch of observations durably, crediting nothing"
+    )
+    log_action.add_argument("--session")
+    # The batch is a payload, not a set of flags: it carries the learner's own words, and
+    # argv leaves those in shell history.
+    _add_input(log_action)
+    _add_track_selector(log_action)
+    _add_workspace(log_action)
+    staged_action = actions.add_parser("staged", help="the provisional events not yet credited")
+    staged_action.add_argument("--session")
+    staged_action.add_argument("--limit", type=int, default=100)
+    _add_track_selector(staged_action)
+    _add_workspace(staged_action)
+    for name, help_text in (
+        ("close", "finalize a session and materialize its staged work exactly once"),
+        ("partial-close", "finalize a shortened session, crediting only what happened"),
+    ):
+        entry = actions.add_parser(name, help=help_text)
+        entry.add_argument("--session")
+        if name == "close":
+            entry.add_argument(
+                "--outcome", choices=session_policy.CLOSE_OUTCOMES, default="completed"
+            )
+        entry.add_argument("--actual-minutes", type=int)
+        entry.add_argument("--fatigue", choices=("low", "medium", "high"))
+        entry.add_argument("--summary")
+        entry.add_argument(
+            "--discard-block",
+            action="append",
+            default=[],
+            help="exclude a reviewed block's staged events from this close",
+        )
+        entry.add_argument("--idempotency-key")
+        _add_track_selector(entry)
+        _add_workspace(entry)
+    abandon = actions.add_parser("abandon", help="abandon a session, keeping its staged work")
+    abandon.add_argument("--session")
+    abandon.add_argument("--reason")
+    _add_track_selector(abandon)
+    _add_workspace(abandon)
+    recover = actions.add_parser(
+        "recover", help="move staged work from a finished session into an open one"
+    )
+    recover.add_argument("--from", dest="source", required=True)
+    recover.add_argument("--into", dest="target")
+    recover.add_argument("--event", action="append", default=[])
+    _add_track_selector(recover)
+    _add_workspace(recover)
+    ingest = actions.add_parser(
+        "ingest-package", help="validate and stage an externally produced session"
+    )
+    _add_input(ingest)
+    ingest.add_argument("--session")
+    ingest.add_argument("--producer")
+    _add_track_selector(ingest)
+    _add_workspace(ingest)
+
+
+def _wiki_parser(subcommands: Any) -> None:
+    wiki = subcommands.add_parser("wiki", help="generated projections of the learner database")
+    actions = wiki.add_subparsers(dest="action", required=True)
+    build = actions.add_parser("build", help="render a generated view and record its hash")
+    build.add_argument("--view", choices=wiki_service.DASHBOARD_VIEWS, default="dashboard")
+    _add_track_selector(build)
+    _add_workspace(build)
+
+
 def _parser() -> ContractArgumentParser:
     parser = ContractArgumentParser(prog="linguawiki")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands = parser.add_subparsers(dest="group", required=True)
     status = subcommands.add_parser("status", help="show core runtime status")
-    status.add_argument("--format", choices=("human", "json"), default="human")
+    _add_format(status)
+    _workspace_parser(subcommands)
+    _db_parser(subcommands)
+    _skills_parser(subcommands)
+    _pack_parser(subcommands)
+    _user_parser(subcommands)
+    _track_parser(subcommands)
+    _onboard_parser(subcommands)
+    _resources_parser(subcommands)
+    _curriculum_parser(subcommands)
+    _assessment_parser(subcommands)
+    _knowledge_parser(subcommands)
+    _evidence_parser(subcommands)
+    _errors_parser(subcommands)
+    _estimate_parser(subcommands)
+    _context_parser(subcommands)
+    _plan_parser(subcommands)
+    _session_parser(subcommands)
+    _wiki_parser(subcommands)
     return parser
 
 
 def _status() -> StatusData:
-    return StatusData(application_version=__version__)
+    return StatusData(
+        application_version=__version__,
+        database_schema_version=migration_module.head_version(),
+    )
 
 
 def _success(command: str, data: StatusData, clock: Clock) -> StatusEnvelope:
@@ -52,6 +911,18 @@ def _success(command: str, data: StatusData, clock: Clock) -> StatusEnvelope:
         correlation_id=EventId.new(),
         generated_at=clock.now(),
         data=data,
+    )
+
+
+def _envelope(
+    command: str, data: BaseModel, clock: Clock, warnings: Sequence[str] = ()
+) -> GenericSuccessEnvelope:
+    return GenericSuccessEnvelope(
+        command=command,
+        correlation_id=EventId.new(),
+        generated_at=clock.now(),
+        warnings=tuple(warnings),
+        data=data.model_dump(mode="json"),
     )
 
 
@@ -64,11 +935,1749 @@ def _failure(command: str, error: LinguaWikiError, clock: Clock) -> ErrorEnvelop
     )
 
 
-def _command_name(arguments: Sequence[str], parser: ContractArgumentParser) -> str:
-    subcommands = next(
-        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+def _subparser_actions(parser: argparse.ArgumentParser) -> argparse._SubParsersAction[Any] | None:
+    return next(
+        (action for action in parser._actions if isinstance(action, argparse._SubParsersAction)),
+        None,
     )
-    return next((argument for argument in arguments if argument in subcommands.choices), "unknown")
+
+
+def _command_name(arguments: Sequence[str], parser: ContractArgumentParser) -> str:
+    """Name the command from registered subcommands, including nested groups."""
+
+    parts: list[str] = []
+    current: argparse.ArgumentParser = parser
+    remaining = list(arguments)
+    while (action := _subparser_actions(current)) is not None:
+        match = next((argument for argument in remaining if argument in action.choices), None)
+        if match is None:
+            break
+        parts.append(match)
+        remaining = remaining[remaining.index(match) + 1 :]
+        current = action.choices[match]
+    return ".".join(parts) if parts else "unknown"
+
+
+def _print(envelope: BaseModel, human: str, output_format: str) -> None:
+    if output_format == "json":
+        print(envelope.model_dump_json())
+    else:
+        print(human)
+
+
+def _run_status(args: argparse.Namespace, clock: Clock) -> int:
+    envelope = _success("status", _status(), clock)
+    _print(
+        envelope,
+        f"LinguaWiki {envelope.data.application_version} "
+        f"(contract v{envelope.data.contract_schema_version}, "
+        f"schema v{envelope.data.database_schema_version}, Stage {envelope.data.stage})",
+        args.format,
+    )
+    return 0
+
+
+def _run_workspace(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    if args.action == "init":
+        init_report = workspace_service.initialize(
+            workspace_service.InitOptions(
+                path=args.path,
+                backup_root=args.backup_root,
+                name=args.name,
+                timezone=args.timezone,
+                history_policy=args.history,
+                git_init=args.git_init,
+                uv_lock=args.uv_lock,
+                find_links=args.find_links,
+            ),
+            clock=clock,
+        )
+        verb = "initialized" if init_report.created else "already initialized"
+        _print(
+            _envelope(command, init_report, clock, init_report.warnings),
+            f"{verb} {init_report.name} at {init_report.workspace} (workspace "
+            f"{init_report.workspace_id}, schema v{init_report.database_schema_version})",
+            args.format,
+        )
+        return 0
+    if args.action == "status":
+        status_report = workspace_service.status(args.workspace, clock=clock)
+        _print(
+            _envelope(command, status_report, clock, status_report.warnings),
+            f"{status_report.name} ({status_report.workspace_id}) "
+            f"core {status_report.core.version}, schema "
+            f"v{status_report.applied_schema_version}/{status_report.packaged_schema_version}, "
+            f"{status_report.users} user(s), {status_report.tracks} active track(s)",
+            args.format,
+        )
+        return 0
+    if args.action == "doctor":
+        doctor = workspace_service.doctor(args.workspace, clock=clock)
+        failures = doctor.failures
+        lines = [f"{check.status:>7}  {check.name}: {check.message}" for check in doctor.checks]
+        lines.append("doctor passed" if doctor.ok else f"doctor found {len(failures)} failure(s)")
+        _print(_envelope(command, doctor, clock, doctor.warnings), "\n".join(lines), args.format)
+        return 0 if doctor.ok else EXIT_REPORTED_FAILURE
+    if args.action == "lock-dependencies":
+        locked = workspace_service.lock_dependencies(args.workspace, find_links=args.find_links)
+        _print(
+            _envelope(command, locked, clock, locked.warnings),
+            f"resolved dependency lock for {locked.name}",
+            args.format,
+        )
+        return 0
+    if args.action == "privacy-check":
+        privacy = workspace_service.privacy_check(args.workspace)
+        lines = [f"{item.path}: {item.reason}" for item in privacy.violations]
+        lines.extend(f"missing ignore rule: {rule}" for rule in privacy.missing_ignore_rules)
+        lines.append(
+            f"checked {privacy.candidates_checked} candidate(s) from {privacy.source}: "
+            + ("safe" if privacy.ok else "unsafe")
+        )
+        _print(_envelope(command, privacy, clock, privacy.warnings), "\n".join(lines), args.format)
+        return 0 if privacy.ok else EXIT_REPORTED_FAILURE
+    if args.private is None:
+        raise LinguaWikiError("invalid_arguments", "choose --private or --not-private explicitly")
+    confirmed = workspace_service.confirm_remote(args.workspace, private=args.private, clock=clock)
+    _print(
+        _envelope(command, confirmed, clock, confirmed.warnings),
+        f"recorded remote privacy confirmation for {confirmed.workspace_id}",
+        args.format,
+    )
+    return 0
+
+
+def _run_db(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    if args.action == "restore":
+        paths = workspace_paths(args.workspace)
+        restore_report = backup_module.restore(
+            args.source,
+            args.target,
+            clock=clock,
+            active_database=paths.database if paths.config.is_file() else None,
+            kind=args.kind,
+        )
+        _print(
+            _envelope(command, restore_report, clock),
+            f"restored {restore_report.source_kind} backup into {restore_report.target} "
+            f"({restore_report.total_rows} row(s), schema "
+            f"v{restore_report.database_schema_version})",
+            args.format,
+        )
+        return 0
+    paths = require_initialized_workspace(args.workspace)
+    configuration = workspace_service.load_configuration(paths)
+    if args.action == "init":
+        migration = database_service.initialize(paths, clock=clock)
+        _print(
+            _envelope(command, migration, clock),
+            f"database at {migration.database} is at schema v{migration.applied_schema_version} "
+            f"({len(migration.applied)} migration(s) applied)",
+            args.format,
+        )
+        return 0
+    if args.action == "status":
+        db_status = database_service.status(paths, clock=clock)
+        _print(
+            _envelope(command, db_status, clock),
+            f"schema v{db_status.applied_schema_version}/{db_status.packaged_schema_version}, "
+            f"{len(db_status.pending)} pending, writer lock "
+            f"{'held' if db_status.writer_lock_held else 'free'}",
+            args.format,
+        )
+        return 0
+    if args.action == "migrate":
+        backup_root = backup_module.resolve_backup_root(
+            configuration.backup_root, workspace_root=paths.root
+        )
+        migration = database_service.migrate(
+            paths, backup_root=backup_root, clock=clock, dry_run=args.dry_run
+        )
+        prefix = "would apply" if migration.dry_run else "applied"
+        _print(
+            _envelope(command, migration, clock),
+            f"{prefix} {len(migration.applied)} migration(s); schema "
+            f"v{migration.applied_schema_version}",
+            args.format,
+        )
+        return 0
+    if args.action == "check":
+        lock = workspace_service.load_lock(paths) if paths.lock.is_file() else None
+        integrity = database_service.check(paths, lock=lock, clock=clock)
+        lines = [f"{check.status:>7}  {check.name}: {check.message}" for check in integrity.checks]
+        lines.append("database check passed" if integrity.ok else "database check failed")
+        _print(
+            _envelope(command, integrity, clock, integrity.warnings), "\n".join(lines), args.format
+        )
+        return 0 if integrity.ok else EXIT_REPORTED_FAILURE
+    if args.action == "backup":
+        backup_root = backup_module.resolve_backup_root(
+            configuration.backup_root, workspace_root=paths.root
+        )
+        backup_report = database_service.backup(
+            paths,
+            backup_root=backup_root,
+            clock=clock,
+            reason=args.reason,
+            native=not args.portable_only,
+            portable=not args.native_only,
+        )
+        _print(
+            _envelope(command, backup_report, clock, backup_report.skipped_layers),
+            f"verified backup at {backup_report.directory} ({backup_report.total_rows} row(s))",
+            args.format,
+        )
+        return 0
+    report_export = database_service.export_portable(paths, target=args.to, clock=clock)
+    _print(
+        _envelope(command, report_export, clock),
+        f"portable export at {report_export.directory} ({report_export.total_rows} row(s))",
+        args.format,
+    )
+    return 0
+
+
+def _run_skills(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = require_initialized_workspace(args.workspace)
+    lock = workspace_service.load_lock(paths) if paths.lock.is_file() else None
+    if args.action == "install":
+        installed = skills_service.install_bundle(paths, clock=clock)
+        _print(
+            _envelope(command, installed, clock, installed.warnings),
+            f"installed {installed.file_count} generated skill file(s) at {installed.root}",
+            args.format,
+        )
+        return 0
+    bundle = skills_service.inspect_bundle(paths, lock=lock)
+    matches = bundle.matches_installed_core and bundle.matches_lock is not False
+    _print(
+        _envelope(command, bundle, clock, bundle.warnings),
+        f"{bundle.file_count} generated skill file(s); "
+        + ("snapshot matches the pinned bundle" if matches else "snapshot differs"),
+        args.format,
+    )
+    return 0 if matches else EXIT_REPORTED_FAILURE
+
+
+def _pack_workspace(args: argparse.Namespace) -> Any:
+    return require_initialized_workspace(args.workspace)
+
+
+def _run_pack(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    if args.action == "scaffold":
+        scaffolded = pack_service.scaffold(
+            args.path,
+            pack_key=args.pack_key,
+            name=args.name,
+            language=args.language,
+            framework_id=args.framework,
+            framework_name=args.framework_name,
+            framework_version=args.framework_version,
+            levels=args.level,
+            bands=args.band,
+            themes=args.theme,
+            support_languages=args.support,
+            maintainers=args.maintainer or ("pack author",),
+            license_name=args.license_name,
+        )
+        _print(
+            _envelope(command, scaffolded, clock, scaffolded.warnings),
+            f"scaffolded {scaffolded.pack_key} {scaffolded.version} ({scaffolded.maturity}) "
+            f"at {scaffolded.pack}: {len(scaffolded.files)} file(s)",
+            args.format,
+        )
+        return 0
+    if args.action == "validate":
+        report = pack_service.validate(args.pack)
+        _print(
+            _envelope(command, report, clock, report.warnings),
+            f"{report.pack_key} {report.version} ({report.maturity}) validates: "
+            + ", ".join(f"{count} {kind}" for kind, count in sorted(report.counts.items())),
+            args.format,
+        )
+        return 0 if report.ok else EXIT_REPORTED_FAILURE
+    if args.action == "coverage":
+        coverage = pack_service.coverage(args.pack)
+        lines = [
+            f"{coverage.pack_key} {coverage.version}: declared {coverage.declared_maturity}, "
+            f"highest supported {coverage.highest_supported_maturity}",
+            "onboarding modes: " + (", ".join(coverage.supported_onboarding_modes) or "none"),
+        ]
+        lines.extend(f"gap  {gap}" for gap in coverage.gaps)
+        lines.extend(f"expectation  {failure}" for failure in coverage.expectation_failures)
+        _print(_envelope(command, coverage, clock), "\n".join(lines), args.format)
+        return 0 if coverage.ok else EXIT_REPORTED_FAILURE
+    if args.action == "publish":
+        published = pack_service.publish(args.pack, maturity=args.maturity)
+        _print(
+            _envelope(command, published, clock, published.warnings),
+            f"published {published.pack_key} {published.version} as {published.maturity} "
+            f"at {published.content_address}",
+            args.format,
+        )
+        return 0
+    if args.action == "stamp":
+        stamped = stamp_module.stamp_pack(args.pack, write=not args.check)
+        payload = GenericSuccessEnvelope(
+            command=command,
+            correlation_id=EventId.new(),
+            generated_at=clock.now(),
+            data={
+                "pack": stamped.pack,
+                "pack_key": stamped.pack_key,
+                "items": len(stamped.items),
+                "restamped": [item.stable_key for item in stamped.stale],
+                "written": list(stamped.written),
+                "check": args.check,
+            },
+        )
+        _print(
+            payload,
+            f"{stamped.pack_key}: {len(stamped.items)} item hash(es) checked, "
+            f"{len(stamped.written)} file(s) rewritten",
+            args.format,
+        )
+        return 0
+    paths = _pack_workspace(args)
+    if args.action == "list":
+        summaries = pack_service.listing(paths, clock=clock)
+        listing = GenericSuccessEnvelope(
+            command=command,
+            correlation_id=EventId.new(),
+            generated_at=clock.now(),
+            data={"packs": [entry.model_dump(mode="json") for entry in summaries]},
+        )
+        _print(
+            listing,
+            "\n".join(
+                f"{entry.pack_key} {entry.version} ({entry.maturity}) {entry.language_tag}"
+                for entry in summaries
+            )
+            or "no pack is installed",
+            args.format,
+        )
+        return 0
+    if args.action == "diff":
+        difference = pack_service.diff(paths, args.pack, clock=clock)
+        _print(
+            _envelope(command, difference, clock),
+            f"{difference.pack_key}: {len(difference.added)} added, "
+            f"{len(difference.changed)} changed, {len(difference.removed)} removed, "
+            f"{difference.unchanged} unchanged",
+            args.format,
+        )
+        return 0
+    if args.action == "install":
+        installed = pack_service.install(
+            paths, args.pack, clock=clock, dry_run=args.dry_run, command=command
+        )
+        verb = (
+            "would install"
+            if installed.dry_run
+            else ("installed" if installed.created else "reinstalled")
+        )
+        _print(
+            _envelope(command, installed, clock, installed.warnings),
+            f"{verb} {installed.pack_key} {installed.version} ({installed.maturity})",
+            args.format,
+        )
+        return 0
+    updated = pack_service.install(
+        paths,
+        args.pack,
+        clock=clock,
+        allow_update=True,
+        dry_run=not args.apply,
+        command=command,
+    )
+    prefix = "would update" if updated.dry_run else "updated"
+    _print(
+        _envelope(command, updated, clock, updated.warnings),
+        f"{prefix} {updated.pack_key} from {updated.updated_from} to {updated.version}",
+        args.format,
+    )
+    return 0
+
+
+def _run_pack_author(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    action = args.author_action
+    if action == "generate-draft":
+        batch = authoring_service.generate_draft(
+            paths,
+            template_key=args.template_key,
+            version=args.template_version,
+            item_count=args.count,
+            pack_key=args.pack,
+            provider=args.provider,
+            model=args.model,
+            model_version=args.model_version,
+            privacy_class=args.privacy,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, batch, clock, batch.warnings),
+            f"batch {batch.batch_id} open under {batch.sampling_policy}: "
+            f"{batch.required_sample} of up to {args.count} item(s) must be inspected",
+            args.format,
+        )
+        return 0
+    if action == "import":
+        payload = _read_input(args.input_path)
+        items = payload["items"] if isinstance(payload, dict) else payload
+        result = authoring_service.import_items(
+            paths,
+            items=items,
+            batch_id=args.batch,
+            pack_key=args.pack,
+            origin_class=args.origin,
+            rights=args.rights,
+            privacy=args.privacy,
+            clock=clock,
+            command=command,
+        )
+        if isinstance(result, tuple):
+            envelope = GenericSuccessEnvelope(
+                command=command,
+                correlation_id=EventId.new(),
+                generated_at=clock.now(),
+                data={"items": [entry.model_dump(mode="json") for entry in result]},
+            )
+            _print(envelope, f"recorded {len(result)} draft item(s)", args.format)
+            return 0
+        _print(
+            _envelope(command, result, clock, result.warnings),
+            f"batch {result.batch_id} holds {result.item_count} draft item(s); "
+            f"{result.required_sample} to inspect",
+            args.format,
+        )
+        return 0
+    if action == "review-queue":
+        queue = authoring_service.review_queue(
+            paths, pack_key=args.pack, limit=args.limit, clock=clock
+        )
+        lines = [
+            f"tier {entry.risk_tier} {entry.stable_key} ({entry.lifecycle}"
+            + (", quarantined" if entry.quarantined else "")
+            + f") centrality {entry.dependency_centrality}; to reach "
+            f"{entry.promotion_target}: "
+            + (", ".join(entry.gate_problems) or "nothing outstanding")
+            for entry in queue.items
+        ]
+        lines.append(f"{queue.returned} of {queue.total} unfinished item(s)")
+        _print(_envelope(command, queue, clock, queue.warnings), "\n".join(lines), args.format)
+        return 0
+    if action == "review":
+        outcome = authoring_service.review(
+            paths,
+            content_id=args.content,
+            axis=args.axis,
+            state=args.state,
+            reviewer_kind=args.reviewer_kind,
+            reviewer=args.reviewer,
+            method=args.method,
+            evidence_reference=args.evidence,
+            inspection=args.inspection,
+            finding=args.finding,
+            clock=clock,
+            command=command,
+        )
+        if isinstance(outcome, authoring_service.InvalidationReport):
+            _print(
+                _envelope(command, outcome, clock, outcome.warnings),
+                f"quarantined {len(outcome.roots)} batch item(s) and invalidated "
+                f"{len(outcome.invalidated)} dependent(s): {outcome.reason}",
+                args.format,
+            )
+            return EXIT_REPORTED_FAILURE
+        _print(
+            _envelope(command, outcome, clock, outcome.warnings),
+            f"{outcome.stable_key}: {args.axis} -> {args.state}; "
+            + (", ".join(outcome.gate_problems) or "gate satisfied"),
+            args.format,
+        )
+        return 0
+    if action == "approve":
+        approved = authoring_service.approve(
+            paths, content_id=args.content, lifecycle=args.lifecycle, clock=clock, command=command
+        )
+        _print(
+            _envelope(command, approved, clock, approved.warnings),
+            f"{approved.stable_key} is now {approved.lifecycle}",
+            args.format,
+        )
+        return 0
+    if action == "reject":
+        rejected = authoring_service.reject(
+            paths, content_id=args.content, reason=args.reason, clock=clock, command=command
+        )
+        _print(
+            _envelope(command, rejected, clock, rejected.warnings),
+            f"{rejected.stable_key} rejected: {args.reason}",
+            args.format,
+        )
+        return 0
+    invalidated = authoring_service.invalidate(
+        paths,
+        reason=args.reason,
+        content_ids=args.content,
+        batch_id=args.batch,
+        clock=clock,
+        command=command,
+    )
+    _print(
+        _envelope(command, invalidated, clock, invalidated.warnings),
+        f"invalidated {len(invalidated.roots)} root(s) and {len(invalidated.invalidated)} "
+        f"dependent(s)",
+        args.format,
+    )
+    return 0
+
+
+def _run_pack_template(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.template_action == "validate":
+        report = authoring_service.validate_template(
+            paths,
+            payload=None if args.input_path is None else _read_input(args.input_path),
+            template_key=args.template_key,
+            version=args.template_version,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, report, clock, report.warnings),
+            f"{report.template_key} v{report.version} is {report.maturity}; next batch uses "
+            f"{report.sampling_policy}",
+            args.format,
+        )
+        return 0
+    if args.template_action == "stabilize":
+        report = authoring_service.stabilize_template(
+            paths,
+            template_key=args.template_key,
+            version=args.template_version,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, report, clock, report.warnings),
+            f"{report.template_key} v{report.version} is stable after "
+            f"{report.inspected_runs} inspected run(s)",
+            args.format,
+        )
+        return 0
+    quarantined = authoring_service.quarantine_template(
+        paths,
+        template_key=args.template_key,
+        version=args.template_version,
+        reason=args.reason,
+        clock=clock,
+        command=command,
+    )
+    _print(
+        _envelope(command, quarantined, clock, quarantined.warnings),
+        f"quarantined {len(quarantined.quarantined_batches)} batch(es), "
+        f"{len(quarantined.roots)} item(s), {len(quarantined.invalidated)} dependent(s)",
+        args.format,
+    )
+    return EXIT_REPORTED_FAILURE
+
+
+def _run_user(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "create":
+        user = learner_service.create_user(
+            paths,
+            display_name=args.name,
+            timezone=args.timezone,
+            native_languages=args.native,
+            support_languages=args.support,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, user, clock),
+            f"created {user.display_name} ({user.user_id}) in {user.timezone}",
+            args.format,
+        )
+        return 0
+    if args.action == "update":
+        user = learner_service.update_user(
+            paths,
+            user=args.user,
+            display_name=args.name,
+            timezone=args.timezone,
+            native_languages=args.native,
+            support_languages=args.support,
+            status=args.status,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, user, clock),
+            f"updated {user.display_name} ({user.status})",
+            args.format,
+        )
+        return 0
+    if args.action == "show":
+        user = learner_service.show_user(paths, user=args.user, clock=clock)
+        _print(
+            _envelope(command, user, clock),
+            f"{user.display_name} ({user.user_id}) {user.timezone}; native "
+            f"{list(user.native_languages)}, support {list(user.support_languages)}, "
+            f"{len(user.tracks)} track(s)",
+            args.format,
+        )
+        return 0
+    users = learner_service.list_users(paths, clock=clock)
+    envelope = GenericSuccessEnvelope(
+        command=command,
+        correlation_id=EventId.new(),
+        generated_at=clock.now(),
+        data={"users": [entry.model_dump(mode="json") for entry in users]},
+    )
+    _print(
+        envelope,
+        "\n".join(f"{entry.user_id} {entry.display_name} ({entry.status})" for entry in users)
+        or "no learner exists yet",
+        args.format,
+    )
+    return 0
+
+
+def _track_preferences(path: str | None) -> learner_service.TrackPreferences | None:
+    if path is None:
+        return None
+    return learner_service.TrackPreferences.model_validate(_read_input(path))
+
+
+def _run_track(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "create":
+        track = learner_service.create_track(
+            paths,
+            target_language=args.target_language,
+            framework=args.framework,
+            user=args.user,
+            pack_key=args.pack,
+            region=args.region,
+            script=args.script,
+            declared_level=args.declared_level,
+            target_level=args.target_level,
+            goal=args.goal,
+            preferences=_track_preferences(args.input_path),
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, track, clock, track.warnings),
+            f"created {track.target_language} track {track.track_id} in "
+            f"{track.proficiency_framework}, declared {track.declared_level}",
+            args.format,
+        )
+        return 0
+    if args.action == "update":
+        track = learner_service.update_track(
+            paths,
+            track=args.track,
+            goal=args.goal,
+            target_level=args.target_level,
+            declared_level=args.declared_level,
+            preferences=_track_preferences(args.input_path),
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, track, clock, track.warnings),
+            f"updated {track.track_id}: goal {track.goal}, target {track.target_level}",
+            args.format,
+        )
+        return 0
+    if args.action == "show":
+        track = learner_service.show_track(paths, track=args.track, clock=clock)
+        _print(
+            _envelope(command, track, clock, track.warnings),
+            f"{track.track_id} {track.target_language} ({track.status}) "
+            f"{track.proficiency_framework} declared {track.declared_level} "
+            f"target {track.target_level}; pack {track.pack_key} {track.pack_version}",
+            args.format,
+        )
+        return 0
+    if args.action == "list":
+        tracks = learner_service.list_tracks(paths, clock=clock)
+        envelope = GenericSuccessEnvelope(
+            command=command,
+            correlation_id=EventId.new(),
+            generated_at=clock.now(),
+            data={"tracks": [entry.model_dump(mode="json") for entry in tracks]},
+        )
+        _print(
+            envelope,
+            "\n".join(
+                f"{entry.track_id} {entry.target_language} ({entry.status}) "
+                f"declared {entry.declared_level}"
+                for entry in tracks
+            )
+            or "no track exists yet",
+            args.format,
+        )
+        return 0
+    status = {"activate": "active", "pause": "paused", "archive": "archived"}[args.action]
+    track = learner_service.set_track_status(
+        paths, status=status, track=args.track, clock=clock, command=command
+    )
+    _print(
+        _envelope(command, track, clock, track.warnings),
+        f"{track.track_id} is now {track.status}",
+        args.format,
+    )
+    return 0
+
+
+def _onboard_lines(report: onboarding_service.OnboardingReport) -> str:
+    lines = [
+        f"{report.onboarding_id} {report.mode} ({report.status}); declared "
+        f"{report.declared_level}, {report.calibration_label} against "
+        f"{report.pack_key} {report.pack_version} ({report.pack_maturity})",
+        f"seeded estimates: {list(report.seeded_estimates)}",
+        f"calibration queue: {len(report.calibration_queue)} target(s)",
+    ]
+    if report.resource_plan is not None:
+        lines.append(
+            f"plan: {report.resource_plan.plan_label}, "
+            f"{report.resource_plan.imported_items} unseen reference item(s)"
+        )
+    if report.unsupported_dimensions:
+        lines.append(f"unsupported dimensions: {list(report.unsupported_dimensions)}")
+    if report.next_step:
+        lines.append(f"next: {report.next_step}")
+    return "\n".join(lines)
+
+
+def _run_onboard(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "start":
+        report = onboarding_service.start(
+            paths,
+            track=args.track,
+            mode=args.mode,
+            declared_level=args.declared_level,
+            idempotency_key=args.idempotency_key,
+            clock=clock,
+            command=command,
+        )
+    elif args.action == "record":
+        report = onboarding_service.record_answer(
+            paths,
+            key=args.key,
+            value=_read_input(args.input_path),
+            onboarding=args.onboarding,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+    elif args.action == "status":
+        report = onboarding_service.status(
+            paths, onboarding=args.onboarding, track=args.track, clock=clock
+        )
+    elif args.action == "abandon":
+        report = onboarding_service.abandon(
+            paths, onboarding=args.onboarding, track=args.track, clock=clock, command=command
+        )
+    else:
+        report = onboarding_service.finalize(
+            paths,
+            onboarding=args.onboarding,
+            track=args.track,
+            weeks=args.weeks,
+            item_budget=args.item_budget,
+            calibration_sample=args.calibration_sample,
+            open_calibration=not args.no_calibration,
+            clock=clock,
+            command=command,
+        )
+    _print(_envelope(command, report, clock, report.warnings), _onboard_lines(report), args.format)
+    return 0
+
+
+def _plan_lines(report: resource_service.ResourcePlanReport) -> str:
+    lines = [
+        f"{report.plan_label} for {report.track_id} from {report.pack_key} "
+        f"{report.pack_version} ({report.pack_maturity})",
+        f"bundles: {list(report.bundles)}; levels {list(report.level_codes)}",
+        "counts: "
+        + (
+            ", ".join(f"{count} {kind}" for kind, count in sorted(report.counts.items()))
+            or "nothing to import"
+        ),
+        f"skipped {len(report.skipped)}, proposed {len(report.proposed_sources)} external "
+        f"source(s)",
+    ]
+    if report.unsupported_dimensions:
+        lines.append(f"untestable dimensions: {list(report.unsupported_dimensions)}")
+    if report.missing_modalities:
+        lines.append(f"modalities without a recommendation: {list(report.missing_modalities)}")
+    return "\n".join(lines)
+
+
+def _run_resources(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "plan":
+        report = resource_service.plan(
+            paths,
+            track=args.track,
+            onboarding_mode=args.mode,
+            level_codes=args.level or None,
+            weeks=args.weeks,
+            item_budget=args.item_budget,
+            clock=clock,
+        )
+    elif args.action == "prepare":
+        report = resource_service.prepare(
+            paths,
+            track=args.track,
+            onboarding_mode=args.mode,
+            level_codes=args.level or None,
+            weeks=args.weeks,
+            item_budget=args.item_budget,
+            dry_run=args.dry_run,
+            clock=clock,
+            command=command,
+        )
+    else:
+        report = resource_service.show(paths, track=args.track, clock=clock)
+    _print(_envelope(command, report, clock, report.warnings), _plan_lines(report), args.format)
+    return 0
+
+
+def _run_curriculum(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "import":
+        report = curriculum_service.import_curriculum(
+            paths, _read_input(args.input_path), track=args.track, clock=clock, command=command
+        )
+    elif args.action == "position":
+        report = curriculum_service.position(
+            paths,
+            completed=args.completed,
+            current=args.current,
+            curriculum=args.curriculum,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+    elif args.action == "show":
+        report = curriculum_service.show(
+            paths, curriculum=args.curriculum, track=args.track, clock=clock
+        )
+    else:
+        return _run_curriculum_audit(args, clock, command)
+    _print(
+        _envelope(command, report, clock, report.warnings),
+        f"{report.title} {report.version} ({report.rights_status}): {len(report.units)} unit(s), "
+        f"{report.mapped_objectives} of {report.total_objectives} objective(s) mapped, "
+        f"{len(report.unmapped_objectives)} explicit gap(s), "
+        f"{report.encountered_items} self-reported item(s)",
+        args.format,
+    )
+    return 0
+
+
+def _run_curriculum_audit(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "audit-start":
+        report = curriculum_service.audit_start(
+            paths,
+            curriculum=args.curriculum,
+            track=args.track,
+            sample_size=args.sample_size,
+            idempotency_key=args.idempotency_key,
+            clock=clock,
+            command=command,
+        )
+    elif args.action == "audit-record":
+        payload = _read_input(args.input_path)
+        results = payload["results"] if isinstance(payload, dict) else payload
+        report = curriculum_service.audit_record(
+            paths,
+            results=results,
+            audit=args.audit,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+    elif args.action == "audit-finalize":
+        report = curriculum_service.audit_finalize(
+            paths,
+            audit=args.audit,
+            track=args.track,
+            stop_reason=args.stop_reason,
+            clock=clock,
+            command=command,
+        )
+    else:
+        report = curriculum_service.audit_report(
+            paths, audit=args.audit, track=args.track, clock=clock
+        )
+    _print(
+        _envelope(command, report, clock, report.warnings),
+        f"audit {report.audit_id} ({report.status}): {report.recorded} of {report.sample_size} "
+        f"probed, {len(report.confirmed_gaps)} gap(s), {len(report.untested_targets)} untested, "
+        f"{len(report.queued_calibration)} queued",
+        args.format,
+    )
+    return 0
+
+
+def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
+    lines = [
+        f"{report.run_id} {report.calibration_label} ({report.status}) against "
+        f"{report.pack_key} {report.pack_version} ({report.pack_maturity}); "
+        f"{report.tasks_recorded} of {report.tasks_served} served task(s) scored"
+    ]
+    lines.extend(
+        f"  {entry.dimension}: {entry.status} n={entry.tasks_used}/"
+        f"{entry.minimum_tasks}-{entry.maximum_tasks} confidence={entry.confidence} "
+        f"estimate={entry.estimated_level} [{entry.credible_low}..{entry.credible_high}]"
+        + (f" stop={entry.stop_reason}" if entry.stop_reason else "")
+        for entry in report.dimensions
+    )
+    if report.untested_dimensions:
+        lines.append(f"not tested: {list(report.untested_dimensions)}")
+    return "\n".join(lines)
+
+
+def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "next":
+        outcome = assessment_service.next_task(
+            paths, run=args.run, track=args.track, clock=clock, command=command
+        )
+        if isinstance(outcome, assessment_service.NextTaskReport):
+            _print(
+                _envelope(command, outcome, clock, outcome.warnings),
+                f"[{outcome.dimension} #{outcome.sequence}] {outcome.task_type} "
+                f"({outcome.modality}, {outcome.level_code}, difficulty {outcome.difficulty}, "
+                f"family {outcome.content_family}, selected for {outcome.selection_reason})\n"
+                f"{outcome.prompt}",
+                args.format,
+            )
+            return 0
+        _print(
+            _envelope(command, outcome, clock, outcome.warnings),
+            _assessment_lines(outcome),
+            args.format,
+        )
+        return 0
+    if args.action == "start":
+        report = assessment_service.start(
+            paths,
+            track=args.track,
+            run_type=args.run_type,
+            dimensions=args.dimension or None,
+            modalities=args.modality or None,
+            idempotency_key=args.idempotency_key,
+            clock=clock,
+            command=command,
+        )
+    elif args.action == "record":
+        report = assessment_service.record(
+            paths,
+            content_id=args.content,
+            score=args.score,
+            run=args.run,
+            track=args.track,
+            rubric=None if args.input_path is None else _read_input(args.input_path),
+            response_excerpt=args.excerpt,
+            assessor_kind=args.assessor_kind,
+            assessor=args.assessor,
+            confidence=args.confidence,
+            idempotency_key=args.idempotency_key,
+            clock=clock,
+            command=command,
+        )
+    elif args.action in ("pause", "resume", "abandon"):
+        report = assessment_service.set_status(
+            paths,
+            status=args.run_status,
+            run=args.run,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+    elif args.action == "finalize":
+        report = assessment_service.finalize(
+            paths,
+            run=args.run,
+            track=args.track,
+            reason=args.reason,
+            idempotency_key=args.idempotency_key,
+            clock=clock,
+            command=command,
+        )
+    else:
+        report = assessment_service.report(paths, run=args.run, track=args.track, clock=clock)
+    _print(
+        _envelope(command, report, clock, report.warnings), _assessment_lines(report), args.format
+    )
+    return 0
+
+
+def _run_knowledge(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "get":
+        item = knowledge_service.get(paths, item=args.item, track=args.track, clock=clock)
+        lines = [
+            f"{item.stable_key} ({item.kind}, {item.owner}"
+            + (f" {item.pack_key}" if item.pack_key else "")
+            + f"): {item.title}",
+            f"  {item.level_min or 'no level'} | lifecycle {item.lifecycle} | risk tier "
+            f"{item.risk_tier} | {len(item.aliases)} alias(es), {len(item.relations)} edge(s), "
+            f"{len(item.examples)} example(s)",
+        ]
+        if item.state is not None:
+            lines.append(
+                f"  stage {item.state.stage} (gates gave {item.state.gated_stage}, evidence "
+                f"allows {item.state.evidence_ceiling}) confidence {item.state.confidence:.2f} "
+                f"from {item.state.positive_evidence}+/{item.state.negative_evidence}-"
+            )
+            lines.extend(f"    {entry}" for entry in item.state.explanation)
+        _print(_envelope(command, item, clock, item.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "search":
+        found = knowledge_service.search(
+            paths,
+            query=args.query,
+            kind=args.kind,
+            tag=args.tag,
+            level=args.level,
+            relation=args.relation,
+            related_to=args.related_to,
+            track=args.track,
+            limit=args.limit,
+            clock=clock,
+        )
+        lines = [
+            f"{found.total_matched} item(s) matched; {len(found.hits)} shown (limit {found.limit})"
+        ]
+        lines.extend(
+            f"  {hit.stable_key} [{hit.kind}] {hit.title} "
+            f"({hit.level_min or 'no level'}, {hit.owner}, stage {hit.stage or 'unseen'})"
+            for hit in found.hits
+        )
+        _print(_envelope(command, found, clock, found.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "upsert":
+        payload = _read_input(args.input_path)
+        if not isinstance(payload, dict):
+            raise LinguaWikiError("invalid_input", "a knowledge upsert payload is an object")
+        written = knowledge_service.upsert(
+            paths,
+            stable_key=str(payload["stable_key"]),
+            kind=str(payload["kind"]),
+            title=str(payload["title"]),
+            body=str(payload["body"]),
+            summary=payload.get("summary"),
+            level=payload.get("level"),
+            level_max=payload.get("level_max"),
+            aliases=payload.get("aliases") or (),
+            themes=payload.get("themes") or (),
+            features=payload.get("features") or (),
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, written, clock, written.warnings),
+            f"{'created' if written.created else 'replaced'} {written.stable_key} "
+            f"({written.kind}) as {written.content_id} at lifecycle {written.lifecycle}",
+            args.format,
+        )
+        return 0
+    if args.action == "link":
+        linked = knowledge_service.link(
+            paths,
+            source=args.source,
+            relation_type=args.relation,
+            target=args.target,
+            target_ref=args.target_ref,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, linked, clock, linked.warnings),
+            f"{'added' if linked.created else 'already present'}: {linked.source_content_id} "
+            f"--{linked.relation_type}--> "
+            f"{linked.target_content_id or linked.target_ref}",
+            args.format,
+        )
+        return 0
+    merged = knowledge_service.merge(
+        paths,
+        source=args.source,
+        into=args.into,
+        track=args.track,
+        dry_run=not args.apply,
+        clock=clock,
+        command=command,
+    )
+    lines = [
+        f"{'would merge' if merged.dry_run else 'merged'} {merged.source_content_id} into "
+        f"{merged.target_content_id} (stages {merged.source_stage} -> {merged.target_stage})"
+    ]
+    lines.extend(
+        f"  {move.table}: {move.moved} row(s) move"
+        + (f", {move.already_present} already on the target" if move.already_present else "")
+        for move in merged.moves
+        if move.moved or move.already_present
+    )
+    if merged.errors_remapped or merged.errors_folded:
+        lines.append(
+            f"  error patterns: {merged.errors_remapped} re-derived, "
+            f"{merged.errors_folded} folded into the same error on the target"
+        )
+    _print(_envelope(command, merged, clock, merged.warnings), "\n".join(lines), args.format)
+    return 0
+
+
+def _run_evidence(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "record":
+        payload = None if args.input_path is None else _read_input(args.input_path)
+        response = None
+        if payload is not None:
+            if not isinstance(payload, dict) or "response" not in payload:
+                raise LinguaWikiError(
+                    "invalid_input", "the --input payload is an object with a 'response' field"
+                )
+            response = str(payload["response"])
+        attempt = evidence_service.record(
+            paths,
+            task_type=args.task_type,
+            modality=args.modality,
+            score=args.score,
+            target=args.target,
+            dimension=args.dimension,
+            claims=args.claim or None,
+            help_level=args.help_level,
+            correction_mode=args.correction_mode,
+            retrieval=args.retrieval,
+            delay_hours=args.delay_hours,
+            latency_ms=args.latency_ms,
+            difficulty=args.difficulty,
+            context=args.context,
+            response=response,
+            response_visibility=args.response_visibility,
+            assessor_kind=args.assessor_kind,
+            assessor=args.assessor,
+            confidence=args.confidence,
+            origin=args.origin,
+            assessment_run=args.assessment_run,
+            task=args.task,
+            idempotency_key=args.idempotency_key,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        lines = [
+            f"{attempt.attempt_id} {attempt.outcome} ({attempt.task_type}/{attempt.modality}, "
+            f"help {attempt.help_level}, {attempt.retrieval}, context {attempt.context_key})",
+            "  evidence: "
+            + ", ".join(
+                f"{entry.claim} {entry.polarity} strength {entry.strength:.2f} ({entry.novelty})"
+                for entry in attempt.evidence
+            ),
+        ]
+        if attempt.stage_after is not None:
+            lines.append(
+                f"  {attempt.target_title}: stage {attempt.stage_before or 'unseen'} -> "
+                f"{attempt.stage_after}"
+            )
+            lines.extend(f"    {entry}" for entry in attempt.stage_explanation)
+        if attempt.errors_reactivated:
+            lines.append(f"  reactivated: {list(attempt.errors_reactivated)}")
+        if attempt.errors_supported:
+            lines.append(f"  counter-evidence for: {list(attempt.errors_supported)}")
+        lines.append(f"  response retained as: {attempt.response_visibility}")
+        _print(_envelope(command, attempt, clock, attempt.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "observe":
+        observation = evidence_service.observations(
+            paths,
+            category=args.category,
+            note=args.note,
+            salience=args.salience,
+            attempt=args.attempt,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, observation, clock, observation.warnings),
+            f"{observation.observation_id} {observation.category} ({observation.salience}): "
+            f"{observation.note}",
+            args.format,
+        )
+        return 0
+    if args.action == "list":
+        listed = evidence_service.listing(
+            paths,
+            track=args.track,
+            item=args.item,
+            dimension=args.dimension,
+            limit=args.limit,
+            clock=clock,
+        )
+        lines = [f"{listed.total} evidence row(s); {len(listed.entries)} shown"]
+        lines.extend(
+            f"  {entry.occurred_at} {entry.claim} {entry.polarity} "
+            f"strength {entry.strength:.2f} [{entry.context_key}, {entry.novelty}, "
+            f"{entry.retrieval}, help {entry.help_level}]"
+            for entry in listed.entries
+        )
+        _print(_envelope(command, listed, clock, listed.warnings), "\n".join(lines), args.format)
+        return 0
+    recomputed = evidence_service.recompute(
+        paths,
+        track=args.track,
+        item=args.item,
+        dimensions=args.dimensions,
+        dry_run=args.dry_run,
+        clock=clock,
+        command=command,
+    )
+    _print(
+        _envelope(command, recomputed, clock, recomputed.warnings),
+        _recompute_lines(recomputed),
+        args.format,
+    )
+    return 0
+
+
+def _recompute_lines(report: evidence_service.RecomputeReport) -> str:
+    lines = [
+        f"{'would recompute' if report.dry_run else 'recomputed'} "
+        f"{report.items_considered} item(s) under {report.aggregation_version}; "
+        f"{report.items_changed} stage(s) change"
+    ]
+    lines.extend(
+        f"  {change.stable_key}: {change.stage_before or 'unseen'} -> {change.stage_after} "
+        f"(gates {change.gated_stage}, evidence allows {change.evidence_ceiling}, "
+        f"confidence {change.confidence:.2f})"
+        + (f" regressed: {list(change.regressed_claims)}" if change.regressed_claims else "")
+        for change in report.changes
+    )
+    if report.estimates is not None:
+        lines.append(
+            f"  estimates: {len(report.estimates.changes)} changed, "
+            f"{len(report.estimates.unchanged)} unchanged"
+        )
+        lines.extend(
+            f"    {change.dimension}: "
+            f"{(change.previous.level_code if change.previous else None) or 'none'} -> "
+            f"{change.current.level_code or 'none'} "
+            f"[{change.current.level_low}..{change.current.level_high}] "
+            f"{change.current.estimate_status}, {change.reason}"
+            for change in report.estimates.changes
+        )
+    return "\n".join(lines)
+
+
+def _error_lines(report: error_service.ErrorReport) -> str:
+    lines = [
+        f"{report.error_id} {report.category}/{report.signature} ({report.status}): "
+        f"{report.description}",
+        f"  {report.occurrence_count} occurrence(s), {report.success_count} qualifying "
+        f"success(es), severity {report.severity}"
+        + (f", target {report.target_title}" if report.target_title else ""),
+    ]
+    if report.status_reason:
+        lines.append(f"  reason: {report.status_reason}")
+    if report.outstanding:
+        lines.append(f"  still needs: {', '.join(report.outstanding)}")
+    return "\n".join(lines)
+
+
+def _run_errors(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "record":
+        recorded = error_service.record(
+            paths,
+            category=args.category,
+            signature=args.signature,
+            description=args.description,
+            target=args.target,
+            learner_form=args.learner_form,
+            corrected_form=args.corrected_form,
+            explanation=args.explanation,
+            meaning_impact=args.meaning_impact,
+            classification=args.classification,
+            confidence=args.confidence,
+            severity=args.severity,
+            attempt=args.attempt,
+            attach_to=args.attach_to,
+            distinct=args.distinct,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, recorded, clock, recorded.warnings),
+            _error_lines(recorded),
+            args.format,
+        )
+        return 0
+    if args.action == "show":
+        shown = error_service.show(paths, error=args.error, track=args.track, clock=clock)
+        lines = [_error_lines(shown)]
+        lines.extend(
+            f"  occurrence {entry.observed_at} ({entry.classification}, impact "
+            f"{entry.meaning_impact})"
+            for entry in shown.occurrences
+        )
+        lines.extend(
+            f"  counter-evidence {entry.qualification} in {entry.context_key}"
+            for entry in shown.counter_evidence
+        )
+        _print(_envelope(command, shown, clock, shown.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "list":
+        listed = error_service.listing(
+            paths,
+            track=args.track,
+            status=args.status,
+            live_only=args.live_only,
+            limit=args.limit,
+            clock=clock,
+        )
+        lines = [f"{listed.total} error(s), {listed.live} still live"]
+        lines.extend(_error_lines(entry) for entry in listed.entries)
+        _print(_envelope(command, listed, clock, listed.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "followup":
+        queued = error_service.add_followup(
+            paths,
+            kind=args.kind,
+            action=args.followup_action,
+            target=args.target,
+            error=args.error,
+            attempt=args.attempt,
+            priority=args.priority,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, queued, clock, queued.warnings),
+            f"{queued.followup_id} {queued.kind} ({queued.status}, priority "
+            f"{queued.priority}): {queued.action}",
+            args.format,
+        )
+        return 0
+    queue = error_service.list_followups(
+        paths, track=args.track, status=args.status, limit=args.limit, clock=clock
+    )
+    lines = [f"{queue.total} follow-up(s); {len(queue.entries)} shown"]
+    lines.extend(
+        f"  {entry.followup_id} {entry.kind} (priority {entry.priority}): {entry.action}"
+        for entry in queue.entries
+    )
+    _print(_envelope(command, queue, clock, queue.warnings), "\n".join(lines), args.format)
+    return 0
+
+
+def _run_estimate(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "show":
+        shown = estimate_service.report(paths, track=args.track, summary=args.summary, clock=clock)
+        lines = [f"{shown.track_id} in {shown.framework_id} ({shown.calculation_version})"]
+        lines.extend(
+            f"  {entry.dimension}: {entry.level_code or '--'} "
+            f"[{entry.level_low or '--'}..{entry.level_high or '--'}] "
+            f"{entry.estimate_status}, confidence {entry.confidence_label}, basis "
+            f"{entry.basis}, {entry.evidence_count} observation(s)"
+            for entry in shown.estimates
+        )
+        if shown.summary_level is not None:
+            lines.append(f"  summary: {shown.summary_level} -- {shown.summary_label}")
+        _print(_envelope(command, shown, clock, shown.warnings), "\n".join(lines), args.format)
+        return 0
+    history = estimate_service.history(
+        paths, track=args.track, dimension=args.dimension, limit=args.limit, clock=clock
+    )
+    lines = [f"{history.total} snapshot(s); {len(history.snapshots)} shown"]
+    for snapshot in history.snapshots:
+        lines.append(
+            f"  {snapshot.recorded_at} {snapshot.dimension}: {snapshot.level_code or '--'} "
+            f"[{snapshot.level_low or '--'}..{snapshot.level_high or '--'}] "
+            f"{snapshot.estimate_status} ({snapshot.basis}, {snapshot.evidence_count} "
+            f"observation(s)) -- {snapshot.reason}"
+        )
+        lines.extend(
+            f"      {factor.name} ({factor.weight:g}): {factor.detail}"
+            for factor in snapshot.factors
+        )
+    _print(_envelope(command, history, clock, history.warnings), "\n".join(lines), args.format)
+    return 0
+
+
+def _run_context(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    bundle = context_service.build(
+        paths,
+        scope=args.scope,
+        track=args.track,
+        item=getattr(args, "item", None),
+        max_records=args.max_records,
+        max_tokens=args.max_tokens,
+        include_responses=args.include_responses,
+        clock=clock,
+    )
+    lines = [
+        f"{bundle.scope} bundle for {bundle.track_id}: {bundle.records} record(s), "
+        f"~{bundle.estimated_tokens}/{bundle.token_limit} token(s)"
+        + (" (bounded)" if bundle.bounded else ""),
+        f"  sections: {', '.join(bundle.sections) or 'none'}",
+        f"  learner responses included: {bundle.responses_included}",
+    ]
+    lines.extend(
+        f"  omitted {omission.section}: {omission.included} of {omission.available} "
+        f"({omission.reason})"
+        for omission in bundle.omissions
+    )
+    _print(_envelope(command, bundle, clock, bundle.warnings), "\n".join(lines), args.format)
+    return 0
+
+
+def _session_lines(report: session_service.SessionReport) -> str:
+    """A session as a person reads it: the plan, then what it is holding."""
+
+    lines = [
+        f"{report.session_id} {report.status} ({report.mode} mode, {report.energy} energy, "
+        f"{report.correction_mode} correction)",
+        f"  {report.planned_minutes} of {report.requested_minutes} minute(s) planned; "
+        f"novelty {report.novel_targets}/{report.novel_target_cap}",
+    ]
+    for block in report.blocks:
+        lines.append(
+            f"  {block.sequence}. {block.role:8} {block.block_type:18} "
+            f"{block.planned_minutes:3}m  {block.status:9} {block.objective}"
+        )
+        lines.extend(f"       - {reason}" for reason in block.rationale)
+        if block.targets:
+            lines.append(
+                "       targets: "
+                + ", ".join(
+                    f"{target.title}{' (new)' if target.novel else ''}" for target in block.targets
+                )
+            )
+    for omission in report.omissions:
+        lines.append(f"  omitted {omission.block_type}: {omission.reason}")
+    if report.batches or report.staged_events:
+        lines.append(
+            f"  staged: {report.staged_events} event(s) across {report.batches} batch(es)"
+            + (
+                f", last sequence {report.last_batch_sequence}"
+                if report.last_batch_sequence
+                else ""
+            )
+        )
+    close = report.finalization
+    if close is not None:
+        lines.append(
+            f"  closed {close.outcome}: {close.attempts_written} attempt(s), "
+            f"{close.evidence_written} evidence row(s), {close.errors_written} error "
+            f"occurrence(s), {close.followups_written} follow-up(s)"
+        )
+    if report.resume_from is not None:
+        point = report.resume_from
+        lines.append(
+            f"  resume at block {point.sequence} ({point.block_type})"
+            + (f", activity {point.activity_kind}" if point.activity_kind else "")
+        )
+    if report.next_actions:
+        lines.append(f"  next: {', '.join(report.next_actions)}")
+    return "\n".join(lines)
+
+
+def _close_lines(report: session_service.CloseReport) -> str:
+    lines = [
+        f"{report.session_id} {report.outcome}"
+        + (" (replayed: the original result)" if report.replayed else ""),
+        f"  consumed {report.staged_consumed} staged event(s)"
+        + (f", discarded {report.staged_discarded}" if report.staged_discarded else ""),
+        f"  wrote {report.attempts_written} attempt(s), {report.evidence_written} evidence "
+        f"row(s), {report.errors_written} error occurrence(s), "
+        f"{report.followups_written} follow-up(s), {report.observations_written} note(s)",
+    ]
+    for change in report.stage_changes:
+        lines.append(
+            f"  {change.title}: stage {change.stage_before or 'unseen'} -> {change.stage_after}"
+        )
+    if report.errors_touched:
+        lines.append(f"  errors touched: {list(report.errors_touched)}")
+    if report.dimensions_recomputed:
+        lines.append(f"  estimates recomputed: {list(report.dimensions_recomputed)}")
+    lines.append(f"  policy versions: {report.calculation_versions}")
+    return "\n".join(lines)
+
+
+def _run_plan(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "create":
+        report = session_service.create(
+            paths,
+            minutes=args.minutes,
+            mode=args.mode,
+            energy=args.energy,
+            intent=args.intent,
+            correction_mode=args.correction_mode,
+            track=args.track,
+            idempotency_key=args.idempotency_key,
+            clock=clock,
+            command=command,
+        )
+    else:
+        report = session_service.show(paths, session=args.session, track=args.track, clock=clock)
+    _print(_envelope(command, report, clock, report.warnings), _session_lines(report), args.format)
+    return 0
+
+
+def _run_session(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action in ("start", "status", "resume"):
+        if args.action == "start":
+            report = session_service.start(
+                paths, session=args.session, track=args.track, clock=clock, command=command
+            )
+        elif args.action == "resume":
+            report = session_service.resume(
+                paths, session=args.session, track=args.track, clock=clock, command=command
+            )
+        else:
+            report = session_service.show(
+                paths, session=args.session, track=args.track, clock=clock
+            )
+        _print(
+            _envelope(command, report, clock, report.warnings),
+            _session_lines(report),
+            args.format,
+        )
+        return 0
+    if args.action == "log":
+        payload = _read_input(args.input_path)
+        if not isinstance(payload, dict):
+            raise LinguaWikiError(
+                "invalid_input",
+                "a batch is a lingua.session.events.v1 object with a sequence, an "
+                "idempotency key, and an ordered event array",
+                details=(ErrorDetail(field="input", reason="payload is not an object"),),
+            )
+        batch = session_service.log(
+            paths,
+            batch=payload,
+            session=args.session,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        lines = [
+            f"batch {batch.sequence} of {batch.session_id}: {batch.event_count} event(s) "
+            + ("already stored" if batch.duplicate else "staged"),
+            f"  content hash {batch.content_hash}",
+            f"  {batch.staged_events} staged event(s) in this batch; nothing is credited "
+            "until the session closes",
+        ]
+        _print(_envelope(command, batch, clock, batch.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "staged":
+        events = session_service.staged(
+            paths,
+            session=args.session,
+            track=args.track,
+            limit=args.limit,
+            clock=clock,
+        )
+        listing = session_service.StagedListing(events=events, total=len(events))
+        lines = [f"{len(events)} staged event(s)"]
+        lines.extend(
+            f"  {event.batch_sequence}.{event.sequence} {event.kind:26} {event.status:13} "
+            f"{event.evidence_basis:10} {event.summary}"
+            for event in events
+        )
+        _print(_envelope(command, listing, clock, ()), "\n".join(lines), args.format)
+        return 0
+    if args.action in ("close", "partial-close"):
+        outcome = getattr(args, "outcome", "partial")
+        closed = session_service.close(
+            paths,
+            outcome=outcome,
+            session=args.session,
+            track=args.track,
+            actual_minutes=args.actual_minutes,
+            fatigue=args.fatigue,
+            summary=args.summary,
+            discard_blocks=args.discard_block,
+            idempotency_key=args.idempotency_key,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, closed, clock, closed.warnings),
+            _close_lines(closed),
+            args.format,
+        )
+        return 0
+    if args.action == "abandon":
+        report = session_service.abandon(
+            paths,
+            session=args.session,
+            track=args.track,
+            reason=args.reason,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, report, clock, report.warnings),
+            _session_lines(report),
+            args.format,
+        )
+        return 0
+    if args.action == "recover":
+        recovery = session_service.recover(
+            paths,
+            source=args.source,
+            target=args.target,
+            events=args.event,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        lines = [
+            f"recovered {recovery.recovered} staged event(s) from "
+            f"{recovery.source_session_id} into {recovery.target_session_id}"
+            + (f" as batch {recovery.batch_id}" if recovery.batch_id else ""),
+        ]
+        if recovery.skipped:
+            lines.append(f"  {recovery.skipped} staged event(s) were left where they were")
+        _print(
+            _envelope(command, recovery, clock, recovery.warnings),
+            "\n".join(lines),
+            args.format,
+        )
+        return 0
+    if args.action == "ingest-package":
+        payload = _read_input(args.input_path)
+        if not isinstance(payload, dict):
+            raise LinguaWikiError(
+                "invalid_input",
+                "a session package is a lingua.session.v1 object",
+                details=(ErrorDetail(field="input", reason="payload is not an object"),),
+            )
+        ingested = session_service.ingest_package(
+            paths,
+            package=payload,
+            session=args.session,
+            track=args.track,
+            producer=args.producer,
+            file_sha256=_file_digest(args.input_path),
+            clock=clock,
+            command=command,
+        )
+        lines = [
+            f"{ingested.package_id} -> {ingested.session_id}: "
+            + (
+                "already ingested, nothing staged again"
+                if ingested.duplicate
+                else f"{ingested.staged_events} event(s) staged"
+            ),
+            f"  content hash {ingested.package_hash}",
+            f"  retention: {ingested.retention_policy}; audio "
+            + ("available" if ingested.audio_available else "not retained"),
+        ]
+        if ingested.skipped_events:
+            lines.append(f"  {ingested.skipped_events} event(s) were not staged")
+        _print(
+            _envelope(command, ingested, clock, ingested.warnings),
+            "\n".join(lines),
+            args.format,
+        )
+        return 0
+    raise LinguaWikiError("unknown_command", "command is not implemented")
+
+
+def _file_digest(path: str | None) -> str | None:
+    """The bytes as they arrived, for provenance alongside the canonical content hash."""
+
+    if path is None or path == "-":
+        return None
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _run_wiki(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    report = wiki_service.build(
+        paths, view=args.view, track=args.track, clock=clock, command=command
+    )
+    lines = [
+        f"{report.view} for {report.track_id}: {', '.join(report.files)}",
+        f"  projection {report.projection_version}, hash {report.content_hash}",
+        f"  source event {report.source_event_id or 'none'}"
+        + (" (the projection was stale)" if report.stale_before else ""),
+    ]
+    _print(_envelope(command, report, clock, report.warnings), "\n".join(lines), args.format)
+    return 0
+
+
+def _dispatch(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    if args.group == "status":
+        return _run_status(args, clock)
+    if args.group == "workspace":
+        return _run_workspace(args, clock, command)
+    if args.group == "db":
+        return _run_db(args, clock, command)
+    if args.group == "skills":
+        return _run_skills(args, clock, command)
+    if args.group == "pack":
+        if args.action == "author":
+            return _run_pack_author(args, clock, command)
+        if args.action == "template":
+            return _run_pack_template(args, clock, command)
+        return _run_pack(args, clock, command)
+    if args.group == "user":
+        return _run_user(args, clock, command)
+    if args.group == "track":
+        return _run_track(args, clock, command)
+    if args.group == "onboard":
+        return _run_onboard(args, clock, command)
+    if args.group == "resources":
+        return _run_resources(args, clock, command)
+    if args.group == "curriculum":
+        return _run_curriculum(args, clock, command)
+    if args.group == "assessment":
+        return _run_assessment(args, clock, command)
+    if args.group == "knowledge":
+        return _run_knowledge(args, clock, command)
+    if args.group == "evidence":
+        return _run_evidence(args, clock, command)
+    if args.group == "errors":
+        return _run_errors(args, clock, command)
+    if args.group == "estimate":
+        return _run_estimate(args, clock, command)
+    if args.group == "context":
+        return _run_context(args, clock, command)
+    if args.group == "plan":
+        return _run_plan(args, clock, command)
+    if args.group == "session":
+        return _run_session(args, clock, command)
+    if args.group == "wiki":
+        return _run_wiki(args, clock, command)
+    raise LinguaWikiError("unknown_command", "command is not implemented")
 
 
 def run(argv: Sequence[str] | None = None, *, clock: Clock | None = None) -> int:
@@ -78,17 +2687,7 @@ def run(argv: Sequence[str] | None = None, *, clock: Clock | None = None) -> int
     active_clock = clock or SystemClock()
     try:
         args = parser.parse_args(arguments)
-        if args.command == "status":
-            envelope = _success("status", _status(), active_clock)
-            if args.format == "json":
-                print(envelope.model_dump_json())
-            else:
-                print(
-                    f"LinguaWiki {envelope.data.application_version} "
-                    f"(contract v{envelope.data.contract_schema_version}, Stage 0)"
-                )
-            return 0
-        raise LinguaWikiError("unknown_command", "command is not implemented")
+        return _dispatch(args, active_clock, command)
     except ParserExit as exc:
         if exc.message:
             output = sys.stdout if exc.status == 0 else sys.stderr
@@ -96,17 +2695,22 @@ def run(argv: Sequence[str] | None = None, *, clock: Clock | None = None) -> int
         return exc.status
     except LinguaWikiError as exc:
         print(_failure(command, exc, active_clock).model_dump_json(), file=sys.stderr)
-        return 2
+        return EXIT_ERROR
     except ValidationError as exc:
         details = tuple(
             ErrorDetail(field=".".join(str(part) for part in item["loc"]), reason=item["msg"])
             for item in exc.errors()
         )
         error = LinguaWikiError(
-            "invalid_contract", "output contract validation failed", details=details
+            # Not "output": a payload arriving through `--input` fails here too, and
+            # telling a caller their *output* contract failed sends them looking in the
+            # wrong place entirely.
+            "invalid_contract",
+            "contract validation failed",
+            details=details,
         )
         print(_failure(command, error, active_clock).model_dump_json(), file=sys.stderr)
-        return 2
+        return EXIT_ERROR
     except Exception as exc:
         error = LinguaWikiError(
             "internal_error",
@@ -117,8 +2721,11 @@ def run(argv: Sequence[str] | None = None, *, clock: Clock | None = None) -> int
         print(_failure(command, error, active_clock).model_dump_json(), file=sys.stderr)
         if os.environ.get("LINGUAWIKI_DEBUG") == "1":
             traceback.print_exc(file=sys.stderr)
-        return 2
+        return EXIT_ERROR
 
 
 def main() -> None:
     raise SystemExit(run())
+
+
+__all__ = ["ContractArgumentParser", "main", "run"]

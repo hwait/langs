@@ -1,0 +1,77 @@
+{
+  "descriptors": [
+    {
+      "descriptor": "At L2 the fixture learner handles reading tasks of two glyphs.",
+      "dimension": "reading",
+      "level": "L2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "5c614c1a1df46ed991492394d9465db4a680419c875b5bd8934e7182ddf18f77",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.desc.l2.reading"
+    },
+    {
+      "descriptor": "At L2 the fixture learner handles listening tasks of two glyphs.",
+      "dimension": "listening",
+      "level": "L2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "59795d127d9ce12029053b8964d055b2598801539738348198df006a1824989a",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.desc.l2.listening"
+    },
+    {
+      "descriptor": "At L2 the fixture learner handles spoken-production tasks of two glyphs.",
+      "dimension": "spoken-production",
+      "level": "L2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "8d38837683410f6f46890889d983ee477b650d9a65992c4577545cc3abb4821b",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.desc.l2.spoken-production"
+    },
+    {
+      "descriptor": "At L2 the fixture learner handles written-production tasks of two glyphs.",
+      "dimension": "written-production",
+      "level": "L2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "f1a9cf8985a1b3e2cd8a1de6333fbdaa0c5b9adb0272f3f3ea06aacbd284a1bd",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.desc.l2.written-production"
+    },
+    {
+      "descriptor": "At L2 the fixture learner handles form-control tasks of two glyphs.",
+      "dimension": "form-control",
+      "level": "L2",
+      "locale": "en",
+      "provenance": {
+        "content_hash": "aa3edc911102200155b79f4b4ebd53feac9836c21c880b63a1f3e97ad2da4727",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "stable_key": "qix.desc.l2.form-control"
+    }
+  ],
+  "framework": "fixture-bands-v1",
+  "schema_name": "lingua.pack.proficiency.v1",
+  "schema_version": 1
+}
