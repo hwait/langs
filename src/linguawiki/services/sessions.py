@@ -36,6 +36,7 @@ from pydantic import Field, ValidationError
 
 from linguawiki import planner as planner_policy
 from linguawiki import session as session_policy
+from linguawiki import sources as source_policy
 from linguawiki.clock import Clock, SystemClock, aware_utc, naive_utc
 from linguawiki.contracts import (
     STAGED_PAYLOAD_KINDS,
@@ -45,7 +46,7 @@ from linguawiki.contracts import (
 )
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.connection import Database, open_reader, open_writer
-from linguawiki.errors import ErrorDetail, LinguaWikiError
+from linguawiki.errors import ErrorDetail, LinguaWikiError, validated_contract
 from linguawiki.evidence import STRENGTH_VERSION, assert_known
 from linguawiki.ids import (
     ActivityId,
@@ -64,6 +65,7 @@ from linguawiki.services import errors as error_service
 from linguawiki.services import estimates as estimate_service
 from linguawiki.services import evidence as evidence_service
 from linguawiki.services import learners as learner_service
+from linguawiki.services import sources as source_service
 
 #: How far back "recently" reaches for weekly balance and repetition. The plan's balance
 #: table is a weekly policy, so the window that measures it is a week.
@@ -87,6 +89,7 @@ MATERIALIZED_KINDS: Mapping[str, str] = {
     "attempt.observed": "attempt",
     "correction.given": "error-occurrence",
     "pronunciation.assessment": "observation",
+    "source.progress": "comprehension",
     "observation.noted": "observation",
     "follow_up": "followup",
 }
@@ -248,6 +251,12 @@ class CloseReport(ContractModel):
     errors_written: int = 0
     followups_written: int = 0
     observations_written: int = 0
+    #: Comprehension observations written against catalogued sources. Reading and
+    #: listening reach the learner's model through the close like everything else.
+    comprehension_written: int = 0
+    #: Which sources this session worked on, for the next plan to continue rather than
+    #: start something new.
+    sources_worked: tuple[str, ...] = ()
     first_batch_sequence: int | None = None
     last_batch_sequence: int | None = None
     stage_changes: tuple[StageChangeReport, ...] = ()
@@ -588,6 +597,37 @@ def _curriculum_continuity(database: Database, *, track_id: str) -> float:
     return min(1.0, float(row[0]) / float(row[1]))
 
 
+def _source_continuity(database: Database, *, track_id: str) -> dict[str, float]:
+    """How much unfinished material is waiting, by the block area that could use it.
+
+    A source in progress is a commitment the learner already made, and the strongest
+    reason to plan a reading block is that there is a book they are halfway through. It is
+    keyed by area rather than returned as one number because a half-read novel is no
+    argument for a pronunciation block: a component that applied to every area would be a
+    weight on a constant, which is the thing Stage 4 refused to ship.
+
+    Abandoned sources are excluded. The learner already said they are not coming back, and
+    a planner that kept proposing them would be arguing with them once a session.
+    """
+
+    by_area: dict[str, float] = {}
+    for kind, unfinished, total in database.query(
+        "SELECT source.kind, "
+        "count(*) FILTER (WHERE progress.status = 'in-progress'), count(*) "
+        "FROM track_source_progress progress "
+        "JOIN sources source ON source.source_id = progress.source_id "
+        "WHERE progress.track_id = ? AND source.status <> 'abandoned' "
+        "AND progress.status <> 'abandoned' GROUP BY source.kind",
+        [track_id],
+    ):
+        if not int(total):
+            continue
+        share = min(1.0, float(unfinished) / float(total))
+        for area in source_policy.AREAS_FOR_KIND.get(str(kind), ()):
+            by_area[area] = max(by_area.get(area, 0.0), share)
+    return by_area
+
+
 def _transfer_value(block: session_policy.BlockType) -> float:
     """How much a block's work carries into other dimensions.
 
@@ -617,6 +657,7 @@ def _block_candidates(
     recent = _recent_area_counts(database, track_id=track_id, now=now)
     dimensions = _dimension_facts(database, track=track)
     continuity = _curriculum_continuity(database, track_id=track_id)
+    source_continuity = _source_continuity(database, track_id=track_id)
     interests = _preference_list(track, "interests")
     goals = _preference_list(track, "goals") + ((track.goal,) if track.goal else ())
     followups = int(
@@ -685,6 +726,7 @@ def _block_candidates(
                 active_errors=active_errors_by_dimension.get(dimension, 0),
                 uncertainty=uncertainty,
                 curriculum_continuity=continuity,
+                source_continuity=source_continuity.get(block.area, 0.0),
                 transfer_value=_transfer_value(block),
                 recent_blocks=recent.get(block.area, 0),
                 ability=ability,
@@ -1423,6 +1465,9 @@ def _staged_summary(kind: str, payload: Mapping[str, Any]) -> str:
         )
     if kind == "pronunciation.assessment":
         return f"pronunciation {payload.get('status', 'observed')}"
+    if kind == "source.progress":
+        unit = payload.get("unit") or "the source"
+        return f"{payload.get('aid', 'unaided')} comprehension of {unit}"
     if kind == "observation.noted":
         return f"{payload.get('category', 'note')} note"
     if kind == "follow_up":
@@ -1778,33 +1823,6 @@ def _retained_payload(
     return retained
 
 
-def _validated_contract(model: type[Any], payload: Any, *, code: str, subject: str) -> Any:
-    """Validate an incoming payload and refuse it by name, with the field that failed.
-
-    A raw `ValidationError` escaping to the CLI became a generic envelope that said the
-    *output* contract had failed -- which is the opposite of what happened, and told a
-    skill nothing about which part of its batch was wrong.
-    """
-
-    try:
-        return model.model_validate(payload)
-    except ValidationError as failure:
-        details = tuple(
-            ErrorDetail(
-                field=".".join(str(part) for part in item["loc"]) or subject,
-                reason=str(item["msg"]),
-            )
-            for item in failure.errors()[:10]
-        )
-        first = failure.errors()[0]
-        field = ".".join(str(part) for part in first["loc"]) or subject
-        raise LinguaWikiError(
-            code,
-            f"this {subject} does not satisfy its contract: {field} {first['msg'].lower()}",
-            details=details,
-        ) from failure
-
-
 def _assert_events_are_new(
     database: Database,
     *,
@@ -1978,7 +1996,7 @@ def log(
     validated = (
         batch
         if isinstance(batch, SessionEventBatch)
-        else _validated_contract(
+        else validated_contract(
             SessionEventBatch, batch, code="invalid_session_batch", subject="batch"
         )
     )
@@ -2466,11 +2484,13 @@ def _materialize(
         "errors": 0,
         "followups": 0,
         "observations": 0,
+        "comprehension": 0,
         "discarded": 0,
     }
     stage_changes: list[StageChangeReport] = []
     errors_touched: list[str] = []
     dimensions: set[str] = set()
+    sources_worked: set[str] = set()
     worked_blocks: set[str | None] = set()
     for row in rows:
         if row.discard_reason is not None:
@@ -2539,6 +2559,26 @@ def _materialize(
             materialized_id = error_report.recorded_occurrence_id
             counts["errors"] += 1
             errors_touched.append(error_report.error_id)
+        elif row.kind == "source.progress":
+            materialized_id = source_service.materialize_progress(
+                transaction,
+                track_id=track_id,
+                session_id=session_id,
+                source=payload.source_ref,
+                band=payload.band,
+                unit=payload.unit,
+                aid=payload.aid,
+                mode=payload.mode,
+                replays=payload.replays,
+                lookups=payload.lookups,
+                minutes=payload.minutes,
+                completed=payload.completed,
+                note=payload.note,
+                observed_at=row.occurred_at,
+                now=now,
+            )
+            counts["comprehension"] += 1
+            sources_worked.add(payload.source_ref)
         elif row.kind == "follow_up":
             followup = error_service.write_followup(
                 transaction,
@@ -2616,6 +2656,7 @@ def _materialize(
         "stage_changes": tuple(stage_changes),
         "errors_touched": tuple(dict.fromkeys(errors_touched)),
         "dimensions": tuple(sorted(dimensions)),
+        "sources_worked": tuple(sorted(sources_worked)),
         "worked_blocks": worked_blocks,
         "planned_core_blocks": planned_core,
     }
@@ -2847,6 +2888,8 @@ def close(
                 errors_written=counts["errors"],
                 followups_written=counts["followups"],
                 observations_written=counts["observations"],
+                comprehension_written=counts["comprehension"],
+                sources_worked=written["sources_worked"],
                 first_batch_sequence=first_sequence,
                 last_batch_sequence=last_sequence,
                 stage_changes=written["stage_changes"],
@@ -3164,7 +3207,7 @@ def ingest_package(
                 ErrorDetail(field="schema_version", reason=str(schema_version)),
             ),
         )
-    validated = _validated_contract(
+    validated = validated_contract(
         SessionPackage, package, code="invalid_session_package", subject="session package"
     )
     package_hash = canonical_hash(validated.model_dump(mode="json"))

@@ -21,7 +21,15 @@ Once a contract version is released:
 | 3 | `linguawiki.cli.status.v1` | `stage` is now `3`; `database_schema_version` is now `22`. | Both track the running release, as before. Stage 3 added migrations 0019-0022 and no new wire contract: the learner model is reported through the generic success envelope, whose `data` is deliberately unconstrained. |
 | 4 | `linguawiki.cli.status.v1` | `stage` is now `4`; `database_schema_version` is now `23`. | Both track the running release, as before. Stage 4 added migration 0023 and one new published contract, below. |
 | 4 | `lingua.session.events.v1` | **New** contract: the batch `session log` accepts -- a sequence number, an idempotency key, an optional content hash, and an ordered array of `attempt.observed`, `correction.given`, `pronunciation.assessment`, `observation.noted`, or `follow_up` events. | Additive: a new schema name, no change to any existing contract. Deliberately *not* an extension of `lingua.session.v1`, which is a whole externally produced session; see below. |
+| 5 | `linguawiki.cli.status.v1` | `stage` is now `5`; `database_schema_version` is now `26`. | Both track the running release, as before. Stage 5 added migrations 0024-0026 and no new wire contract. |
+| 5 | `lingua.session.events.v1` | Added the `source.progress` event kind: a catalogued source, what the learner understood of it, and with how much help. | Additive within the contract's existing `events` discriminator. A producer that never emits one is unaffected; a consumer that does not know the kind sees an event it cannot interpret, which is why the kind list is published in the schema rather than assumed. |
 | 2 | `lingua.pack.v1` and friends | **New** contracts for the language-pack directory format: `lingua.pack.v1` (manifest), `lingua.pack.capabilities.v1`, `lingua.pack.source-policy.v1`, `lingua.pack.proficiency.v1`, `lingua.pack.assessment.v1`, `lingua.pack.activities.v1`, `lingua.pack.references.v1`, `lingua.pack.bundle.v1`, `lingua.pack.expectations.v1`, and the JSONL line contracts `lingua.pack.knowledge.v1`, `lingua.pack.relation.v1`, `lingua.pack.example.v1`. | Additive: new schema names, no change to any existing contract. |
+
+Stage 5 amended `lingua.session.events.v1` once, by adding `source.progress`, and
+again left `lingua.session.v1` alone. The reason is the same one that separated them:
+reading a book is something *this workspace* observed, so it is an event in a flush.
+A transcript of a conversation is somebody else's account, so it stays in the package
+contract.
 
 Stage 4 added one contract and left `lingua.session.v1` alone, and the split is the
 point. `lingua.session.v1` is a *whole session produced elsewhere*: it arrives as a file
@@ -45,8 +53,10 @@ and `estimates.CALCULATION_VERSION`. Those version strings are stored on every r
 produced, so a policy change can be told apart from a data change and replayed.
 
 `lingua.workspace.v1`, `lingua.session.v1`, `lingua.content.v1`, and `linguawiki.lock.v1` are
-unchanged since Stage 0 -- including through Stage 4, which ingests `lingua.session.v1`
-packages without amending them. `history_policy` in particular stays the constant `git-wiki`; the other
+unchanged since Stage 0 -- including through Stage 5, which both ingests
+`lingua.session.v1` packages and now stores their transcript layers, without amending
+them. That is the stronger claim: Stage 5 is the release that consumes the whole of that
+contract, and it needed nothing added. `history_policy` in particular stays the constant `git-wiki`; the other
 policies in the implementation plan need an amendment recorded here first.
 
 Stage 2 deliberately did **not** amend `lingua.content.v1`. Its four review states

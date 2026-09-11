@@ -31,8 +31,8 @@
           "type": "string"
         },
         "stage": {
-          "const": 4,
-          "default": 4,
+          "const": 5,
+          "default": 5,
           "title": "Stage",
           "type": "integer"
         }

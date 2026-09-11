@@ -8,6 +8,7 @@ import os
 import sys
 import traceback
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Never
 
@@ -16,6 +17,8 @@ from pydantic import BaseModel, ValidationError
 from linguawiki import __version__, error_model
 from linguawiki import evidence as evidence_module
 from linguawiki import session as session_policy
+from linguawiki import sources as source_policy
+from linguawiki import transcripts as transcript_policy
 from linguawiki.clock import Clock, SystemClock
 from linguawiki.contracts import (
     ErrorEnvelope,
@@ -29,6 +32,7 @@ from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.ids import EventId
 from linguawiki.packs import stamp as stamp_module
 from linguawiki.paths import require_initialized_workspace, workspace_paths
+from linguawiki.services import artifacts as artifact_service
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import authoring as authoring_service
 from linguawiki.services import context as context_service
@@ -41,9 +45,13 @@ from linguawiki.services import knowledge as knowledge_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import onboarding as onboarding_service
 from linguawiki.services import packs as pack_service
+from linguawiki.services import privacy as privacy_service
 from linguawiki.services import resources as resource_service
 from linguawiki.services import sessions as session_service
 from linguawiki.services import skills as skills_service
+from linguawiki.services import sources as source_service
+from linguawiki.services import speaking as speaking_service
+from linguawiki.services import transcripts as transcript_service
 from linguawiki.services import wiki as wiki_service
 from linguawiki.services import workspace as workspace_service
 
@@ -871,6 +879,252 @@ def _wiki_parser(subcommands: Any) -> None:
     _add_workspace(build)
 
 
+def _source_parser(subcommands: Any) -> None:
+    source = subcommands.add_parser("source", help="catalogue material and record what it taught")
+    actions = source.add_subparsers(dest="action", required=True)
+    add = actions.add_parser("add", help="catalogue one work, with its rights")
+    add.add_argument("--kind", choices=source_policy.SOURCE_KINDS, required=True)
+    add.add_argument("--title", required=True)
+    add.add_argument("--creator")
+    add.add_argument("--uri", dest="canonical_uri")
+    add.add_argument(
+        "--rights",
+        choices=source_policy.RIGHTS_CLASSES,
+        default="metadata-only",
+        help="what may be stored from the work itself",
+    )
+    add.add_argument("--rights-note")
+    add.add_argument("--language")
+    add.add_argument("--level")
+    add.add_argument("--has-audio", action="store_true")
+    add.add_argument("--has-transcript", action="store_true")
+    add.add_argument("--notes")
+    # Units carry excerpts, which are text from the work: a payload, never argv.
+    _add_input(add, required=False)
+    _add_track_selector(add)
+    _add_workspace(add)
+    listing = actions.add_parser("list", help="the catalogue and its progress")
+    listing.add_argument("--status", choices=source_policy.SOURCE_STATUSES)
+    listing.add_argument("--kind", choices=source_policy.SOURCE_KINDS)
+    listing.add_argument("--limit", type=int, default=50)
+    _add_track_selector(listing)
+    _add_workspace(listing)
+    show = actions.add_parser("show", help="one source, its units, and its progress")
+    show.add_argument("--source", required=True)
+    _add_track_selector(show)
+    _add_workspace(show)
+    comprehension = actions.add_parser(
+        "comprehension", help="record how much was understood, and with what help"
+    )
+    comprehension.add_argument("--source", required=True)
+    comprehension.add_argument("--unit")
+    comprehension.add_argument("--aid", choices=source_policy.COMPREHENSION_AIDS, default="unaided")
+    comprehension.add_argument("--band", choices=source_policy.COMPREHENSION_BANDS, required=True)
+    comprehension.add_argument("--mode", choices=source_policy.STUDY_MODES, default="intensive")
+    comprehension.add_argument("--replays", type=int, default=0)
+    comprehension.add_argument("--lookups", type=int, default=0)
+    comprehension.add_argument("--minutes", type=int)
+    comprehension.add_argument("--note")
+    _add_track_selector(comprehension)
+    _add_workspace(comprehension)
+    position = actions.add_parser("position", help="record where the learner is in a source")
+    position.add_argument("--source", required=True)
+    position.add_argument("--unit")
+    position.add_argument("--mode", choices=source_policy.STUDY_MODES)
+    position.add_argument("--minutes", type=int)
+    _add_track_selector(position)
+    _add_workspace(position)
+    complete = actions.add_parser("complete-unit", help="mark one unit worked through")
+    complete.add_argument("--source", required=True)
+    complete.add_argument("--unit", required=True)
+    complete.add_argument("--minutes", type=int)
+    _add_track_selector(complete)
+    _add_workspace(complete)
+    link = actions.add_parser("link", help="link a knowledge item to the unit it came from")
+    link.add_argument("--source", required=True)
+    link.add_argument("--unit", required=True)
+    link.add_argument("--target", required=True)
+    link.add_argument("--relation", default="extracted-from")
+    _add_track_selector(link)
+    _add_workspace(link)
+    status_action = actions.add_parser("status", help="move a source through its lifecycle")
+    status_action.add_argument("--source", required=True)
+    status_action.add_argument("--status", choices=source_policy.SOURCE_STATUSES, required=True)
+    _add_track_selector(status_action)
+    _add_workspace(status_action)
+
+
+def _artifact_parser(subcommands: Any) -> None:
+    artifact = subcommands.add_parser(
+        "artifact", help="register, verify, and purge recordings and files"
+    )
+    actions = artifact.add_subparsers(dest="action", required=True)
+    register = actions.add_parser("register", help="record a file that stays outside Git")
+    register.add_argument("--path", dest="relative_path", required=True)
+    register.add_argument("--kind", choices=("audio", "transcript", "other"), default="audio")
+    register.add_argument(
+        "--origin",
+        choices=("learner-recording", "provider-export", "source-download", "other"),
+        default="learner-recording",
+    )
+    register.add_argument("--rights", choices=source_policy.RIGHTS_CLASSES, default="full-local")
+    register.add_argument("--source")
+    register.add_argument("--media-type")
+    register.add_argument(
+        "--not-retained",
+        dest="retained",
+        action="store_false",
+        help="record that the file existed and was not kept",
+    )
+    _add_track_selector(register)
+    _add_workspace(register)
+    verify = actions.add_parser("verify", help="check registered files against their checksums")
+    _add_track_selector(verify)
+    _add_workspace(verify)
+    listing = actions.add_parser("list", help="what is registered, including what was purged")
+    listing.add_argument("--kind", choices=("audio", "transcript", "other"))
+    listing.add_argument("--limit", type=int, default=50)
+    _add_track_selector(listing)
+    _add_workspace(listing)
+    purge = actions.add_parser("purge", help="delete a file and settle what depended on it")
+    purge.add_argument("--artifact", required=True)
+    purge.add_argument(
+        "--reason", choices=transcript_policy.PURGE_REASONS, default="learner-request"
+    )
+    purge.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the consequences without deleting anything",
+    )
+    purge.add_argument("--keep-file", dest="remove_file", action="store_false")
+    _add_track_selector(purge)
+    _add_workspace(purge)
+
+
+def _transcript_parser(subcommands: Any) -> None:
+    transcript = subcommands.add_parser(
+        "transcript", help="what was said, in layers that stay apart"
+    )
+    actions = transcript.add_subparsers(dest="action", required=True)
+    imported = actions.add_parser("import", help="store the transcript of a session package")
+    _add_input(imported)
+    imported.add_argument("--ingestion")
+    _add_track_selector(imported)
+    _add_workspace(imported)
+    show = actions.add_parser("show", help="a transcript with its layers and disagreements")
+    show.add_argument("--session")
+    show.add_argument("--ingestion")
+    show.add_argument("--utterance")
+    show.add_argument("--limit", type=int, default=200)
+    _add_track_selector(show)
+    _add_workspace(show)
+    for name, help_text in (
+        ("normalize", "tidy an utterance without changing which words were heard"),
+        ("review", "record what a person heard when they listened again"),
+    ):
+        entry = actions.add_parser(name, help=help_text)
+        entry.add_argument("--utterance", required=True)
+        # The text is the learner's own words: a payload, never argv.
+        _add_input(entry)
+        entry.add_argument("--reviewer")
+        entry.add_argument("--reason")
+        if name == "review":
+            entry.add_argument("--confidence", choices=("low", "medium", "high"), default="medium")
+            entry.add_argument(
+                "--reviewer-kind",
+                choices=("deterministic", "ai", "learner", "human"),
+                default="human",
+            )
+        else:
+            entry.add_argument(
+                "--reviewer-kind",
+                choices=("deterministic", "ai", "learner", "human"),
+                default="deterministic",
+            )
+        _add_track_selector(entry)
+        _add_workspace(entry)
+    interpret = actions.add_parser(
+        "interpret", help="say whether an utterance was a mistake or a mishearing"
+    )
+    interpret.add_argument("--utterance", required=True)
+    interpret.add_argument(
+        "--classification", choices=transcript_policy.CLASSIFICATIONS, required=True
+    )
+    interpret.add_argument("--confidence", choices=("low", "medium", "high"), default="medium")
+    interpret.add_argument(
+        "--reviewer-kind", choices=("deterministic", "ai", "learner", "human"), default="ai"
+    )
+    interpret.add_argument("--reviewer")
+    _add_input(interpret, required=False)
+    _add_track_selector(interpret)
+    _add_workspace(interpret)
+    pronunciation = actions.add_parser(
+        "pronunciation", help="record how something sounded, where sound supports it"
+    )
+    pronunciation.add_argument(
+        "--dimension", choices=transcript_policy.PRONUNCIATION_DIMENSIONS, required=True
+    )
+    pronunciation.add_argument(
+        "--status", choices=transcript_policy.PRONUNCIATION_STATUSES, required=True
+    )
+    pronunciation.add_argument(
+        "--basis", choices=transcript_policy.EVIDENCE_BASES, default="transcript"
+    )
+    pronunciation.add_argument("--utterance")
+    pronunciation.add_argument("--audio")
+    pronunciation.add_argument("--target")
+    pronunciation.add_argument("--note")
+    pronunciation.add_argument(
+        "--reviewer-kind", choices=("deterministic", "ai", "learner", "human"), default="ai"
+    )
+    pronunciation.add_argument("--reviewer")
+    _add_track_selector(pronunciation)
+    _add_workspace(pronunciation)
+
+
+def _speaking_parser(subcommands: Any) -> None:
+    speaking = subcommands.add_parser("speaking", help="make, check, and take in a spoken session")
+    actions = speaking.add_subparsers(dest="action", required=True)
+    package = actions.add_parser("package", help="write an empty but valid package to fill in")
+    package.add_argument("--external-session-id", required=True)
+    package.add_argument("--language", dest="target_language", required=True)
+    package.add_argument("--started-at", required=True, help="ISO 8601, UTC")
+    package.add_argument("--minutes", type=int, default=20)
+    package.add_argument("--utterances", type=int, default=4)
+    package.add_argument("--session")
+    package.add_argument("--out", help="write the package here instead of to the envelope")
+    _add_track_selector(package)
+    _add_workspace(package)
+    validate = actions.add_parser("validate", help="say what ingesting this would do")
+    _add_input(validate)
+    validate.add_argument("--adapter", choices=speaking_service.ADAPTERS, default="lingua")
+    validate.add_argument("--external-session-id")
+    validate.add_argument("--language", dest="target_language")
+    validate.add_argument("--started-at")
+    _add_track_selector(validate)
+    _add_workspace(validate)
+    ingest = actions.add_parser("ingest", help="stage the events and store the transcript")
+    _add_input(ingest)
+    ingest.add_argument("--adapter", choices=speaking_service.ADAPTERS, default="lingua")
+    ingest.add_argument("--external-session-id")
+    ingest.add_argument("--language", dest="target_language")
+    ingest.add_argument("--started-at")
+    ingest.add_argument("--session")
+    ingest.add_argument("--producer")
+    _add_track_selector(ingest)
+    _add_workspace(ingest)
+
+
+def _privacy_parser(subcommands: Any) -> None:
+    privacy = subcommands.add_parser("privacy", help="what is private and what could escape")
+    actions = privacy.add_subparsers(dest="action", required=True)
+    audit = actions.add_parser(
+        "audit", help="paths, committed pages, retention state, and purge consequences"
+    )
+    _add_track_selector(audit)
+    _add_workspace(audit)
+
+
 def _parser() -> ContractArgumentParser:
     parser = ContractArgumentParser(prog="linguawiki")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -894,6 +1148,11 @@ def _parser() -> ContractArgumentParser:
     _context_parser(subcommands)
     _plan_parser(subcommands)
     _session_parser(subcommands)
+    _source_parser(subcommands)
+    _artifact_parser(subcommands)
+    _transcript_parser(subcommands)
+    _speaking_parser(subcommands)
+    _privacy_parser(subcommands)
     _wiki_parser(subcommands)
     return parser
 
@@ -2413,6 +2672,11 @@ def _close_lines(report: session_service.CloseReport) -> str:
         f"row(s), {report.errors_written} error occurrence(s), "
         f"{report.followups_written} follow-up(s), {report.observations_written} note(s)",
     ]
+    if report.comprehension_written:
+        lines.append(
+            f"  recorded {report.comprehension_written} comprehension observation(s) on "
+            f"{', '.join(report.sources_worked)}"
+        )
     for change in report.stage_changes:
         lines.append(
             f"  {change.title}: stage {change.stage_before or 'unseen'} -> {change.stage_after}"
@@ -2634,6 +2898,531 @@ def _run_wiki(args: argparse.Namespace, clock: Clock, command: str) -> int:
     return 0
 
 
+def _parse_timestamp(value: str, *, field: str) -> datetime:
+    """Read a wall-clock argument, refusing one without a zone.
+
+    A session that happened "at 19:00" happened at 19:00 somewhere. Accepting a naive
+    timestamp would silently record it as UTC, and every delay and chronology derived from
+    it would be wrong by the learner's own offset.
+    """
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as failure:
+        raise LinguaWikiError(
+            "invalid_timestamp",
+            f"--{field} is not an ISO 8601 timestamp: {value}",
+            details=(ErrorDetail(field=field, reason=value),),
+        ) from failure
+    if parsed.tzinfo is None:
+        raise LinguaWikiError(
+            "naive_timestamp",
+            f"--{field} has no time zone, and a session that happened at {value} happened "
+            "at that time somewhere; add an offset or a trailing Z",
+            details=(ErrorDetail(field=field, reason=value),),
+        )
+    return parsed
+
+
+def _source_lines(report: Any) -> str:
+    progress = report.progress
+    lines = [
+        f"{report.source_id}: {report.title}" + (f" -- {report.creator}" if report.creator else ""),
+        f"  {report.kind}, {report.status}, rights {report.rights}",
+    ]
+    total = report.total_units if report.total_units is not None else "?"
+    if progress is None:
+        lines.append(f"  not started; {total} unit(s) catalogued")
+    else:
+        lines.append(
+            f"  {progress.status}: {progress.completed_units} of {total} unit(s), "
+            f"{progress.minutes_spent} minute(s)"
+        )
+        if progress.coverage is not None:
+            lines.append(f"  coverage {progress.coverage:.0%}")
+        lines.append(
+            f"  understood {progress.unaided_band or 'unmeasured'} unaided, "
+            f"{progress.aided_band or 'unmeasured'} with help"
+        )
+    for unit in report.units[:20]:
+        mark = "x" if unit.completed else " "
+        lines.append(f"  [{mark}] {unit.sequence}. {unit.label}")
+    return "\n".join(lines)
+
+
+def _run_source(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "add":
+        payload = _read_input(args.input_path) if args.input_path else {}
+        if not isinstance(payload, dict):
+            raise LinguaWikiError(
+                "invalid_input",
+                "the payload for `source add` is an object whose `units` array carries the "
+                "units, because a unit may hold an excerpt and argv is not a place for text",
+                details=(ErrorDetail(field="input", reason="payload is not an object"),),
+            )
+        report = source_service.add(
+            paths,
+            kind=args.kind,
+            title=args.title,
+            creator=args.creator,
+            canonical_uri=args.canonical_uri,
+            rights=args.rights,
+            rights_note=args.rights_note,
+            language=args.language,
+            level_code=args.level,
+            has_audio=args.has_audio,
+            has_transcript=args.has_transcript,
+            notes=args.notes,
+            units=payload.get("units", []),
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, report, clock, report.warnings), _source_lines(report), args.format
+        )
+        return 0
+    if args.action == "list":
+        listing = source_service.listing(
+            paths,
+            status=args.status,
+            kind=args.kind,
+            limit=args.limit,
+            track=args.track,
+            clock=clock,
+        )
+        lines = [f"{listing.total} source(s)"]
+        for entry in listing.sources:
+            lines.append(
+                f"  {entry.source_id}  {entry.kind:9} {entry.status:10} {entry.title}"
+                f" -- {entry.progress.status if entry.progress else 'not started'}"
+            )
+        _print(_envelope(command, listing, clock, listing.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "show":
+        report = source_service.show(paths, source=args.source, track=args.track, clock=clock)
+        _print(
+            _envelope(command, report, clock, report.warnings), _source_lines(report), args.format
+        )
+        return 0
+    if args.action == "comprehension":
+        observed = source_service.record_comprehension(
+            paths,
+            source=args.source,
+            unit=args.unit,
+            aid=args.aid,
+            band=args.band,
+            mode=args.mode,
+            replays=args.replays,
+            lookups=args.lookups,
+            minutes=args.minutes,
+            note=args.note,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        lines = [
+            f"{observed.aid} comprehension of {observed.band} recorded "
+            f"({observed.mode}, reading {observed.sequence} of this unit)",
+            f"  unaided {observed.progress.unaided_band or 'unmeasured'}, "
+            f"aided {observed.progress.aided_band or 'unmeasured'}",
+        ]
+        _print(
+            _envelope(command, observed, clock, observed.warnings), "\n".join(lines), args.format
+        )
+        return 0
+    if args.action == "position":
+        report = source_service.position(
+            paths,
+            source=args.source,
+            unit=args.unit,
+            mode=args.mode,
+            minutes=args.minutes,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, report, clock, report.warnings), _source_lines(report), args.format
+        )
+        return 0
+    if args.action == "complete-unit":
+        report = source_service.complete_unit(
+            paths,
+            source=args.source,
+            unit=args.unit,
+            minutes=args.minutes,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, report, clock, report.warnings), _source_lines(report), args.format
+        )
+        return 0
+    if args.action == "link":
+        report = source_service.link_item(
+            paths,
+            source=args.source,
+            unit=args.unit,
+            target=args.target,
+            relation=args.relation,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, report, clock, report.warnings), _source_lines(report), args.format
+        )
+        return 0
+    report = source_service.set_status(
+        paths,
+        source=args.source,
+        status=args.status,
+        track=args.track,
+        clock=clock,
+        command=command,
+    )
+    _print(_envelope(command, report, clock, report.warnings), _source_lines(report), args.format)
+    return 0
+
+
+def _run_artifact(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "register":
+        report = artifact_service.register(
+            paths,
+            relative_path=args.relative_path,
+            kind=args.kind,
+            origin=args.origin,
+            rights=args.rights,
+            source=args.source,
+            media_type=args.media_type,
+            retained=args.retained,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        lines = [
+            f"{report.artifact_id}: {report.relative_path}",
+            f"  {report.kind}, {report.origin}, {report.byte_size or 0} byte(s)",
+            f"  sha256 {report.sha256}",
+        ]
+        _print(_envelope(command, report, clock, report.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "verify":
+        verified = artifact_service.verify(paths, track=args.track, clock=clock)
+        lines = [
+            f"{verified.checked} artifact(s) checked",
+            f"  {verified.present} file(s) present, {len(verified.altered)} of them altered",
+            f"  {len(verified.missing)} missing without a tombstone, {len(verified.purged)} purged",
+        ]
+        lines.extend(f"  altered: {entry}" for entry in verified.altered)
+        lines.extend(f"  missing: {entry}" for entry in verified.missing)
+        _print(
+            _envelope(command, verified, clock, verified.warnings), "\n".join(lines), args.format
+        )
+        return 0 if verified.ok else EXIT_REPORTED_FAILURE
+    if args.action == "list":
+        listing = artifact_service.listing(
+            paths, kind=args.kind, limit=args.limit, track=args.track, clock=clock
+        )
+        lines = [f"{listing.total} artifact(s)"]
+        for entry in listing.artifacts:
+            state = f"purged ({entry.purge_reason})" if entry.purged_at else "held"
+            lines.append(f"  {entry.artifact_id}  {entry.kind:10} {state:28} {entry.relative_path}")
+        _print(_envelope(command, listing, clock, listing.warnings), "\n".join(lines), args.format)
+        return 0
+    purged = artifact_service.purge(
+        paths,
+        artifact=args.artifact,
+        reason=args.reason,
+        remove_file=args.remove_file,
+        dry_run=args.dry_run,
+        track=args.track,
+        clock=clock,
+        command=command,
+    )
+    verb = "would be" if args.dry_run else "was"
+    lines = [
+        f"{purged.artifact_id} ({purged.relative_path}) {verb} purged: {purged.reason}",
+        f"  {len(purged.invalidated_observations)} acoustic claim(s) {verb} invalidated",
+        f"  {purged.surviving_language_evidence} piece(s) of language evidence survive: what "
+        "the learner said was established by the transcript, which is still here",
+    ]
+    _print(_envelope(command, purged, clock, purged.warnings), "\n".join(lines), args.format)
+    return 0
+
+
+def _transcript_text(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("text"), str):
+        return str(payload["text"])
+    raise LinguaWikiError(
+        "invalid_input",
+        "the payload is the revised line: a JSON string, or an object with a `text` field "
+        "and optionally the `original` it revises",
+        details=(ErrorDetail(field="input", reason="no text"),),
+    )
+
+
+def _run_transcript(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "import":
+        payload = _read_input(args.input_path)
+        if not isinstance(payload, dict):
+            raise LinguaWikiError(
+                "invalid_input",
+                "a transcript import takes a lingua.session.v1 package object",
+                details=(ErrorDetail(field="input", reason="payload is not an object"),),
+            )
+        report = transcript_service.import_package(
+            paths,
+            package=payload,
+            ingestion_id=args.ingestion,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        lines = [
+            f"{report.imported} utterance(s) imported, {report.skipped} already present",
+            f"  the learner's words are kept as {report.retention_policy}",
+        ]
+        _print(_envelope(command, report, clock, report.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "show":
+        shown = transcript_service.show(
+            paths,
+            session=args.session,
+            ingestion=args.ingestion,
+            utterance=args.utterance,
+            limit=args.limit,
+            track=args.track,
+            clock=clock,
+        )
+        lines = [f"{shown.total} utterance(s), words kept as {shown.retention_policy}"]
+        for utterance in shown.utterances:
+            lines.append(
+                f"  {utterance.external_id} [{utterance.speaker}] best layer "
+                f"{utterance.best_layer}"
+                + (
+                    f", disagreement: {', '.join(utterance.disagreement)}"
+                    if utterance.disagreement
+                    else ""
+                )
+            )
+            if utterance.raw_text is not None:
+                lines.append(f"     raw: {utterance.raw_text}")
+            for revision in utterance.revisions:
+                lines.append(f"     {revision.layer} ({revision.kind}): {revision.text or '--'}")
+            for claim in utterance.pronunciation:
+                state = claim.invalidation_reason or "standing"
+                lines.append(f"     {claim.dimension} {claim.status} from {claim.basis}: {state}")
+        _print(_envelope(command, shown, clock, shown.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action in ("normalize", "review"):
+        payload = _read_input(args.input_path)
+        text = _transcript_text(payload)
+        original = payload.get("original") if isinstance(payload, dict) else None
+        call = (
+            transcript_service.normalize
+            if args.action == "normalize"
+            else transcript_service.review
+        )
+        extra: dict[str, Any] = {"confidence": args.confidence} if args.action == "review" else {}
+        revision = call(
+            paths,
+            utterance=args.utterance,
+            text=text,
+            original=original,
+            reviewer_kind=args.reviewer_kind,
+            reviewer=args.reviewer,
+            reason=args.reason,
+            track=args.track,
+            clock=clock,
+            command=command,
+            **extra,
+        )
+        lines = [
+            f"{revision.revision_id}: {revision.layer} layer, recorded as a {revision.kind} "
+            f"of the {revision.derived_from} layer"
+        ]
+        _print(_envelope(command, revision, clock), "\n".join(lines), args.format)
+        return 0
+    if args.action == "interpret":
+        payload = _read_input(args.input_path) if args.input_path else {}
+        if not isinstance(payload, dict):
+            raise LinguaWikiError(
+                "invalid_input",
+                "the payload holds the meaning, the corrected form, and the explanation, "
+                "because all three are language text rather than flags",
+                details=(ErrorDetail(field="input", reason="payload is not an object"),),
+            )
+        interpreted = transcript_service.interpret(
+            paths,
+            utterance=args.utterance,
+            classification=args.classification,
+            meaning=payload.get("meaning"),
+            corrected_form=payload.get("corrected_form"),
+            explanation=payload.get("explanation"),
+            confidence=args.confidence,
+            reviewer_kind=args.reviewer_kind,
+            reviewer=args.reviewer,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        lines = [
+            f"{interpreted.interpretation_id}: {interpreted.classification}",
+            "  counts against the learner"
+            if interpreted.counts_against_the_learner
+            else "  recorded, and counted against nobody",
+        ]
+        _print(_envelope(command, interpreted, clock), "\n".join(lines), args.format)
+        return 0
+    claim = transcript_service.record_pronunciation(
+        paths,
+        dimension=args.dimension,
+        status=args.status,
+        basis=args.basis,
+        utterance=args.utterance,
+        audio=args.audio,
+        target=args.target,
+        note=args.note,
+        reviewer_kind=args.reviewer_kind,
+        reviewer=args.reviewer,
+        track=args.track,
+        clock=clock,
+        command=command,
+    )
+    lines = [f"{claim.observation_id}: {claim.dimension} {claim.status} from a {claim.basis} basis"]
+    _print(_envelope(command, claim, clock), "\n".join(lines), args.format)
+    return 0
+
+
+def _adapted_package(args: argparse.Namespace) -> dict[str, Any]:
+    payload = _read_input(args.input_path)
+    if not isinstance(payload, dict):
+        raise LinguaWikiError(
+            "invalid_input",
+            "a speaking payload is an object: either a lingua.session.v1 package or an "
+            "export for the adapter named by --adapter",
+            details=(ErrorDetail(field="input", reason="payload is not an object"),),
+        )
+    started = None
+    if getattr(args, "started_at", None):
+        started = _parse_timestamp(args.started_at, field="started-at")
+    return speaking_service.adapt(
+        payload,
+        adapter=args.adapter,
+        external_session_id=args.external_session_id,
+        target_language=args.target_language,
+        started_at=started,
+        session=getattr(args, "session", None),
+        track=args.track,
+    )
+
+
+def _run_speaking(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    if args.action == "package":
+        package = speaking_service.scaffold(
+            external_session_id=args.external_session_id,
+            target_language=args.target_language,
+            started_at=_parse_timestamp(args.started_at, field="started-at"),
+            minutes=args.minutes,
+            utterances=args.utterances,
+            session=args.session,
+            track=args.track,
+        )
+        if args.out:
+            Path(args.out).expanduser().write_text(
+                json.dumps(package, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+        envelope = GenericSuccessEnvelope(
+            command=command,
+            correlation_id=EventId.new(),
+            generated_at=clock.now(),
+            warnings=(
+                "the utterance stubs are placeholders: replace the text and the times with "
+                "what was actually said, then run `speaking validate` before ingesting",
+            ),
+            data=package,
+        )
+        human = (
+            f"wrote a package for {args.external_session_id} to {args.out}"
+            if args.out
+            else json.dumps(package, indent=2, ensure_ascii=False)
+        )
+        _print(envelope, human, args.format)
+        return 0
+    if args.action == "validate":
+        report = speaking_service.validate(
+            paths, package=_adapted_package(args), track=args.track, clock=clock
+        )
+        lines = [
+            f"{report.package_id or 'this package'}: "
+            + ("valid" if report.valid else "not ingestable"),
+            f"  layers {', '.join(report.layers) or 'none'}; {report.utterances} utterance(s), "
+            f"{report.events} event(s), {report.artifacts} artifact(s)",
+            f"  words would be kept as {report.retention_policy}",
+        ]
+        lines.extend(f"  problem: {problem}" for problem in report.problems)
+        _print(_envelope(command, report, clock, report.warnings), "\n".join(lines), args.format)
+        return 0 if report.valid else EXIT_REPORTED_FAILURE
+    ingested = speaking_service.ingest(
+        paths,
+        package=_adapted_package(args),
+        session=args.session,
+        track=args.track,
+        producer=args.producer,
+        clock=clock,
+        command=command,
+    )
+    lines = [
+        f"{ingested.ingestion_id}: {ingested.staged_events} event(s) staged, "
+        f"{ingested.imported_utterances} utterance(s) imported",
+        f"  session {ingested.session_id}"
+        + (" (already ingested, so nothing was staged again)" if ingested.duplicate else ""),
+        "  nothing is credited until the session closes",
+    ]
+    _print(_envelope(command, ingested, clock, ingested.warnings), "\n".join(lines), args.format)
+    return 0
+
+
+def _run_privacy(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    paths = _pack_workspace(args)
+    report = privacy_service.audit(paths, track=args.track, clock=clock)
+    retention = report.retention
+    lines = [
+        "privacy audit: " + ("nothing private is escaping" if report.ok else "ACTION NEEDED"),
+        f"  {report.paths.candidates_checked} file(s) checked for Git, "
+        f"{len(report.paths.violations)} violation(s)",
+        f"  {len(report.content_leaks)} committed page(s) hold private content",
+        f"  {len(report.log_leaks)} audit log entr(ies) hold private content",
+        f"  words kept as {retention.transcript_policy}; "
+        f"{retention.utterances_with_words} of {retention.utterances_held} utterance(s) "
+        "hold their words",
+        f"  {retention.artifacts_held} recording(s) held, {retention.artifacts_purged} purged; "
+        f"{retention.claims_resting_on_audio} claim(s) rest on audio",
+    ]
+    lines.extend(f"  path: {entry.path} -- {entry.reason}" for entry in report.paths.violations)
+    lines.extend(f"  leak: {entry.path} -- {entry.reason}" for entry in report.content_leaks)
+    lines.extend(f"  log:  {entry.path} -- {entry.reason}" for entry in report.log_leaks)
+    if report.purge_consequences:
+        lines.append("  purging would cost:")
+        lines.extend(
+            f"    {entry.artifact_id} ({entry.relative_path}): "
+            f"{entry.invalidated_claims} acoustic claim(s) invalidated, "
+            f"{entry.surviving_language_evidence} piece(s) of language evidence untouched"
+            for entry in report.purge_consequences
+        )
+    _print(_envelope(command, report, clock, report.warnings), "\n".join(lines), args.format)
+    return 0 if report.ok else EXIT_REPORTED_FAILURE
+
+
 def _dispatch(args: argparse.Namespace, clock: Clock, command: str) -> int:
     if args.group == "status":
         return _run_status(args, clock)
@@ -2675,6 +3464,16 @@ def _dispatch(args: argparse.Namespace, clock: Clock, command: str) -> int:
         return _run_plan(args, clock, command)
     if args.group == "session":
         return _run_session(args, clock, command)
+    if args.group == "source":
+        return _run_source(args, clock, command)
+    if args.group == "artifact":
+        return _run_artifact(args, clock, command)
+    if args.group == "transcript":
+        return _run_transcript(args, clock, command)
+    if args.group == "speaking":
+        return _run_speaking(args, clock, command)
+    if args.group == "privacy":
+        return _run_privacy(args, clock, command)
     if args.group == "wiki":
         return _run_wiki(args, clock, command)
     raise LinguaWikiError("unknown_command", "command is not implemented")

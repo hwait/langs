@@ -39,6 +39,11 @@ class IdPrefix(StrEnum):
     ARTIFACT = "art"
     # Stage 4: the session engine's own rows. A batch, one staged event, the record that
     # a close happened, and one ingestion of an externally produced package.
+    # Stage 5: the transcript layers and what they support.
+    UTTERANCE = "utt"
+    REVISION = "trv"
+    INTERPRETATION = "int"
+    PRONUNCIATION = "prn"
     BATCH = "bat"
     STAGED_EVENT = "sev"
     FINALIZATION = "fin"
@@ -201,6 +206,22 @@ class EventId(OpaqueId):
 
 class ArtifactId(OpaqueId):
     prefix = IdPrefix.ARTIFACT
+
+
+class UtteranceId(OpaqueId):
+    prefix = IdPrefix.UTTERANCE
+
+
+class RevisionId(OpaqueId):
+    prefix = IdPrefix.REVISION
+
+
+class InterpretationId(OpaqueId):
+    prefix = IdPrefix.INTERPRETATION
+
+
+class PronunciationId(OpaqueId):
+    prefix = IdPrefix.PRONUNCIATION
 
 
 class BatchId(OpaqueId):

@@ -370,6 +370,7 @@ MINIMAL_PAYLOADS: dict[str, dict[str, object]] = {
         "description": "Accusative where the verb governs the genitive.",
     },
     "pronunciation.assessment": {"status": "uncertain", "note": "Flattened."},
+    "source.progress": {"source_ref": "Polski Daily", "band": "gist"},
     "observation.noted": {"category": "fatigue", "note": "Tired."},
     "follow_up": {"kind": "practice", "action": "Drill it."},
 }

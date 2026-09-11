@@ -35,6 +35,7 @@ WEIGHTS: Mapping[str, float] = {
     "balance_deficit": 0.8,
     "goal_relevance": 0.6,
     "curriculum_continuity": 0.5,
+    "source_continuity": 0.45,
     "uncertainty_reduction": 0.4,
     "learner_interest": 0.3,
     "transfer_value": 0.3,
@@ -112,11 +113,15 @@ class Candidate:
     #: reduce a wide interval is worth more than one that confirms a narrow one.
     uncertainty: float = 0.0
     #: How much of an unfinished *curriculum* unit this block continues, 0..1, read from
-    #: the track's imported course position. Source continuity -- picking up a book or a
-    #: podcast where the learner stopped -- is deliberately absent rather than zero: the
-    #: source tables arrive in Stage 5, and a component with nothing to read would be a
-    #: weight applied to a constant.
+    #: the track's imported course position.
     curriculum_continuity: float = 0.0
+    #: How much unfinished *material* this block would pick up: a book half read, a
+    #: podcast series with episodes left. Scored separately from curriculum continuity
+    #: because they answer different questions -- a course says what the learner is
+    #: supposed to do next, and a half-finished book says what they will actually return
+    #: to. Only the block areas a source can serve carry it; the rest stay at zero rather
+    #: than inheriting a number about material they cannot use.
+    source_continuity: float = 0.0
     #: How much this block's work carries over to other dimensions, 0..1.
     transfer_value: float = 0.0
     #: Blocks of this area completed in the last seven days.
@@ -323,6 +328,7 @@ def score_candidate(
         ),
         "goal_relevance": _goal_relevance(candidate, request),
         "curriculum_continuity": _clamp(candidate.curriculum_continuity),
+        "source_continuity": _clamp(candidate.source_continuity),
         "uncertainty_reduction": _clamp(candidate.uncertainty),
         "learner_interest": _interest(candidate),
         "transfer_value": _clamp(candidate.transfer_value),
@@ -343,6 +349,7 @@ _PHRASES: Mapping[str, str] = {
     "balance_deficit": "this area is behind for the week",
     "goal_relevance": "it serves the learner's stated goal",
     "curriculum_continuity": "it continues where the last session stopped",
+    "source_continuity": "there is material the learner started and has not finished",
     "uncertainty_reduction": "the estimate for this dimension is wide",
     "learner_interest": "the material matches a declared interest",
     "transfer_value": "the work carries over to other dimensions",

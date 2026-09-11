@@ -210,6 +210,30 @@ This repository owns the generic Python package, schemas, migrations, Codex skil
   truncating inside one, records the counts and the reason in `omissions`, and never carries
   a learner's own words unless the command asked *and* the track consented. Half a list looks
   exactly like a short one, and an agent cannot tell the difference.
+- Apply a retention rule where the text arrives, not where it is used. A staged transcript
+  kept the learner's full words for the life of a session while the close correctly
+  discarded them, so a workspace that refused transcript retention held them anyway. The
+  same rule applies to every later copy: a revision, an excerpt, a log summary.
+- The order of observations can be the evidence. Comprehension without help is only
+  meaningful before help was given, so an unaided reading recorded after an aided one is
+  refused -- at the command *and* at the session close, because a close that accepted it
+  would be a way around the rule rather than a second path to it.
+- What may be stored from someone else's work is decided by its rights class, checked
+  before the text is written and asserted again over the data. A copyright boundary
+  crossed inside a learner's database cannot be found by reading the code.
+- Never overwrite what arrived. A raw transcript is immutable and every later reading is a
+  new row naming what it changed, because "did the learner say that, or did the machine
+  hear it?" is the question that decides whether they are corrected for a mistake they
+  never made. A revision that claims to change nothing but punctuation is held to it.
+- A claim needs the evidence it rests on to still exist. Confirming how something sounded
+  requires audio that is present; prosody and native-likeness require it at every
+  confidence, because text cannot carry them at all. When audio is purged, exactly those
+  claims are invalidated -- marked, not deleted -- and nothing else is, because what the
+  learner *said* was established by the transcript.
+- A privacy control has to run before the irreversible act. Purge consequences are
+  reported by a dry run, and the audit that looks for private content searches the files
+  that are actually committed: a path rule knows `artifacts/` must not be committed and
+  says nothing about the same recording's transcript pasted into a wiki page.
 - Learner repositories pin released core, schema, skill-bundle, and pack versions. They do not merge this repository as an upstream fork.
 
 ## Verification

@@ -119,7 +119,8 @@ Rules that the CLI enforces and you should not fight:
   reads to say what comes next.
 
 Event kinds: `attempt.observed`, `correction.given`, `pronunciation.assessment`,
-`observation.noted`, `follow_up`. See `references/session-contract.md` for each payload.
+`source.progress`, `observation.noted`, `follow_up`. See
+`references/session-contract.md` for each payload.
 
 ## What you must not do
 
@@ -167,5 +168,7 @@ Event kinds: `attempt.observed`, `correction.given`, `pronunciation.assessment`,
 Read `references/session-contract.md` for the event payloads and the batch rules,
 `references/correction-modes.md` for fluency, accuracy, and exam behaviour,
 `references/grammar-and-vocabulary.md`, `references/reading-and-media.md`, and
-`references/writing-and-translation.md` for the block procedures, and
-`references/session-recovery.md` for interruptions.
+`references/writing-and-translation.md` for the block procedures,
+`references/sources-and-material.md` and `references/reading-and-listening.md` for
+choosing material and recording what it taught, and `references/session-recovery.md` for
+interruptions. Bringing in a spoken conversation is `linguawiki-speak`.

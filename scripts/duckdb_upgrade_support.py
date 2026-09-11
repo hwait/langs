@@ -24,6 +24,7 @@ from linguawiki.db.backup import registered_tables
 from linguawiki.db.connection import open_reader, open_temporary, open_writer
 from linguawiki.db.schema import TABLE_ORDER
 from linguawiki.paths import workspace_paths
+from linguawiki.services import artifacts as artifact_service
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import authoring as authoring_service
 from linguawiki.services import curriculum as curriculum_service
@@ -34,6 +35,9 @@ from linguawiki.services import learners as learner_service
 from linguawiki.services import onboarding as onboarding_service
 from linguawiki.services import packs as pack_service
 from linguawiki.services import sessions as session_service
+from linguawiki.services import sources as source_service
+from linguawiki.services import speaking as speaking_service
+from linguawiki.services import transcripts as transcript_service
 from linguawiki.services import wiki as wiki_service
 
 SEED_AT = datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC)
@@ -523,6 +527,246 @@ def _session_package() -> dict[str, object]:
     }
 
 
+def _material(paths: object) -> None:
+    """Every Stage 5 table, through the commands that own them.
+
+    Both halves of the stage are left behind on purpose. A catalogued source with
+    comprehension recorded, a unit completed, and an item extracted covers the reading
+    side; an ingested conversation with its transcript layers, an interpretation, a
+    standing acoustic claim, and a *purged* recording covers the speaking side.
+
+    The purge matters most. It is the one row that is a tombstone rather than a fact, and
+    an upgrade that lost the tombstone would turn "the learner asked us to delete this"
+    into "there was never a recording", which is the opposite of what the row says.
+    """
+
+    podcast = source_service.add(
+        paths,  # type: ignore[arg-type]
+        kind="podcast",
+        title="Polski Daily",
+        creator="Paulina",
+        canonical_uri="https://example.invalid/feed.xml",
+        rights="metadata-only",
+        has_audio=True,
+        has_transcript=True,
+        units=[
+            {"label": "Odcinek 1", "starts_at_ms": 0, "ends_at_ms": 480_000},
+            {"label": "Odcinek 2", "starts_at_ms": 0, "ends_at_ms": 520_000},
+        ],
+        clock=Clock(),
+    )
+    # Unaided first, then aided: the order the policy requires, so the seed is a state the
+    # commands could actually have produced.
+    source_service.record_comprehension(
+        paths,  # type: ignore[arg-type]
+        source=podcast.source_id,
+        unit="Odcinek 1",
+        aid="unaided",
+        band="gist",
+        mode="extensive",
+        minutes=8,
+        clock=Clock(),
+    )
+    source_service.record_comprehension(
+        paths,  # type: ignore[arg-type]
+        source=podcast.source_id,
+        unit="Odcinek 1",
+        aid="subtitled",
+        band="most",
+        replays=2,
+        lookups=3,
+        minutes=5,
+        clock=Clock(),
+    )
+    source_service.complete_unit(
+        paths,  # type: ignore[arg-type]
+        source=podcast.source_id,
+        unit="Odcinek 1",
+        minutes=2,
+        clock=Clock(),
+    )
+    knowledge_service.upsert(
+        paths,  # type: ignore[arg-type]
+        stable_key="note.podcast.dworzec",
+        kind="concept",
+        title="Na dworcu",
+        body="Station vocabulary met while listening.",
+        clock=Clock(),
+    )
+    source_service.link_item(
+        paths,  # type: ignore[arg-type]
+        source=podcast.source_id,
+        unit="Odcinek 1",
+        target="note.podcast.dworzec",
+        relation="extracted-from",
+        clock=Clock(),
+    )
+    source_service.set_status(
+        paths,  # type: ignore[arg-type]
+        source=podcast.source_id,
+        status="active",
+        clock=Clock(),
+    )
+
+
+def _spoken(paths: object, *, root: Path) -> None:
+    """A conversation with its layers, its readings, and a purged recording."""
+
+    plan = session_service.create(
+        paths,  # type: ignore[arg-type]
+        minutes=40,
+        mode="mixed",
+        idempotency_key="upgrade-fixture-spoken-plan",
+        clock=Clock(),
+    )
+    session_service.start(paths, session=plan.session_id, clock=Clock())  # type: ignore[arg-type]
+    speaking_service.ingest(
+        paths,  # type: ignore[arg-type]
+        package=_spoken_package(),
+        session=plan.session_id,
+        producer="storage-upgrade-fixture",
+        clock=Clock(),
+    )
+    transcript_service.review(
+        paths,  # type: ignore[arg-type]
+        utterance="utt_spoken_2",
+        text="Dokąd pani jedzie?",
+        reviewer="fixture",
+        reason="listened again",
+        clock=Clock(),
+    )
+    transcript_service.interpret(
+        paths,  # type: ignore[arg-type]
+        utterance="utt_spoken_2",
+        classification="transcription-artifact",
+        explanation="The tutor's audio clipped; both hearings are plausible.",
+        clock=Clock(),
+    )
+    transcript_service.interpret(
+        paths,  # type: ignore[arg-type]
+        utterance="utt_spoken_1",
+        classification="learner-error",
+        corrected_form="Chciałbym kupić bilet.",
+        meaning="I would like to buy a ticket.",
+        clock=Clock(),
+    )
+    transcript_service.record_pronunciation(
+        paths,  # type: ignore[arg-type]
+        dimension="intelligibility",
+        status="observed",
+        basis="transcript",
+        utterance="utt_spoken_1",
+        note="Understandable in context.",
+        clock=Clock(),
+    )
+    learner_service.update_track(
+        paths,  # type: ignore[arg-type]
+        preferences=learner_service.TrackPreferences(audio_retention_consent=True),
+        clock=Clock(),
+    )
+    recording = root / "artifacts" / "audio" / "fixture.wav"
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"RIFF" + b"\x00" * 64)
+    artifact = artifact_service.register(
+        paths,  # type: ignore[arg-type]
+        relative_path="artifacts/audio/fixture.wav",
+        kind="audio",
+        origin="learner-recording",
+        clock=Clock(),
+    )
+    transcript_service.record_pronunciation(
+        paths,  # type: ignore[arg-type]
+        dimension="prosody",
+        status="confirmed",
+        basis="audio",
+        utterance="utt_spoken_1",
+        audio=artifact.artifact_id,
+        note="Question intonation flattened.",
+        clock=Clock(),
+    )
+    second = root / "artifacts" / "audio" / "withdrawn.wav"
+    second.write_bytes(b"RIFF" + b"\x01" * 32)
+    withdrawn = artifact_service.register(
+        paths,  # type: ignore[arg-type]
+        relative_path="artifacts/audio/withdrawn.wav",
+        kind="audio",
+        origin="learner-recording",
+        clock=Clock(),
+    )
+    # A tombstone, and the invalidated claim that rested on it.
+    transcript_service.record_pronunciation(
+        paths,  # type: ignore[arg-type]
+        dimension="native-likeness",
+        status="confirmed",
+        basis="audio",
+        utterance="utt_spoken_2",
+        audio=withdrawn.artifact_id,
+        clock=Clock(),
+    )
+    artifact_service.purge(
+        paths,  # type: ignore[arg-type]
+        artifact=withdrawn.artifact_id,
+        reason="learner-request",
+        clock=Clock(),
+    )
+    session_service.abandon(
+        paths,  # type: ignore[arg-type]
+        session=plan.session_id,
+        reason="fixture leaves this session holding staged work",
+        clock=Clock(),
+    )
+
+
+def _spoken_package() -> dict[str, object]:
+    """A conversation with a raw layer and a normalized one that changes no words."""
+
+    return {
+        "schema_name": "lingua.session.v1",
+        "schema_version": 1,
+        "package_id": "pkg_upgrade_spoken",
+        "external_session_id": "fixture-external-2",
+        "target_language": "pl",
+        "mode": "completed",
+        "started_at": "2026-02-03T05:00:00Z",
+        "ended_at": "2026-02-03T05:20:00Z",
+        "transcript_layers": [
+            {
+                "kind": "raw",
+                "utterances": [
+                    {
+                        "utterance_id": "utt_spoken_1",
+                        "speaker": "learner",
+                        "started_at": "2026-02-03T05:01:00Z",
+                        "ended_at": "2026-02-03T05:01:06Z",
+                        "text": "chcialbym kupic bilet",
+                    },
+                    {
+                        "utterance_id": "utt_spoken_2",
+                        "speaker": "tutor",
+                        "started_at": "2026-02-03T05:01:10Z",
+                        "ended_at": "2026-02-03T05:01:14Z",
+                        "text": "dokad pan jedzie",
+                    },
+                ],
+            },
+            {
+                "kind": "normalized",
+                "derived_from": "raw",
+                "utterances": [
+                    {
+                        "utterance_id": "utt_spoken_1",
+                        "speaker": "learner",
+                        "started_at": "2026-02-03T05:01:00Z",
+                        "ended_at": "2026-02-03T05:01:06Z",
+                        "text": "Chcialbym kupic bilet.",
+                    }
+                ],
+            },
+        ],
+        "events": [],
+    }
+
+
 def _job_row(paths: object) -> None:
     """The one table no Stage 2 workflow writes: local job state."""
 
@@ -568,6 +812,8 @@ def seed(root: Path) -> None:
     _authoring(paths)
     _learner_model(paths)
     _session(paths)
+    _material(paths)
+    _spoken(paths, root=root)
     _job_row(paths)
 
 

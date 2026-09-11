@@ -1510,6 +1510,309 @@ def _estimate_checks(database: Database) -> list[CheckResult]:
     return checks
 
 
+def _source_checks(database: Database) -> list[CheckResult]:
+    """A source's progress, its rights, and its comprehension record agree with themselves.
+
+    The rights checks are the ones that matter outside this repository. An excerpt longer
+    than the rights class permits is a copyright problem stored in a learner's database,
+    and it cannot be found by reading the code: it has to be found in the data.
+    """
+
+    from linguawiki import sources as source_policy
+
+    checks: list[CheckResult] = []
+    over_long = [
+        f"{unit_id} ({rights}, {length} characters)"
+        for unit_id, rights, length in database.query(
+            "SELECT unit.unit_id, source.rights, length(unit.excerpt) "
+            "FROM source_units unit JOIN sources source ON source.source_id = unit.source_id "
+            "WHERE unit.excerpt IS NOT NULL ORDER BY unit.unit_id"
+        )
+        if int(length) > source_policy.excerpt_limit(str(rights))
+    ]
+    if over_long:
+        checks.append(
+            _failed(
+                "source_excerpt_rights",
+                "a stored excerpt is longer than its source's rights class permits; this is "
+                "a copyright boundary crossed inside the learner's own database",
+                units=", ".join(over_long[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok("source_excerpt_rights", "every stored excerpt is within its rights class")
+        )
+    metadata_only = [
+        str(unit_id)
+        for (unit_id,) in database.query(
+            "SELECT unit.unit_id FROM source_units unit "
+            "JOIN sources source ON source.source_id = unit.source_id "
+            "WHERE source.rights = 'metadata-only' AND unit.excerpt IS NOT NULL "
+            "ORDER BY unit.unit_id"
+        )
+    ]
+    if metadata_only:
+        checks.append(
+            _failed(
+                "source_metadata_only",
+                "a source catalogued as metadata-only holds text from the work itself",
+                units=", ".join(metadata_only[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok("source_metadata_only", "metadata-only sources hold no text from the work")
+        )
+    # Comprehension is ordered, and the order is the evidence: an unaided reading recorded
+    # after an aided one is the first one with the help left out.
+    withdrawn: list[str] = []
+    for source_id, unit_id in database.query(
+        "SELECT DISTINCT source_id, unit_id FROM comprehension_observations "
+        "ORDER BY source_id, unit_id"
+    ):
+        observations = [
+            source_policy.Comprehension(aid=str(aid), band=str(band), sequence=int(sequence))
+            for aid, band, sequence in database.query(
+                "SELECT aid, band, sequence FROM comprehension_observations "
+                "WHERE source_id = ? AND unit_id IS NOT DISTINCT FROM ? ORDER BY sequence",
+                [source_id, unit_id],
+            )
+        ]
+        try:
+            source_policy.assert_observation_order(observations, reference=str(source_id))
+        except LinguaWikiError:
+            withdrawn.append(f"{source_id}/{unit_id or 'whole source'}")
+    if withdrawn:
+        checks.append(
+            _failed(
+                "comprehension_order",
+                "an unaided comprehension record follows an aided one, which would report "
+                "help that was already given as comprehension without it",
+                units=", ".join(withdrawn[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok("comprehension_order", "unaided comprehension precedes the help it was without")
+        )
+    counted = [
+        f"{source_id}: {recorded} recorded, {actual} completed"
+        for source_id, recorded, actual in database.query(
+            "SELECT progress.source_id, progress.completed_units, "
+            "(SELECT count(*) FROM source_units unit WHERE unit.source_id = progress.source_id "
+            " AND unit.completed_at IS NOT NULL) "
+            "FROM track_source_progress progress ORDER BY progress.source_id"
+        )
+        if int(recorded) != int(actual)
+    ]
+    if counted:
+        checks.append(
+            _failed(
+                "source_progress_count",
+                "a source's recorded progress disagrees with the units actually completed",
+                sources=", ".join(counted[:20]),
+            )
+        )
+    else:
+        checks.append(_ok("source_progress_count", "recorded progress matches the units completed"))
+    return checks
+
+
+def _artifact_checks(database: Database) -> list[CheckResult]:
+    """A purge is a fact about a file, and the rows that named it have to agree.
+
+    Two directions matter. A row still claiming audio that was purged would read as
+    evidenced and be uncheckable; a claim that *should* have been invalidated and was not
+    is the same problem wearing a tombstone.
+    """
+
+    from linguawiki import transcripts as transcript_policy
+
+    checks: list[CheckResult] = []
+    purged = {
+        str(artifact_id): str(reason)
+        for artifact_id, reason in database.query(
+            "SELECT artifact_id, purge_reason FROM artifacts WHERE purged_at IS NOT NULL"
+        )
+    }
+    known = {
+        str(artifact_id) for (artifact_id,) in database.query("SELECT artifact_id FROM artifacts")
+    }
+    dangling = [
+        f"{observation_id} -> {artifact_id}"
+        for observation_id, artifact_id in database.query(
+            "SELECT observation_id, audio_artifact_id FROM pronunciation_observations "
+            "WHERE audio_artifact_id IS NOT NULL ORDER BY observation_id"
+        )
+        if str(artifact_id) not in known
+    ]
+    dangling.extend(
+        f"{utterance_id} -> {artifact_id}"
+        for utterance_id, artifact_id in database.query(
+            "SELECT utterance_id, audio_artifact_id FROM utterances "
+            "WHERE audio_artifact_id IS NOT NULL ORDER BY utterance_id"
+        )
+        if str(artifact_id) not in known
+    )
+    if dangling:
+        checks.append(
+            _failed(
+                "artifact_reference",
+                "a row names audio this workspace has no record of at all, so neither the "
+                "sound nor the fact that it was deleted can be produced",
+                references=", ".join(dangling[:20]),
+            )
+        )
+    else:
+        checks.append(_ok("artifact_reference", "every audio reference resolves to a record"))
+    standing = [
+        f"{observation_id} ({dimension}, {status})"
+        for observation_id, status, dimension, artifact_id in database.query(
+            "SELECT observation_id, status, dimension, audio_artifact_id "
+            "FROM pronunciation_observations WHERE audio_artifact_id IS NOT NULL "
+            "AND invalidated_at IS NULL ORDER BY observation_id"
+        )
+        if str(artifact_id) in purged
+        and transcript_policy.invalidated_by_purge(status=str(status), dimension=str(dimension))
+    ]
+    if standing:
+        checks.append(
+            _failed(
+                "acoustic_claim_support",
+                "an acoustic claim still stands on audio that was purged; it reads as "
+                "evidenced and nobody, including the learner it is about, can check it",
+                observations=", ".join(standing[:20]),
+            )
+        )
+    else:
+        checks.append(_ok("acoustic_claim_support", "every standing acoustic claim has its audio"))
+    return checks
+
+
+def _transcript_checks(database: Database) -> list[CheckResult]:
+    """The transcript layers say what they actually did.
+
+    A revision filed as a `normalization` that changed the words is the defect this whole
+    stage is built to prevent: it turns the transcription's mistake into the learner's.
+    """
+
+    from linguawiki import transcripts as transcript_policy
+
+    checks: list[CheckResult] = []
+    raw_text = {
+        str(utterance_id): (str(text), str(visibility))
+        for utterance_id, text, visibility in database.query(
+            "SELECT utterance_id, raw_text, visibility FROM utterances"
+        )
+    }
+    layer_text = {
+        (str(utterance_id), str(layer)): (str(text), str(visibility))
+        for utterance_id, layer, text, visibility in database.query(
+            "SELECT utterance_id, layer, text, visibility FROM transcript_revisions"
+        )
+    }
+    dishonest: list[str] = []
+    unverifiable = 0
+    for revision_id, utterance_id, layer, derived_from in database.query(
+        "SELECT revision_id, utterance_id, layer, derived_from FROM transcript_revisions "
+        "WHERE kind = 'normalization' ORDER BY revision_id"
+    ):
+        after = layer_text[(str(utterance_id), str(layer))]
+        before = (
+            raw_text.get(str(utterance_id))
+            if str(derived_from) == "raw"
+            else layer_text.get((str(utterance_id), str(derived_from)))
+        )
+        if before is None or before[1] != "full" or after[1] != "full":
+            # A workspace that kept only a hash cannot be asked this question, and
+            # answering it anyway by comparing truncated text would invent a failure.
+            unverifiable += 1
+            continue
+        if not transcript_policy.same_words(before[0], after[0]):
+            dishonest.append(str(revision_id))
+    if dishonest:
+        checks.append(
+            _failed(
+                "revision_honesty",
+                "a revision filed as a normalization changes which words were heard, which "
+                "would teach the transcription's mistake back to the learner as their own",
+                revisions=", ".join(dishonest[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "revision_honesty",
+                "every normalization kept the words it started from",
+                unverifiable=str(unverifiable),
+            )
+        )
+    misderived = [
+        f"{revision_id} ({layer} from {derived_from})"
+        for revision_id, layer, derived_from in database.query(
+            "SELECT revision_id, layer, derived_from FROM transcript_revisions ORDER BY revision_id"
+        )
+        if str(derived_from) not in transcript_policy.LAYER_SOURCES.get(str(layer), ())
+    ]
+    if misderived:
+        checks.append(
+            _failed(
+                "revision_derivation",
+                "a revision claims to come from a layer it cannot come from",
+                revisions=", ".join(misderived[:20]),
+            )
+        )
+    else:
+        checks.append(_ok("revision_derivation", "every revision derives from a layer below it"))
+    # An interpretation is about an utterance in some track; a pronunciation observation
+    # names its own track. The two have to be the same track, or a learner's words would
+    # be carrying another learner's judgement.
+    crossed = [
+        f"{observation_id}"
+        for (observation_id,) in database.query(
+            "SELECT observation.observation_id FROM pronunciation_observations observation "
+            "JOIN utterances utterance ON utterance.utterance_id = observation.utterance_id "
+            "WHERE utterance.track_id <> observation.track_id ORDER BY observation.observation_id"
+        )
+    ]
+    if crossed:
+        checks.append(
+            _failed(
+                "pronunciation_track_scope",
+                "a pronunciation observation judges an utterance from another track",
+                observations=", ".join(crossed[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok("pronunciation_track_scope", "every pronunciation observation stays in its track")
+        )
+    unsupported = [
+        f"{observation_id} ({dimension}, {status}, {basis})"
+        for observation_id, status, dimension, basis in database.query(
+            "SELECT observation_id, status, dimension, basis FROM pronunciation_observations "
+            "WHERE invalidated_at IS NULL ORDER BY observation_id"
+        )
+        if str(basis) != "audio"
+        and (
+            str(status) == transcript_policy.CONFIRMED_STATUS
+            or str(dimension) in transcript_policy.AUDIO_ONLY_DIMENSIONS
+        )
+    ]
+    if unsupported:
+        checks.append(
+            _failed(
+                "acoustic_claim_basis",
+                "a claim about how something sounded rests only on how it reads",
+                observations=", ".join(unsupported[:20]),
+            )
+        )
+    else:
+        checks.append(_ok("acoustic_claim_basis", "every acoustic claim rests on audio"))
+    return checks
+
+
 def _orphan_checks(database: Database, *, schema: SchemaSpecification) -> list[CheckResult]:
     orphans: list[str] = []
 
@@ -1663,6 +1966,20 @@ CHECK_REQUIREMENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("error_model", ("error_patterns", "error_evidence", "evidence")),
     ("estimates", ("skill_estimates", "estimate_history", "estimate_evidence", "evidence")),
     (
+        "sources",
+        ("sources", "source_units", "track_source_progress", "comprehension_observations"),
+    ),
+    ("artifacts", ("artifacts", "pronunciation_observations", "utterances")),
+    (
+        "transcripts",
+        (
+            "utterances",
+            "transcript_revisions",
+            "utterance_interpretations",
+            "pronunciation_observations",
+        ),
+    ),
+    (
         "sessions",
         (
             "sessions",
@@ -1738,6 +2055,12 @@ def check_database(
             checks.extend(_mastery_checks(database))
         if available["sessions"]:
             checks.extend(_session_checks(database))
+        if available["sources"]:
+            checks.extend(_source_checks(database))
+        if available["artifacts"]:
+            checks.extend(_artifact_checks(database))
+        if available["transcripts"]:
+            checks.extend(_transcript_checks(database))
         if available["error_model"]:
             checks.extend(_error_model_checks(database))
         if available["estimates"] and any(

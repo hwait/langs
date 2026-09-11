@@ -85,8 +85,8 @@ def assert_transition(*, current: str, target: str, session_id: str) -> str:
     if target not in permitted:
         raise LinguaWikiError(
             "invalid_session_transition",
-            f"session {session_id} is {current}, and a {current} session cannot become "
-            f"{target}" + (f"; it may only become {' or '.join(permitted)}" if permitted else ""),
+            f"session {session_id} is {current} and cannot become {target}"
+            + (f"; it may only become {' or '.join(permitted)}" if permitted else ""),
             details=(ErrorDetail(field="status", reason=current, context={"attempted": target}),),
         )
     return target

@@ -31,12 +31,13 @@ unavailable, the block is unavailable — say so rather than substituting text.
 ## Copyright
 
 Do not copy source material into the workspace. Short quotations that justify an
-observation are fine; a chapter is not. Cataloguing sources and their rights belongs to
-`linguawiki-source`.
+observation are fine; a chapter is not. Cataloguing a work and choosing its rights class
+is `references/sources-and-material.md`; recording what it taught is
+`references/reading-and-listening.md`.
 
 ## What to record
 
 - Comprehension attempts, unaided first, with the passage as the context.
 - New vocabulary met in the passage, as targets of this block.
-- A `follow_up` for a source the learner wants to continue, so the next plan can pick it
-  up.
+- A `source.progress` event naming the catalogued source, what was understood, and with
+  how much help, so the next plan can pick the material back up.

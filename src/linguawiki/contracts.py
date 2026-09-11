@@ -16,6 +16,7 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator, model_va
 from pydantic_core import CoreSchema, core_schema
 
 from linguawiki import evidence as evidence_policy
+from linguawiki import sources as source_policy
 from linguawiki.clock import require_utc, require_utc_if_set, validate_iana_timezone
 from linguawiki.errors import ErrorPayload
 from linguawiki.ids import (
@@ -35,7 +36,7 @@ CONTRACT_SCHEMA_VERSION = 1
 #: The delivery stage this release claims. `StatusData.stage` is the frozen wire
 #: literal; this constant is what code and scripts read, and a contract test keeps
 #: the two from drifting apart.
-DELIVERY_STAGE = 4
+DELIVERY_STAGE = 5
 SHA256_PATTERN = r"^[a-f0-9]{64}$"
 LANGUAGE_TAG_PATTERN = r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$"
 CONTENT_HASH_FIELDS = (
@@ -549,6 +550,11 @@ ObservationCategory = Annotated[
     str, Vocabulary(evidence_policy.OBSERVATION_CATEGORIES, "observation category")
 ]
 Salience = Annotated[str, Vocabulary(evidence_policy.SALIENCES, "salience")]
+ComprehensionAid = Annotated[str, Vocabulary(source_policy.COMPREHENSION_AIDS, "comprehension aid")]
+ComprehensionBand = Annotated[
+    str, Vocabulary(source_policy.COMPREHENSION_BANDS, "comprehension band")
+]
+StudyMode = Annotated[str, Vocabulary(source_policy.STUDY_MODES, "study mode")]
 
 
 class StagedPayloadBase(ContractModel):
@@ -648,6 +654,36 @@ class StagedPronunciationPayload(StagedPayloadBase):
         return self
 
 
+class StagedSourceProgressPayload(StagedPayloadBase):
+    """What the learner did with a source during this session.
+
+    Stage 4 left this out and said so: a session could not record that the learner read
+    thirty pages, so reading happened beside the session lifecycle instead of inside it.
+    It belongs here for the same reason everything else does -- the close is where a
+    session becomes part of the learner, and reading is not an exception to that.
+
+    The aid and the band are the comprehension record, and their *order* carries the
+    evidence: an unaided reading that follows an aided one is refused at close, exactly as
+    it is refused at the command, because it is the first reading with the help left out.
+    """
+
+    #: The catalogued source, by identifier or title. Named `source_ref` because every
+    #: staged payload already carries a `source` meaning *where the observation came
+    #: from*, and one field cannot mean both the provenance and the book.
+    source_ref: NonBlankStr
+    unit: str | None = None
+    aid: ComprehensionAid = "unaided"
+    band: ComprehensionBand
+    mode: StudyMode = "intensive"
+    replays: int = Field(default=0, ge=0)
+    lookups: int = Field(default=0, ge=0)
+    minutes: int | None = Field(default=None, ge=0)
+    #: Whether the learner finished the unit, rather than merely worked in it. Coverage
+    #: counts completions, so that rereading a chapter does not report as reading two.
+    completed: bool = False
+    note: str | None = None
+
+
 class StagedObservationPayload(StagedPayloadBase):
     """A note about the session rather than about an item: fatigue, strategy, confidence."""
 
@@ -698,6 +734,11 @@ class StagedPronunciationEvent(StagedEventBase):
     payload: StagedPronunciationPayload
 
 
+class StagedSourceProgressEvent(StagedEventBase):
+    kind: Literal["source.progress"]
+    payload: StagedSourceProgressPayload
+
+
 class StagedObservationEvent(StagedEventBase):
     kind: Literal["observation.noted"]
     payload: StagedObservationPayload
@@ -715,6 +756,7 @@ STAGED_PAYLOAD_KINDS: Mapping[str, type[ContractModel]] = {
     "attempt.observed": StagedAttemptPayload,
     "correction.given": StagedCorrectionPayload,
     "pronunciation.assessment": StagedPronunciationPayload,
+    "source.progress": StagedSourceProgressPayload,
     "observation.noted": StagedObservationPayload,
     "follow_up": StagedFollowUpPayload,
 }
@@ -724,6 +766,7 @@ StagedEvent = Annotated[
     StagedAttemptEvent
     | StagedCorrectionEvent
     | StagedPronunciationEvent
+    | StagedSourceProgressEvent
     | StagedObservationEvent
     | StagedFollowUpEvent,
     Field(discriminator="kind"),
@@ -1325,7 +1368,7 @@ class StatusData(ContractModel):
     contract_schema_version: Literal[1] = 1
     database_schema_version: int = Field(ge=1)
     persistence: Literal["available"] = "available"
-    stage: Literal[4] = 4
+    stage: Literal[5] = 5
 
 
 class StatusEnvelope(SuccessEnvelope[StatusData]):

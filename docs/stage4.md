@@ -30,7 +30,7 @@ A learner can request a lesson, work through it, safely record observations in b
 ### 4.2 Planner
 
 - [x] Accept available minutes, requested mode, energy/fatigue, resource preferences, and optional learner intent.
-- [ ] Score due review, weak dimensions, curriculum continuity, recent modality balance, goals, and source continuity. *(Source continuity is not scored: see [Deferred, and why](#deferred-and-why).)*
+- [x] Score due review, weak dimensions, curriculum continuity, recent modality balance, goals, and source continuity. *(Source continuity was deferred here and is scored as of Stage 5: see [Deferred, and why](#deferred-and-why).)*
 - [x] Enforce duration, novelty, review, modality, and fatigue constraints.
 - [x] Produce an explanation for every selected block and omitted high-priority candidate.
 - [x] Validate plans at 40, 60, 80, 100, and 120 minutes.
@@ -40,7 +40,7 @@ A learner can request a lesson, work through it, safely record observations in b
 - [x] Implement `session log --input events.json` for bounded batches at block boundaries.
 - [x] Give every batch a session ID, sequence number, content hash, and idempotency key.
 - [x] Store staged events immediately; do not materialize mastery mid-session.
-- [ ] Make close one transaction that validates and materializes attempts, evidence, errors, source progress, follow-ups, review tasks, and projection dirtiness. *(Source progress and review tasks are not materialized: see [Deferred, and why](#deferred-and-why).)*
+- [ ] Make close one transaction that validates and materializes attempts, evidence, errors, source progress, follow-ups, review tasks, and projection dirtiness. *(Source progress is materialized as of Stage 5; review tasks are still Stage 6's: see [Deferred, and why](#deferred-and-why).)*
 - [x] Implement `resume`, reviewed `partial-close`, and `abandon`; preserve an audit trail in all cases.
 - [x] Make duplicate batches and repeated close calls safe no-ops returning the original result.
 
@@ -255,17 +255,16 @@ repeating it, so a field added later is covered by them automatically.
 Two clauses of this stage's own checklist are **not** implemented, and the boxes above
 stay unticked rather than being claimed:
 
-| Claimed | Actual state |
-|---|---|
-| close materializes **source progress** | There are no source tables. `sources`, `source_segments`, and `track_source_progress` are Stage 5's, and there is no staged event kind that could carry a position in a source. |
-| close materializes **review tasks** | There is no `review_tasks` table. Rich review scheduling is Stage 6's; what this stage has is `followups`, which the close does materialize. |
-| planner scores **source continuity** | Not computed. `curriculum_continuity` is real -- it reads `track_curriculum_progress` -- but a catalogued source has nothing to read, so a component for it would be a weight applied to a constant. |
+| Claimed | State at Stage 4 | State now |
+|---|---|---|
+| close materializes **source progress** | There are no source tables. `sources`, `source_segments`, and `track_source_progress` are Stage 5's, and there is no staged event kind that could carry a position in a source. | **Closed by Stage 5.** `source.progress` is a staged event kind, and the close materializes it into a comprehension observation through `sources.materialize_progress` -- in *this* transaction, under the same unaided-before-aided rule the command obeys. |
+| close materializes **review tasks** | There is no `review_tasks` table. Rich review scheduling is Stage 6's; what this stage has is `followups`, which the close does materialize. | Still open, still Stage 6's. |
+| planner scores **source continuity** | Not computed. `curriculum_continuity` is real -- it reads `track_curriculum_progress` -- but a catalogued source has nothing to read, so a component for it would be a weight applied to a constant. | **Closed by Stage 5.** `source_continuity` reads `track_source_progress` and applies per source *kind* to the block areas that kind can serve, so an unfinished novel argues for reading and not for pronunciation. |
 
-The honest version of "implemented" for these would be an event kind nobody can produce
-and a score that is always zero, which is worse than an unticked box: it would read as
-working. Stage 5 adds the source tables and the progress events, Stage 6 adds review
-tasks, and both extend *this* close rather than adding a second one -- the staging and
-close boundary is the thing the handoff asks them to reuse.
+The honest version of "implemented" for these would have been an event kind nobody can
+produce and a score that is always zero, which is worse than an unticked box: it would
+read as working. Stage 5 added the source tables and the progress events and extended
+*this* close rather than adding a second one; Stage 6 adds review tasks the same way.
 
 ## Verification
 

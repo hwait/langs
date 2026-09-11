@@ -8,8 +8,10 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 
 from linguawiki import resources
+from linguawiki.clock import Clock, SystemClock
+from linguawiki.db.connection import Database, open_reader
 from linguawiki.models import ContractModel
-from linguawiki.paths import find_git_root
+from linguawiki.paths import WorkspacePaths, find_git_root
 from linguawiki.repository_policy import (
     GENERATED_END,
     GENERATED_START,
@@ -241,4 +243,255 @@ def check_privacy(root: Path, *, policy: PrivacyPolicy | None = None) -> Privacy
         git_root=listing.git_root,
         inspection_failure=listing.failure,
         warnings=tuple(warnings),
+    )
+
+
+# A body has to be long enough that finding it somewhere is evidence rather than
+# coincidence. Short utterances -- "tak", "nie wiem" -- appear in ordinary prose, and a
+# check that flagged them would be turned off within a week.
+LEAK_MATCH_MINIMUM = 24
+
+
+class RetentionSummary(ContractModel):
+    """What this workspace is holding of the learner, in the terms they consented in."""
+
+    transcript_policy: str = "withheld"
+    audio_consent: bool = False
+    utterances_held: int = 0
+    utterances_with_words: int = 0
+    artifacts_held: int = 0
+    artifacts_purged: int = 0
+    #: Claims that would stop standing if every held recording were purged today. The
+    #: number a learner actually needs before choosing to delete anything.
+    claims_resting_on_audio: int = 0
+    sources_with_excerpts: int = 0
+
+
+class PurgeConsequence(ContractModel):
+    artifact_id: str
+    relative_path: str
+    kind: str
+    invalidated_claims: int = 0
+    surviving_language_evidence: int = 0
+
+
+class PrivacyAuditReport(ContractModel):
+    """Everything private this workspace could be leaking, in one pass."""
+
+    ok: bool
+    root: str
+    track_id: str | None = None
+    paths: PrivacyReport
+    #: Learner speech or restricted source text found in files that are committed.
+    content_leaks: tuple[PrivacyCandidate, ...] = ()
+    #: The same, found in the audit log -- which is inside the database and therefore not
+    #: in Git, but is read back into reports and shown to skills.
+    log_leaks: tuple[PrivacyCandidate, ...] = ()
+    retention: RetentionSummary
+    #: What deleting each held recording would cost, before anyone deletes one.
+    purge_consequences: tuple[PurgeConsequence, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+def _private_bodies(database: Database) -> list[tuple[str, str]]:
+    """The texts that must not appear outside the database, with what each one is.
+
+    Two kinds. The learner's own speech, which is private because it is theirs; and text
+    from a source catalogued as metadata-only, which is private because the rights say so.
+    A short-excerpt source's excerpt is deliberately absent: the plan permits those in a
+    wiki page, and flagging them would make the check useless for the case it exists for.
+
+    Deliberately *not* scoped to a track. The retention figures beside it are one
+    learner's, but a leak is a leak: another learner's words in a committed page are in
+    the same repository and the same history, and auditing one track at a time would
+    report a clean workspace to whichever of them ran the command.
+    """
+
+    bodies: list[tuple[str, str]] = []
+    bodies.extend(
+        (str(text), f"the learner's own words, from utterance {utterance_id}")
+        for utterance_id, text in database.query(
+            "SELECT utterance_id, raw_text FROM utterances WHERE visibility <> 'withheld'"
+        )
+        if len(str(text)) >= LEAK_MATCH_MINIMUM
+    )
+    bodies.extend(
+        (str(text), f"a reviewed hearing of the learner, from revision {revision_id}")
+        for revision_id, text in database.query(
+            "SELECT revision_id, text FROM transcript_revisions WHERE visibility <> 'withheld'"
+        )
+        if len(str(text)) >= LEAK_MATCH_MINIMUM
+    )
+    bodies.extend(
+        (str(excerpt), f"text from {title}, which is catalogued as metadata-only")
+        for excerpt, title in database.query(
+            "SELECT unit.excerpt, source.title FROM source_units unit "
+            "JOIN sources source ON source.source_id = unit.source_id "
+            "WHERE unit.excerpt IS NOT NULL AND source.rights = 'metadata-only'"
+        )
+        if len(str(excerpt)) >= LEAK_MATCH_MINIMUM
+    )
+    return bodies
+
+
+def audit(
+    paths: WorkspacePaths,
+    *,
+    track: str | None = None,
+    clock: Clock | None = None,
+) -> PrivacyAuditReport:
+    """Answer the only privacy question that matters: what is about to escape.
+
+    The path check alone was never enough. It knows that `artifacts/` must not be
+    committed, which stops a recording reaching Git as a file -- and says nothing about
+    the same recording's transcript being pasted into a wiki page, which is committed by
+    design. So this searches the committed files for the bodies the database is holding,
+    and reports what it finds with what each thing is.
+
+    It also states the retention position plainly, because "surface retention state and
+    purge consequences before deletion" is a promise that can only be kept *before*: after
+    the learner has deleted a month of recordings, telling them what it cost is not a
+    privacy control, it is an apology.
+    """
+
+    from linguawiki.services import learners as learner_service
+    from linguawiki.services import transcripts as transcript_service
+
+    active_clock = clock or SystemClock()
+    root = paths.root
+    path_report = check_privacy(root)
+    warnings: list[str] = []
+    leaks: list[PrivacyCandidate] = []
+    log_leaks: list[PrivacyCandidate] = []
+    with open_reader(paths, clock=active_clock) as database:
+        track_id = learner_service.resolve_track(database, track)
+        record = learner_service.track_context(database, track_id)
+        preferences = record.preferences if isinstance(record.preferences, dict) else {}
+        bodies = _private_bodies(database)
+        summaries = [
+            (str(audit_id), " ".join(str(part) for part in (before, after) if part))
+            for audit_id, before, after in database.query(
+                "SELECT audit_id, before_summary, after_summary FROM audit_log "
+                "WHERE before_summary IS NOT NULL OR after_summary IS NOT NULL"
+            )
+        ]
+        retention = RetentionSummary(
+            transcript_policy=transcript_service.retention_policy(preferences),
+            audio_consent=bool(preferences.get("audio_retention_consent")),
+            utterances_held=int(
+                database.scalar("SELECT count(*) FROM utterances WHERE track_id = ?", [track_id])
+            ),
+            utterances_with_words=int(
+                database.scalar(
+                    "SELECT count(*) FROM utterances WHERE track_id = ? AND visibility <> "
+                    "'withheld'",
+                    [track_id],
+                )
+            ),
+            artifacts_held=int(
+                database.scalar(
+                    "SELECT count(*) FROM artifacts WHERE track_id = ? AND purged_at IS NULL "
+                    "AND retained",
+                    [track_id],
+                )
+            ),
+            artifacts_purged=int(
+                database.scalar(
+                    "SELECT count(*) FROM artifacts WHERE track_id = ? AND purged_at IS NOT NULL",
+                    [track_id],
+                )
+            ),
+            claims_resting_on_audio=int(
+                database.scalar(
+                    "SELECT count(*) FROM pronunciation_observations WHERE track_id = ? "
+                    "AND basis = 'audio' AND invalidated_at IS NULL",
+                    [track_id],
+                )
+            ),
+            sources_with_excerpts=int(
+                database.scalar(
+                    "SELECT count(DISTINCT unit.source_id) FROM source_units unit "
+                    "JOIN sources source ON source.source_id = unit.source_id "
+                    "WHERE unit.excerpt IS NOT NULL AND source.track_id = ?",
+                    [track_id],
+                )
+            ),
+        )
+        held = database.query(
+            "SELECT artifact_id, relative_path, kind FROM artifacts WHERE track_id = ? "
+            "AND purged_at IS NULL AND retained ORDER BY artifact_id",
+            [track_id],
+        )
+        surviving = int(
+            database.scalar(
+                "SELECT count(*) FROM pronunciation_observations WHERE track_id = ? "
+                "AND basis <> 'audio'",
+                [track_id],
+            )
+        )
+        consequences = [
+            PurgeConsequence(
+                artifact_id=str(artifact_id),
+                relative_path=str(relative_path),
+                kind=str(kind),
+                invalidated_claims=len(
+                    _dependent_claim_ids(database, artifact_id=str(artifact_id))
+                ),
+                surviving_language_evidence=surviving,
+            )
+            for artifact_id, relative_path, kind in held
+        ]
+    for audit_id, summary in summaries:
+        for body, description in bodies:
+            if body in summary:
+                log_leaks.append(
+                    PrivacyCandidate(
+                        path=f"audit_log/{audit_id}",
+                        reason=f"the audit log holds {description}",
+                    )
+                )
+                break
+    wiki_root = root / "wiki"
+    if wiki_root.is_dir():
+        for candidate in sorted(wiki_root.rglob("*")):
+            if not candidate.is_file() or candidate.suffix.lower() not in (".md", ".markdown"):
+                continue
+            try:
+                text = candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                warnings.append(f"{candidate} could not be read and was not checked")
+                continue
+            for body, description in bodies:
+                if body in text:
+                    leaks.append(
+                        PrivacyCandidate(
+                            path=str(candidate.relative_to(root)),
+                            reason=f"this committed page holds {description}",
+                        )
+                    )
+                    break
+    if not bodies:
+        warnings.append(
+            "there is nothing private stored yet, so the content scan proves nothing about "
+            "what this workspace would do once there is"
+        )
+    return PrivacyAuditReport(
+        ok=path_report.ok and not leaks and not log_leaks,
+        root=str(root),
+        track_id=track_id,
+        paths=path_report,
+        content_leaks=tuple(leaks),
+        log_leaks=tuple(log_leaks),
+        retention=retention,
+        purge_consequences=tuple(consequences),
+        warnings=tuple((*path_report.warnings, *warnings)),
+    )
+
+
+def _dependent_claim_ids(database: Database, *, artifact_id: str) -> tuple[str, ...]:
+    from linguawiki.services.artifacts import dependent_observations
+
+    return tuple(
+        observation_id
+        for observation_id, _ in dependent_observations(database, artifact_id=artifact_id)
     )

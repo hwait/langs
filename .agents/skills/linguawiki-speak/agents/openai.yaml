@@ -1,0 +1,7 @@
+interface:
+  display_name: "LinguaWiki speaking"
+  short_description: "Build, review, and ingest a spoken session without overstating what was heard"
+  default_prompt: "Use $linguawiki-speak to bring in today's conversation."
+
+policy:
+  allow_implicit_invocation: true

@@ -1255,6 +1255,264 @@
       ],
       "title": "StagedPronunciationPayload",
       "type": "object"
+    },
+    "StagedSourceProgressEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "activity": {
+          "anyOf": [
+            {
+              "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activity"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "pattern": "^blk_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block"
+        },
+        "event_id": {
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "source.progress",
+          "title": "Kind",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "(?:Z|\\+00:00)$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/StagedSourceProgressPayload"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "kind",
+        "payload"
+      ],
+      "title": "StagedSourceProgressEvent",
+      "type": "object"
+    },
+    "StagedSourceProgressPayload": {
+      "additionalProperties": false,
+      "description": "What the learner did with a source during this session.\n\nStage 4 left this out and said so: a session could not record that the learner read\nthirty pages, so reading happened beside the session lifecycle instead of inside it.\nIt belongs here for the same reason everything else does -- the close is where a\nsession becomes part of the learner, and reading is not an exception to that.\n\nThe aid and the band are the comprehension record, and their *order* carries the\nevidence: an unaided reading that follows an aided one is refused at close, exactly as\nit is refused at the command, because it is the first reading with the help left out.",
+      "properties": {
+        "aid": {
+          "default": "unaided",
+          "enum": [
+            "unaided",
+            "glossed",
+            "subtitled",
+            "translated",
+            "explained"
+          ],
+          "title": "Aid",
+          "type": "string"
+        },
+        "band": {
+          "enum": [
+            "none",
+            "little",
+            "gist",
+            "most",
+            "full"
+          ],
+          "title": "Band",
+          "type": "string"
+        },
+        "completed": {
+          "default": false,
+          "title": "Completed",
+          "type": "boolean"
+        },
+        "lookups": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Lookups",
+          "type": "integer"
+        },
+        "minutes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minutes"
+        },
+        "mode": {
+          "default": "intensive",
+          "enum": [
+            "intensive",
+            "extensive"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "package_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Id"
+        },
+        "replays": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Replays",
+          "type": "integer"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response"
+        },
+        "response_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Hash"
+        },
+        "response_visibility": {
+          "anyOf": [
+            {
+              "enum": [
+                "withheld",
+                "excerpt",
+                "full"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Visibility"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "package",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "source_ref": {
+          "minLength": 1,
+          "title": "Source Ref",
+          "type": "string"
+        },
+        "transcript_layer": {
+          "anyOf": [
+            {
+              "enum": [
+                "raw",
+                "normalized",
+                "reviewed-hearing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transcript Layer"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "utterance_id": {
+          "anyOf": [
+            {
+              "pattern": "^utt_[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Utterance Id"
+        }
+      },
+      "required": [
+        "source_ref",
+        "band"
+      ],
+      "title": "StagedSourceProgressPayload",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1295,7 +1553,8 @@
             "correction.given": "#/$defs/StagedCorrectionEvent",
             "follow_up": "#/$defs/StagedFollowUpEvent",
             "observation.noted": "#/$defs/StagedObservationEvent",
-            "pronunciation.assessment": "#/$defs/StagedPronunciationEvent"
+            "pronunciation.assessment": "#/$defs/StagedPronunciationEvent",
+            "source.progress": "#/$defs/StagedSourceProgressEvent"
           },
           "propertyName": "kind"
         },
@@ -1308,6 +1567,9 @@
           },
           {
             "$ref": "#/$defs/StagedPronunciationEvent"
+          },
+          {
+            "$ref": "#/$defs/StagedSourceProgressEvent"
           },
           {
             "$ref": "#/$defs/StagedObservationEvent"

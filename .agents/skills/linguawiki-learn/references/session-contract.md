@@ -96,6 +96,21 @@ model that `linguawiki-speak` owns. Pronunciation *evidence* comes from
 salience. An observation is context for planning and can never promote an item: it names
 no claim and carries no strength.
 
+## `source.progress`
+
+`source_ref` names the catalogued source by identifier or title, and `band` says what the
+learner understood, with `aid` saying how much help they had. Optionally a `unit`, a
+`mode`, `replays`, `lookups`, `minutes`, `completed`, and a note.
+
+The field is `source_ref` rather than `source` because every staged payload already
+carries a `source` meaning *where the observation came from* — an ingested package, or a
+live flush — and one field cannot mean both the provenance and the book.
+
+An unaided band recorded after an aided one is refused **at close**, exactly as it is at
+the command. A session holding such an event cannot finish until it is discarded, which is
+the right way round: the alternative is a close that silently downgrades the learner's
+strongest comprehension evidence.
+
 ## `follow_up`
 
 `kind` and `action`, optionally a target, an error, a priority, and a due window. This
