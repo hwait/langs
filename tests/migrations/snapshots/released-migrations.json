@@ -24,5 +24,8 @@
   "0023_session_engine": "5fdbf71406454777fbfb602576410644d34c117aa1d2dc8d944ebe680b44ad26",
   "0024_sources_and_artifacts": "0b565ca2ea218a66bc9cc73a19c8a33736ca47f42e418e4eb717f8862ee4383d",
   "0025_transcripts_and_acoustics": "4dffbb813c8483c706ba70ef03f5c97b0802104bba6deb294fd54a9b7fb50f42",
-  "0026_source_progress_events": "165a0c4bcc16cc35388dc75808dedd2eb44cf3e675e32d4101a62558677f51ad"
+  "0026_source_progress_events": "165a0c4bcc16cc35388dc75808dedd2eb44cf3e675e32d4101a62558677f51ad",
+  "0027_utterance_identity_and_supersession": "20bb708314871e3ff5d5a4a71f00f7dab45fe4998b42cde937c7b5b75121f867",
+  "0028_override_provenance": "070f8d8c98d392f96e45e5bca5d93b1aaa84f7b4c23ea9c19aa541cb303315b0",
+  "0029_selected_clips": "3b17c2b04fe60b6c277bfc7b0559fb60289fceee1f7ce865dabf8b69ab973137"
 }

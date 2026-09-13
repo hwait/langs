@@ -22,11 +22,11 @@ mean in code, rather than in a document.
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
-from linguawiki import transcripts as transcript_policy
 from linguawiki.clock import Clock, SystemClock, aware_utc
 from linguawiki.db.connection import open_reader
 from linguawiki.errors import ErrorDetail, LinguaWikiError, validated_contract
@@ -149,13 +149,37 @@ def scaffold(
     }
 
 
-def _whisper_utterances(payload: Mapping[str, Any], *, start: datetime, speaker: str) -> list[Any]:
-    """Map a segment list with times and text onto utterances, and nothing else.
+#: A segment's average log-probability, mapped onto 0..1. The scale is the format's, not
+#: ours: `exp(avg_logprob)` is the per-token likelihood the model reported, which is what
+#: "how sure was it" means in this format and nothing more. Recorded with the transcriber's
+#: name and a `confidence_basis` saying so, because a number whose scale is unstated is
+#: worse than no number at all.
+def _segment_confidence(segment: Mapping[str, Any]) -> float | None:
+    """Turn what this format reports about its own certainty into 0..1, or nothing."""
 
-    Everything the format carries that the contract has no place for -- token logprobs,
-    temperatures, compression ratios, the model's name -- stops here. A provider field
-    that reached a domain table would have to be migrated out later by someone who no
-    longer knows why it is there.
+    raw = segment.get("avg_logprob")
+    if raw is None:
+        return None
+    try:
+        value = math.exp(float(raw))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return float(min(1.0, max(0.0, value)))
+
+
+def _whisper_utterances(payload: Mapping[str, Any], *, start: datetime, speaker: str) -> list[Any]:
+    """Map a segment list with times, text, and certainty onto utterances.
+
+    Everything else the format carries -- temperatures, compression ratios, token ids --
+    stops here. A provider field that reached a domain table would have to be migrated out
+    later by someone who no longer knows why it is there.
+
+    The certainty does *not* stop here, and that is the point. The plan requires that
+    low-confidence speech become a possible transcription error rather than a confirmed
+    learner error, and a workspace that threw the number away at the door could never
+    apply that rule: every mishearing would arrive looking exactly like a mistake.
     """
 
     segments = payload.get("segments")
@@ -175,15 +199,17 @@ def _whisper_utterances(payload: Mapping[str, Any], *, start: datetime, speaker:
             continue
         begins = float(segment.get("start", 0.0))
         ends = float(segment.get("end", begins))
-        mapped.append(
-            {
-                "utterance_id": f"utt_{index:03d}",
-                "speaker": speaker,
-                "started_at": _timestamp(start + timedelta(seconds=begins)),
-                "ended_at": _timestamp(start + timedelta(seconds=max(ends, begins))),
-                "text": text,
-            }
-        )
+        entry: dict[str, Any] = {
+            "utterance_id": f"utt_{index:03d}",
+            "speaker": speaker,
+            "started_at": _timestamp(start + timedelta(seconds=begins)),
+            "ended_at": _timestamp(start + timedelta(seconds=max(ends, begins))),
+            "text": text,
+        }
+        confidence = _segment_confidence(segment)
+        if confidence is not None:
+            entry["confidence"] = confidence
+        mapped.append(entry)
     if not mapped:
         raise LinguaWikiError(
             "adapter_found_no_speech",
@@ -232,6 +258,12 @@ def adapt(
         )
     start = aware_utc(started_at)
     utterances = _whisper_utterances(payload, start=start, speaker=speaker)
+    model = payload.get("model")
+    transcriber = {
+        "name": str(model) if model else "whisper-verbose-json",
+        "version": str(payload.get("version")) if payload.get("version") else None,
+        "confidence_basis": "exp(avg_logprob) per segment, 0..1",
+    }
     duration = float(payload.get("duration") or 0.0)
     ended = start + timedelta(seconds=duration) if duration else None
     last = max(
@@ -249,6 +281,7 @@ def adapt(
         "started_at": _timestamp(start),
         "ended_at": _timestamp(max(ended, last) if ended else last),
         "learning_targets": [],
+        "transcriber": transcriber,
         "transcript_layers": [{"kind": "raw", "derived_from": None, "utterances": utterances}],
         "events": [],
         "artifacts": [],
@@ -259,6 +292,7 @@ def validate(
     paths: WorkspacePaths,
     *,
     package: Mapping[str, Any],
+    session: str | None = None,
     track: str | None = None,
     clock: Clock | None = None,
 ) -> ValidationReport:
@@ -297,57 +331,25 @@ def validate(
         )
     package_hash = session_service.canonical_hash(validated.model_dump(mode="json"))
     with open_reader(paths, clock=clock or SystemClock()) as database:
-        track_id = learner_service.resolve_track(database, track)
-        if validated.track_hint is not None and str(validated.track_hint) != track_id:
-            problems.append(
-                f"the package names track {validated.track_hint} and this workspace would "
-                f"ingest it into {track_id}; an external recording belongs to one learner"
-            )
+        # The same function ingestion refuses on, so the two cannot disagree. Review had
+        # its own partial copy of these checks, and reported valid packages that ingestion
+        # refused and invalid ones that ingestion accepted as no-op retries.
+        track_id, found, duplicate_of, _ = session_service.package_problems(
+            database,
+            validated,
+            package_hash=package_hash,
+            # The session ingestion will use, so review answers the question that will
+            # actually be asked. Without it review checked the active session while
+            # `ingest --session` targeted another, possibly closed, one.
+            session=session,
+            track=track,
+            root=paths.root,
+        )
+        problems.extend(message for _, message in found)
         record = learner_service.track_context(database, track_id)
         preferences = record.preferences if isinstance(record.preferences, dict) else {}
         retention = transcript_service.retention_policy(preferences)
-        existing = database.one(
-            "SELECT ingestion_id FROM session_packages WHERE package_hash = ?", [package_hash]
-        )
-        duplicate = existing is not None
-        registered = {
-            str(artifact_id)
-            for (artifact_id,) in database.query(
-                "SELECT artifact_id FROM artifacts WHERE track_id = ? AND purged_at IS NULL "
-                "AND retained",
-                [track_id],
-            )
-        }
-    declared_audio = {
-        str(artifact.artifact_id) for artifact in validated.artifacts if artifact.retained
-    }
-    for event in validated.events:
-        payload = event.payload
-        status = getattr(payload, "status", None)
-        if status is None:
-            continue
-        artifact_id = getattr(payload, "audio_artifact_id", None)
-        named = None if artifact_id is None else str(artifact_id)
-        try:
-            # A package's pronunciation event names no dimension -- the contract has no
-            # field for one -- so only the status rule can be checked here. The dimension
-            # rule is enforced where a dimension actually exists: `transcript
-            # pronunciation`, and the CHECK on the table behind it.
-            transcript_policy.assert_acoustic_claim_has_audio(
-                status=str(status),
-                dimension="intelligibility",
-                basis="audio" if named else "transcript",
-                reference=f"event {event.event_id}",
-            )
-        except LinguaWikiError as failure:
-            problems.append(failure.payload.message)
-            continue
-        if named and named not in declared_audio and named not in registered:
-            problems.append(
-                f"event {event.event_id} confirms pronunciation from {named}, which this "
-                "package does not carry as retained audio and this workspace does not hold; "
-                "a confirmed claim nobody can check is worse than an uncertain one"
-            )
+    duplicate = duplicate_of is not None
     if duplicate:
         warnings.append(
             "this exact package was already ingested; ingesting it again stages nothing, "
@@ -395,10 +397,15 @@ def ingest(
 ) -> SpokenIngestReport:
     """Take a spoken session in: stage what it claims, store what was said.
 
-    Two writes rather than one, deliberately. Staging is the session engine's business and
-    the transcript is this stage's, and each is idempotent on its own content -- so a
-    re-ingest stages nothing and imports nothing, and an interruption between them leaves
-    a package that can simply be ingested again.
+    Three writes rather than one, and the *order* is the part that matters. Staging is the
+    session engine's business, the audio is the artifact store's, and the transcript is
+    this stage's; each is idempotent on its own content, so a re-ingest does nothing and
+    an interruption leaves a package that can simply be ingested again.
+
+    What separate transactions cannot do is undo each other, so everything that can refuse
+    the package refuses it *first*. Stage 5 staged the events and validated the transcript
+    afterwards, which meant a package rejected for a mislabelled layer had already left a
+    creditable follow-up event behind.
 
     Nothing here credits the learner with anything. A package becomes part of their model
     at the same boundary as everything else: the session close.

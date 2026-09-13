@@ -33,6 +33,7 @@ from linguawiki.errors import ErrorDetail, LinguaWikiError, validated_contract
 from linguawiki.ids import EventId, InterpretationId, PronunciationId, RevisionId, UtteranceId
 from linguawiki.models import ContractModel
 from linguawiki.paths import WorkspacePaths
+from linguawiki.services import errors as error_service
 from linguawiki.services import evidence as evidence_service
 from linguawiki.services import learners as learner_service
 
@@ -42,6 +43,11 @@ class RevisionReport(ContractModel):
     layer: str
     derived_from: str
     kind: str
+    #: The earlier reading of this layer that this one replaced, when there was one. The
+    #: row it names is kept rather than deleted: two people listening and disagreeing is
+    #: the measure of how far the transcription can be trusted.
+    supersedes: str | None = None
+    superseded_by: str | None = None
     #: Present only within the track's retention consent, like every other learner text.
     text: str | None = None
     reviewer_kind: str
@@ -57,6 +63,15 @@ class InterpretationReport(ContractModel):
     explanation: str | None = None
     confidence: str
     reviewer_kind: str
+    #: Set when somebody overruled the transcriber's own uncertainty to call this the
+    #: learner's mistake, with the reason they gave. On the row rather than in a log,
+    #: because it is the reason a learner may want to argue with the correction.
+    overrode_low_confidence: bool = False
+    override_reason: str | None = None
+    #: The error pattern this reading filed the occurrence against. Present exactly when
+    #: `counts_against_the_learner` is true: that flag is a claim about the learner's
+    #: record, and it has to point at the row that carries it.
+    error_id: str | None = None
     #: True only for `learner-error`. The others are recorded and counted against nobody:
     #: a mishearing taught back as a mistake is worse than a mishearing lost.
     counts_against_the_learner: bool = False
@@ -200,8 +215,13 @@ def _resolve_utterance(database: Database, utterance: str, *, track_id: str) -> 
 
 
 def _verified_original(
-    *, stored_text: str | None, visibility: str, text_hash: str | None, supplied: str | None
-) -> str:
+    *,
+    stored_text: str | None,
+    visibility: str,
+    text_hash: str | None,
+    supplied: str | None,
+    required: bool = True,
+) -> str | None:
     """The actual earlier text, either because we kept it or because the caller proved it.
 
     A normalization is defined by what it does *not* change, so checking it needs the
@@ -246,6 +266,11 @@ def _verified_original(
                 details=(ErrorDetail(field="original", reason=digest),),
             )
         return supplied
+    if not required:
+        # A review does not *need* the earlier words -- it is a claim about what was said,
+        # not about what was left unchanged. Without them its kind cannot be derived, so
+        # it is recorded as the hearing it announces itself to be.
+        return None
     raise LinguaWikiError(
         "original_text_unavailable",
         "this workspace keeps only a hash of what was said, by the track's own retention "
@@ -255,11 +280,206 @@ def _verified_original(
     )
 
 
+def _assert_confidence_supports_blame(
+    heard_confidence: float | None,
+    *,
+    utterance: str,
+    overridden: bool,
+    reviewer_kind: str,
+    reason: str | None,
+) -> None:
+    """Refuse to call a badly-heard line the learner's mistake.
+
+    A correction for something the learner said correctly is worse than a missed
+    correction: they practise away from a form they had right. When the transcriber itself
+    was unsure, `uncertain` is the honest classification, and a person who has listened to
+    the audio can still override.
+
+    The override is not a flag anyone may set. It asserts that somebody heard the audio,
+    which an `ai` reviewer working from the same uncertain text cannot have done -- and
+    Stage 5 accepted it from any caller and stored nothing, so the durable record of an
+    AI-authored override was indistinguishable from a confident correction.
+    """
+
+    if heard_confidence is None or heard_confidence >= transcript_policy.BLAME_CONFIDENCE_FLOOR:
+        return
+    if overridden:
+        if reviewer_kind not in transcript_policy.OVERRIDE_REVIEWERS:
+            raise LinguaWikiError(
+                "override_requires_a_listener",
+                f"the transcriber reported {heard_confidence:.2f} confidence in {utterance}, "
+                f"and a reviewer of kind {reviewer_kind} cannot overrule that: the rule "
+                "exists "
+                "because the sound was unclear, and reading the same uncertain text again "
+                f"establishes nothing. A {' or '.join(transcript_policy.OVERRIDE_REVIEWERS)} "
+                "reviewer who "
+                "listened may override it.",
+                details=(ErrorDetail(field="reviewer_kind", reason=reviewer_kind),),
+            )
+        if not (reason or "").strip():
+            raise LinguaWikiError(
+                "override_requires_a_reason",
+                "overruling the transcriber's own uncertainty is a judgement, and the "
+                "learner is entitled to read why it was made",
+                details=(ErrorDetail(field="override_reason", reason="missing"),),
+            )
+        return
+    raise LinguaWikiError(
+        "confidence_too_low_to_blame",
+        f"the transcriber reported {heard_confidence:.2f} confidence in {utterance}, below "
+        f"{transcript_policy.BLAME_CONFIDENCE_FLOOR:.2f}, so calling this the learner's "
+        "mistake risks "
+        "correcting them for a word the machine misheard. Record it as `uncertain`, or "
+        "listen to the audio and say you are sure anyway.",
+        details=(ErrorDetail(field="raw_confidence", reason=f"{heard_confidence:.2f}"),),
+    )
+
+
+def _assert_no_drift(utterance: Any, *, held: tuple[str, str, str, Any, Any], session: str) -> None:
+    """Refuse a reused utterance ID whose content has changed underneath it.
+
+    The same ID arriving again is normal: a checkpoint export and the completed export of
+    one call share their utterances. The same ID arriving with *different words* is not --
+    it means the producer reused an identifier, and keeping the first text would leave the
+    workspace holding a line nobody said in the place of one they did.
+    """
+
+    utterance_id, text_hash, speaker, started, ended = held
+    digest = hashlib.sha256(utterance.text.encode("utf-8")).hexdigest()
+    drifted: list[str] = []
+    if text_hash and digest != text_hash:
+        drifted.append("its words")
+    if str(utterance.speaker) != speaker:
+        drifted.append(f"its speaker ({speaker} before, {utterance.speaker} now)")
+    if naive_utc(aware_utc(utterance.started_at)) != started:
+        drifted.append("when it started")
+    if naive_utc(aware_utc(utterance.ended_at)) != ended:
+        drifted.append("when it ended")
+    if not drifted:
+        return
+    raise LinguaWikiError(
+        "utterance_identity_reused",
+        f"{utterance.utterance_id} is already held for session {session} as "
+        f"{utterance_id}, and this package changes {' and '.join(drifted)}. An identifier "
+        "the producer reuses for different speech is not the same observation, and the "
+        "workspace cannot tell which of the two the learner actually said.",
+        details=(ErrorDetail(field="utterance_id", reason=str(utterance.utterance_id)),),
+    )
+
+
+def _utterance_audio(validated: Any, external_id: str, *, audio: Mapping[str, str]) -> str | None:
+    """The registered recording this utterance's own events point at, if any.
+
+    Linking the utterance rather than only the event is what gives a purge something to
+    find. Without it the file and the claim about it had no relationship any command
+    could act on.
+    """
+
+    for event in validated.events:
+        payload = event.payload
+        if getattr(payload, "utterance_id", None) != external_id:
+            continue
+        named = getattr(payload, "audio_artifact_id", None)
+        if named is not None and str(named) in audio:
+            return audio[str(named)]
+    return None
+
+
+def held_utterances(
+    database: Database, *, track_id: str, external_session_id: str
+) -> dict[str, tuple[str, str, str, Any, Any]]:
+    """What this workspace already holds for one external session, by producer identifier.
+
+    Scoped to the session because that is the scope inside which a producer promises its
+    identifiers are unique.
+    """
+
+    return {
+        str(external_id): (
+            str(utterance_id),
+            str(text_hash or ""),
+            str(speaker),
+            started,
+            ended,
+        )
+        for utterance_id, external_id, text_hash, speaker, started, ended in database.query(
+            "SELECT utterance_id, external_id, text_hash, speaker, started_at, ended_at "
+            "FROM utterances WHERE track_id = ? AND external_session_id = ?",
+            [track_id, external_session_id],
+        )
+    }
+
+
+def assert_import_is_possible(database: Database, validated: Any, *, track_id: str) -> None:
+    """Refuse a transcript this workspace cannot store, without storing any of it.
+
+    Called from the ingestion preflight as well as from the import itself. The import runs
+    *second*, so a package whose utterance identifier had been reused for different words
+    was refused only after its events were staged and creditable -- the refusal has to be
+    reachable before the first write, which means it cannot live only where the write is.
+    """
+
+    assert_layers_are_honest(validated)
+    held = held_utterances(
+        database, track_id=track_id, external_session_id=validated.external_session_id
+    )
+    raw_layer = next(layer for layer in validated.transcript_layers if layer.kind == "raw")
+    for utterance in raw_layer.utterances:
+        existing = held.get(utterance.utterance_id)
+        if existing is not None:
+            _assert_no_drift(utterance, held=existing, session=validated.external_session_id)
+
+
+def assert_layers_are_honest(validated: Any) -> list[tuple[str, str, str, str]]:
+    """Check every derived layer against the one it came from, and say what each did.
+
+    Returns the revisions the package implies, as `(external_id, layer, derived_from,
+    kind)`, so the caller can write them without deciding any of this twice.
+
+    Separated from the import so it can run *before* anything is written. A package whose
+    `normalized` layer changes the words is refused whole -- accepting it would file a
+    mishearing under the label of a tidy-up, and later the learner would be corrected for
+    a word they never said.
+    """
+
+    layers = {layer.kind: layer for layer in validated.transcript_layers}
+    raw_by_id = {u.utterance_id: u.text for u in layers["raw"].utterances}
+    planned: list[tuple[str, str, str, str]] = []
+    for kind in transcript_policy.LAYERS[1:]:
+        layer = layers.get(kind)
+        if layer is None:
+            continue
+        source_layer = layers[str(layer.derived_from)]
+        source_text = {u.utterance_id: u.text for u in source_layer.utterances}
+        for utterance in layer.utterances:
+            before = source_text.get(utterance.utterance_id, raw_by_id[utterance.utterance_id])
+            if kind == "normalized":
+                # A normalized layer says the words are the same words. Held to it.
+                revision_kind = "normalization"
+                transcript_policy.assert_revision_is_honest(
+                    kind=revision_kind,
+                    before=before,
+                    after=utterance.text,
+                    reference=f"the {kind} layer of {utterance.utterance_id}",
+                )
+            else:
+                # A review that changed the words is a hearing; one that did not is a
+                # person confirming what the machine wrote. The row says which.
+                revision_kind = (
+                    "normalization"
+                    if transcript_policy.same_words(before, utterance.text)
+                    else "hearing"
+                )
+            planned.append((utterance.utterance_id, kind, str(layer.derived_from), revision_kind))
+    return planned
+
+
 def import_package(
     paths: WorkspacePaths,
     *,
     package: Mapping[str, Any],
     ingestion_id: str | None = None,
+    audio: Mapping[str, str] | None = None,
     track: str | None = None,
     clock: Clock | None = None,
     command: str = "transcript.import",
@@ -276,8 +496,15 @@ def import_package(
     said. A producer that genuinely heard different words has a layer for that.
 
     Re-importing is a no-op rather than a duplicate: an utterance is identified by the
-    producer's own ID within the track, so a checkpoint export and the completed export of
-    the same call agree about which utterances they share.
+    producer's ID *within its own external session*. Stage 5 identified it by the ID alone,
+    and a producer's IDs are only unique inside one call -- a scaffold and the segment
+    adapter both mint `utt_001` -- so two unrelated conversations collapsed into one and
+    the second was skipped as already imported. A learner lost a whole call to that.
+
+    An ID that *does* repeat inside its own session is a different problem: the same
+    utterance arriving twice, which is expected, or a producer reusing an ID for different
+    words, which is not. The second is refused, because silently keeping the first text
+    would leave the workspace holding a line nobody said in the place of one they did.
     """
 
     from linguawiki.contracts import SessionPackage
@@ -342,49 +569,35 @@ def import_package(
         retention = retention_policy(preferences)
         warnings: list[str] = []
 
-        # Check every derived layer against the one it came from *before* writing anything,
-        # so a package with a mislabelled layer leaves no half-imported transcript behind.
-        raw_by_id = {u.utterance_id: u.text for u in raw_layer.utterances}
-        planned_revisions: list[tuple[str, str, str, str]] = []
-        for kind in transcript_policy.LAYERS[1:]:
-            layer = layers.get(kind)
-            if layer is None:
-                continue
-            source_layer = layers[str(layer.derived_from)]
-            source_text = {u.utterance_id: u.text for u in source_layer.utterances}
-            for utterance in layer.utterances:
-                before = source_text.get(utterance.utterance_id, raw_by_id[utterance.utterance_id])
-                if kind == "normalized":
-                    # A normalized layer says the words are the same words. Held to it.
-                    revision_kind = "normalization"
-                    transcript_policy.assert_revision_is_honest(
-                        kind=revision_kind,
-                        before=before,
-                        after=utterance.text,
-                        reference=f"the {kind} layer of {utterance.utterance_id}",
-                    )
-                else:
-                    # A review that changed the words is a hearing; one that did not is a
-                    # person confirming what the machine wrote. The row says which.
-                    revision_kind = (
-                        "normalization"
-                        if transcript_policy.same_words(before, utterance.text)
-                        else "hearing"
-                    )
-                planned_revisions.append(
-                    (utterance.utterance_id, kind, str(layer.derived_from), revision_kind)
-                )
+        # Checked before the first row is written, so a package with a mislabelled layer
+        # leaves no half-imported transcript behind.
+        planned_revisions = assert_layers_are_honest(validated)
         text_by_layer = {
             kind: {u.utterance_id: u.text for u in layer.utterances}
             for kind, layer in layers.items()
         }
 
-        existing = {
-            str(external_id): str(utterance_id)
-            for utterance_id, external_id in database.query(
-                "SELECT utterance_id, external_id FROM utterances WHERE track_id = ?", [track_id]
-            )
+        # Scoped to this external session: an ID is the producer's, and a producer only
+        # promises they are unique inside one call.
+        existing = held_utterances(
+            database, track_id=track_id, external_session_id=validated.external_session_id
+        )
+        # Resolved from the artifact store rather than handed in: the registration
+        # happens in the ingestion preflight, and an utterance that named a manifest entry
+        # instead of a row would leave a purge with nothing to find.
+        from linguawiki.services import artifacts as artifact_service
+
+        resolved_audio = {
+            external: held.artifact_id
+            for external, held in artifact_service.registered_by_producer(
+                database, track_id=track_id
+            ).items()
+            # Kept *and* a recording. An utterance pointing at a transcript file as its
+            # audio would make a purge of that file invalidate acoustic claims, and a
+            # purge of the real recording invalidate nothing.
+            if held.retained and held.kind == "audio"
         }
+        resolved_audio.update(audio or {})
         now = aware_utc(database.now())
         imported = 0
         skipped = 0
@@ -392,23 +605,27 @@ def import_package(
         with database.transaction() as transaction:
             minted: dict[str, str] = {}
             for sequence, utterance in enumerate(raw_layer.utterances, start=1):
-                if utterance.utterance_id in existing:
-                    minted[utterance.utterance_id] = existing[utterance.utterance_id]
+                held = existing.get(utterance.utterance_id)
+                if held is not None:
+                    _assert_no_drift(utterance, held=held, session=validated.external_session_id)
+                    minted[utterance.utterance_id] = held[0]
                     skipped += 1
                     continue
                 visibility, kept, digest = _retained_text(utterance.text, preferences=preferences)
                 utterance_id = str(UtteranceId.new())
                 minted[utterance.utterance_id] = utterance_id
                 transaction.execute(
-                    "INSERT INTO utterances (utterance_id, track_id, external_id, ingestion_id, "
-                    "session_id, source_id, speaker, sequence, started_at, ended_at, raw_text, "
-                    "raw_confidence, audio_artifact_id, visibility, text_hash, policy_version, "
-                    "recorded_at) "
-                    "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
+                    "INSERT INTO utterances (utterance_id, track_id, external_id, "
+                    "external_session_id, ingestion_id, session_id, source_id, speaker, "
+                    "sequence, started_at, ended_at, raw_text, raw_confidence, "
+                    "audio_artifact_id, visibility, text_hash, transcriber, "
+                    "transcriber_version, policy_version, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         utterance_id,
                         track_id,
                         utterance.utterance_id,
+                        validated.external_session_id,
                         ingestion_id,
                         session_id,
                         str(utterance.speaker),
@@ -416,8 +633,15 @@ def import_package(
                         naive_utc(aware_utc(utterance.started_at)),
                         naive_utc(aware_utc(utterance.ended_at)),
                         kept or "",
+                        # What the transcriber said about its own output. Kept because a
+                        # low confidence is the difference between a mistake to teach from
+                        # and a mishearing to discount.
+                        utterance.confidence,
+                        _utterance_audio(validated, utterance.utterance_id, audio=resolved_audio),
                         visibility,
                         digest,
+                        None if validated.transcriber is None else validated.transcriber.name,
+                        None if validated.transcriber is None else validated.transcriber.version,
                         transcript_policy.TRANSCRIPT_POLICY_VERSION,
                         naive_utc(now),
                     ],
@@ -495,7 +719,7 @@ def _record_revision(
     utterance: str,
     text: str,
     layer: str,
-    kind: str,
+    kind: str | None,
     original: str | None,
     reviewer_kind: str,
     reviewer: str | None,
@@ -547,10 +771,17 @@ def _record_revision(
         # A revision derives from the most reviewed layer below it that actually exists:
         # normalizing what a person already re-heard would silently discard their reading.
         available = {
-            str(existing_layer): (str(existing_text), str(existing_visibility))
-            for existing_layer, existing_text, existing_visibility in database.query(
-                "SELECT layer, text, visibility FROM transcript_revisions WHERE utterance_id = ?",
-                [utterance_id],
+            str(existing_layer): (
+                str(existing_text),
+                str(existing_visibility),
+                str(existing_id),
+            )
+            for existing_layer, existing_text, existing_visibility, existing_id in (
+                database.query(
+                    "SELECT layer, text, visibility, revision_id FROM transcript_revisions "
+                    "WHERE utterance_id = ? AND superseded_at IS NULL",
+                    [utterance_id],
+                )
             )
         }
         permitted = [
@@ -563,33 +794,50 @@ def _record_revision(
         if derived_from == "raw":
             stored_text, visibility, text_hash = str(row[1]), str(row[2]), row[3]
         else:
-            stored_text, visibility = available[derived_from]
+            stored_text, visibility = available[derived_from][:2]
             text_hash = None
-        if kind == "normalization":
+        resolved_kind: str = kind or "hearing"
+        if kind == "normalization" or kind is None:
             before = _verified_original(
                 stored_text=stored_text,
                 visibility=visibility,
                 text_hash=None if text_hash is None else str(text_hash),
                 supplied=original,
+                required=kind == "normalization",
             )
-            transcript_policy.assert_revision_is_honest(
-                kind=kind,
-                before=before,
-                after=text,
-                reference=f"this revision of {external_id}",
-            )
+            if kind is None:
+                # A review that changed the words is a hearing claim; one that did not is
+                # a person confirming what the machine wrote. Both are worth having, and
+                # recording the second as a hearing says the transcription was wrong when
+                # the reviewer said it was right.
+                resolved_kind = (
+                    "normalization"
+                    if before is not None and transcript_policy.same_words(before, text)
+                    else "hearing"
+                )
+            else:
+                assert before is not None
+                transcript_policy.assert_revision_is_honest(
+                    kind=kind,
+                    before=before,
+                    after=text,
+                    reference=f"this revision of {external_id}",
+                )
         kept_visibility, kept, _ = _retained_text(text, preferences=preferences)
         revision_id = str(RevisionId.new())
         now = aware_utc(database.now())
-        superseded = layer in available
+        superseded = available.get(layer)
         with database.transaction() as transaction:
-            if superseded:
-                # A second review of the same layer is a new hearing, not an edit of the
-                # old one -- but only one row per layer can be the current reading, so the
-                # superseded row goes and the audit entry keeps that it was there.
+            if superseded is not None:
+                # A second reading of the same layer supersedes the first by *naming* it.
+                # Stage 5 deleted the predecessor, which contradicts the one rule the
+                # layers exist for: nothing is edited into place, and every later reading
+                # is a new row. The earlier hearing is how anyone can see that two people
+                # listened and disagreed.
                 transaction.execute(
-                    "DELETE FROM transcript_revisions WHERE utterance_id = ? AND layer = ?",
-                    [utterance_id, layer],
+                    "UPDATE transcript_revisions SET superseded_at = ?, superseded_by = ? "
+                    "WHERE revision_id = ?",
+                    [naive_utc(now), revision_id, superseded[2]],
                 )
             transaction.execute(
                 "INSERT INTO transcript_revisions (revision_id, utterance_id, layer, "
@@ -601,14 +849,16 @@ def _record_revision(
                     utterance_id,
                     layer,
                     derived_from,
-                    kind,
+                    resolved_kind,
                     kept or "",
                     reviewer_kind,
                     reviewer,
                     reason,
                     confidence,
                     kept_visibility,
-                    _revision_hash(external_id=external_id, layer=layer, kind=kind, text=text),
+                    _revision_hash(
+                        external_id=external_id, layer=layer, kind=resolved_kind, text=text
+                    ),
                     naive_utc(now),
                 ],
             )
@@ -619,15 +869,16 @@ def _record_revision(
                 outcome="succeeded",
                 affected_records_json=json.dumps([revision_id]),
                 after_summary=(
-                    f"{kind} of {external_id} recorded at the {layer} layer"
-                    + (", replacing an earlier reading" if superseded else "")
+                    f"{resolved_kind} of {external_id} recorded at the {layer} layer"
+                    + (f", superseding {superseded[2]}" if superseded is not None else "")
                 ),
             )
     return RevisionReport(
         revision_id=revision_id,
         layer=layer,
         derived_from=derived_from,
-        kind=kind,
+        kind=str(resolved_kind),
+        supersedes=None if superseded is None else superseded[2],
         text=kept,
         reviewer_kind=reviewer_kind,
         confidence=confidence,
@@ -699,7 +950,10 @@ def review(
         utterance=utterance,
         text=text,
         layer="reviewed-hearing",
-        kind="hearing",
+        # Derived inside `_record_revision`, where the text it came from is known. Passing
+        # `hearing` here is what made a word-identical confirmation claim the machine had
+        # misheard -- the opposite of what the person doing the review said.
+        kind=None,
         original=original,
         reviewer_kind=reviewer_kind,
         reviewer=reviewer,
@@ -719,6 +973,12 @@ def interpret(
     meaning: str | None = None,
     corrected_form: str | None = None,
     explanation: str | None = None,
+    category: str | None = None,
+    signature: str | None = None,
+    attach_to: str | None = None,
+    distinct: bool = False,
+    despite_low_confidence: bool = False,
+    override_reason: str | None = None,
     confidence: str = "medium",
     reviewer_kind: str = "ai",
     reviewer: str | None = None,
@@ -753,18 +1013,83 @@ def interpret(
             "mark against the learner and nothing to learn from it",
             details=(ErrorDetail(field="corrected_form", reason="missing"),),
         )
+    if classification == "learner-error" and not category:
+        raise LinguaWikiError(
+            "error_category_required",
+            "a learner error is filed against a recurring pattern, and a pattern is "
+            "identified by its category and signature. Without them the correction would "
+            "be a note on one line that the next occurrence of the same mistake could "
+            "never find.",
+            details=(ErrorDetail(field="category", reason="missing"),),
+        )
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = learner_service.resolve_track(database, track)
         utterance_id = _resolve_utterance(database, utterance, track_id=track_id)
+        heard = database.one(
+            "SELECT raw_text, visibility, raw_confidence FROM utterances WHERE utterance_id = ?",
+            [utterance_id],
+        )
+        if heard is None:
+            raise LinguaWikiError(
+                "utterance_not_found",
+                f"no utterance {utterance_id} in this workspace",
+                details=(ErrorDetail(field="utterance", reason="unknown utterance"),),
+            )
+        learner_form, learner_visibility, heard_confidence = (
+            str(heard[0]),
+            str(heard[1]),
+            None if heard[2] is None else float(heard[2]),
+        )
+        if classification == "learner-error":
+            _assert_confidence_supports_blame(
+                heard_confidence,
+                utterance=utterance,
+                overridden=despite_low_confidence,
+                reviewer_kind=reviewer_kind,
+                reason=override_reason,
+            )
+        applied_override = bool(
+            despite_low_confidence
+            and classification == "learner-error"
+            and heard_confidence is not None
+            and heard_confidence < transcript_policy.BLAME_CONFIDENCE_FLOOR
+        )
+        error_id: str | None = None
+        plan = None
+        if classification == "learner-error":
+            plan = error_service.plan_occurrence(
+                database,
+                category=str(category),
+                signature=signature or (learner_form if learner_visibility != "withheld" else ""),
+                description=explanation or f"Corrected to {corrected_form}.",
+                learner_form=learner_form if learner_visibility != "withheld" else None,
+                corrected_form=corrected_form,
+                explanation=explanation,
+                classification="learner-error",
+                confidence=confidence,
+                observed_at=aware_utc(database.now()),
+                attach_to=attach_to,
+                distinct=distinct,
+                track=track_id,
+                command=command,
+            )
         interpretation_id = str(InterpretationId.new())
         now = aware_utc(database.now())
         with database.transaction() as transaction:
+            if plan is not None:
+                # The whole point of calling something a learner error: it joins the
+                # pattern the next occurrence of the same mistake will find. Stage 5
+                # reported `counts_against_the_learner` and wrote nothing anywhere, so the
+                # promised utterance -> correction -> error-history chain stopped at the
+                # report object.
+                error_id = error_service.write_occurrence(transaction, plan).error_id
             transaction.execute(
                 "INSERT INTO utterance_interpretations (interpretation_id, utterance_id, "
                 "classification, meaning, corrected_form, explanation, confidence, "
-                "reviewer_kind, reviewer, error_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+                "reviewer_kind, reviewer, error_id, overrode_low_confidence, "
+                "override_reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     interpretation_id,
                     utterance_id,
@@ -775,6 +1100,11 @@ def interpret(
                     confidence,
                     reviewer_kind,
                     reviewer,
+                    error_id,
+                    applied_override,
+                    # Stripped, because a reason made of spaces is not a reason and the
+                    # CHECK behind this column says so too.
+                    (override_reason or "").strip() if applied_override else None,
                     naive_utc(now),
                 ],
             )
@@ -794,6 +1124,9 @@ def interpret(
         explanation=explanation,
         confidence=confidence,
         reviewer_kind=reviewer_kind,
+        overrode_low_confidence=applied_override,
+        override_reason=(override_reason or "").strip() if applied_override else None,
+        error_id=error_id,
         counts_against_the_learner=classification == "learner-error",
     )
 
@@ -943,6 +1276,13 @@ def record_pronunciation(
 
 
 def _revisions(database: Database, *, utterance_id: str) -> tuple[RevisionReport, ...]:
+    """Every reading of this utterance, superseded ones included.
+
+    Superseded rows are reported rather than hidden, because two people listening and
+    disagreeing is exactly the uncertainty a learner needs before believing a correction
+    derived from either of them. `superseded_by` says which is current.
+    """
+
     return tuple(
         RevisionReport(
             revision_id=str(row[0]),
@@ -952,12 +1292,13 @@ def _revisions(database: Database, *, utterance_id: str) -> tuple[RevisionReport
             text=None if row[5] == "withheld" else str(row[4]),
             reviewer_kind=str(row[6]),
             confidence=str(row[7]),
+            superseded_by=None if row[9] is None else str(row[9]),
             created_at=aware_utc(row[8]).isoformat(),
         )
         for row in database.query(
             "SELECT revision_id, layer, derived_from, kind, text, visibility, reviewer_kind, "
-            "confidence, created_at FROM transcript_revisions WHERE utterance_id = ? "
-            "ORDER BY created_at, revision_id",
+            "confidence, created_at, superseded_by FROM transcript_revisions "
+            "WHERE utterance_id = ? ORDER BY created_at, revision_id",
             [utterance_id],
         )
     )
@@ -1066,10 +1407,13 @@ def show(
             hearings: list[transcript_policy.Hearing] = []
             if visibility != "withheld":
                 hearings.append(transcript_policy.Hearing(layer="raw", text=str(row[6])))
+            # Only the *current* reading of each layer takes part in the comparison: a
+            # superseded one is on the record for its history, not as a live claim about
+            # what was said.
             hearings.extend(
                 transcript_policy.Hearing(layer=revision.layer, text=revision.text)
                 for revision in revisions
-                if revision.text is not None
+                if revision.text is not None and revision.superseded_by is None
             )
             best = transcript_policy.best_hearing(hearings)
             audio_artifact_id = None if row[9] is None else str(row[9])

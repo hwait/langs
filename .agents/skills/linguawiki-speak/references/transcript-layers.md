@@ -12,8 +12,14 @@ Ask one question: **did the words change?**
 - No → `transcript normalize`. It is refused if the words did change, and that refusal is
   the point: a mishearing filed as a tidy-up ends up taught back to the learner as their
   own mistake.
-- Yes → `transcript review`. The revision records itself as a `hearing` claim when the
-  words differ and as a confirmation when they do not.
+- Yes, or you are not sure → `transcript review`. You do not have to decide: the revision
+  derives its own kind from what it actually changed, recording a `hearing` when the words
+  differ and a confirmation when they do not. Saying "I listened and the machine was
+  right" is a useful thing to have on the record, and it is not a claim that it was wrong.
+
+A second review of the same layer **supersedes** the first rather than replacing it. Both
+readings stay, the earlier one naming the one that replaced it, because two people
+listening and disagreeing is the measure of how far the transcription can be trusted.
 
 The input is a payload, not a flag, because it is the learner's own words:
 
@@ -35,8 +41,10 @@ trusted, and a learner is entitled to that before believing a correction derived
 
 `transcript interpret` says what an utterance was:
 
-- `learner-error` — their mistake. Requires a `corrected_form`; a mark against the
-  learner with nothing to learn from it is refused.
+- `learner-error` — their mistake. Requires a `corrected_form` *and* a `--category`: the
+  occurrence is filed against a recurring error pattern, and a correction the next
+  occurrence of the same mistake cannot find is a note on one line. Refused outright when
+  the transcriber reported low confidence in the words.
 - `transcription-artifact` — the machine misheard. Recorded, and counted against nobody.
 - `uncertain` — nobody is sure. Also counted against nobody.
 

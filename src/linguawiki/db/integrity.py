@@ -709,7 +709,7 @@ def _served_target_checks(database: Database) -> list[CheckResult]:
     return checks
 
 
-def _session_checks(database: Database) -> list[CheckResult]:
+def _session_checks(database: Database, *, present: frozenset[str]) -> list[CheckResult]:
     """Whether the session engine's promises survived whatever happened to this file.
 
     Every one of these was checkable only at write time before, which means a restore, a
@@ -946,9 +946,17 @@ def _session_checks(database: Database) -> list[CheckResult]:
         "error-occurrence": ("error_occurrences", "occurrence_id"),
         "followup": ("followups", "followup_id"),
         "observation": ("session_observations", "observation_id"),
+        "comprehension": ("comprehension_observations", "observation_id"),
+        "pronunciation": ("pronunciation_observations", "observation_id"),
     }
     unresolved_targets: list[str] = []
     for kind, (table, column) in tables.items():
+        if table not in present:
+            # A kind whose table this schema version does not have yet. The CHECK on
+            # `materialized_kind` cannot have admitted it either, so there is nothing to
+            # resolve -- and querying a table that does not exist would fail the whole
+            # report rather than report anything.
+            continue
         unresolved_targets.extend(
             f"{staged_event_id} -> {kind} {materialized_id}"
             for staged_event_id, materialized_id in database.query(
@@ -1596,6 +1604,33 @@ def _source_checks(database: Database) -> list[CheckResult]:
         checks.append(
             _ok("comprehension_order", "unaided comprehension precedes the help it was without")
         )
+    # A source belongs to one learner and so does everything it links to. Existence was
+    # checked and ownership was not, so learner A's book could point at learner B's error
+    # pattern -- and `errors show` then reports it as A's history.
+    crossed_links = [
+        f"{unit_id} -> {target_id}"
+        for unit_id, target_id in database.query(
+            "SELECT link.unit_id, link.target_id FROM source_item_links link "
+            "JOIN source_units unit ON unit.unit_id = link.unit_id "
+            "JOIN sources source ON source.source_id = unit.source_id "
+            "JOIN error_patterns pattern ON pattern.error_id = link.target_id "
+            "WHERE link.target_kind = 'error-pattern' AND pattern.track_id <> source.track_id "
+            "ORDER BY link.unit_id"
+        )
+    ]
+    if crossed_links:
+        checks.append(
+            _failed(
+                "source_link_track_scope",
+                "a source links to an error pattern belonging to another learner, which "
+                "would put one learner's mistakes in the other's history",
+                links=", ".join(crossed_links[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok("source_link_track_scope", "every source link stays inside its own track")
+        )
     counted = [
         f"{source_id}: {recorded} recorded, {actual} completed"
         for source_id, recorded, actual in database.query(
@@ -1619,7 +1654,7 @@ def _source_checks(database: Database) -> list[CheckResult]:
     return checks
 
 
-def _artifact_checks(database: Database) -> list[CheckResult]:
+def _artifact_checks(database: Database, *, external_identity: bool) -> list[CheckResult]:
     """A purge is a fact about a file, and the rows that named it have to agree.
 
     Two directions matter. A row still claiming audio that was purged would read as
@@ -1676,6 +1711,21 @@ def _artifact_checks(database: Database) -> list[CheckResult]:
         if str(artifact_id) in purged
         and transcript_policy.invalidated_by_purge(status=str(status), dimension=str(dimension))
     ]
+    # Not kept is the same fact as gone, for a claim that has to rest on something
+    # anyone can check. `db check` looked only at purged rows, so a claim on audio that
+    # was deleted at the door -- for want of consent -- read as perfectly supported.
+    standing.extend(
+        f"{observation_id} ({dimension}, {status}, never kept)"
+        for observation_id, status, dimension, artifact_id in database.query(
+            "SELECT observation.observation_id, observation.status, observation.dimension, "
+            "observation.audio_artifact_id FROM pronunciation_observations observation "
+            "JOIN artifacts artifact ON artifact.artifact_id = observation.audio_artifact_id "
+            "WHERE observation.audio_artifact_id IS NOT NULL "
+            "AND observation.invalidated_at IS NULL AND NOT artifact.retained "
+            "ORDER BY observation.observation_id"
+        )
+        if transcript_policy.invalidated_by_purge(status=str(status), dimension=str(dimension))
+    )
     if standing:
         checks.append(
             _failed(
@@ -1687,10 +1737,165 @@ def _artifact_checks(database: Database) -> list[CheckResult]:
         )
     else:
         checks.append(_ok("acoustic_claim_support", "every standing acoustic claim has its audio"))
+    if not external_identity:
+        # A database written before 0027 has no producer identifier to be unique.
+        return checks
+    # A producer's identifier has to mean one recording. Two rows carrying the same one
+    # would make a re-ingested package register its audio twice, and the claims from the
+    # two ingests would rest on different rows for the same file.
+    duplicated = [
+        f"{external_id} ({count} artifacts)"
+        for external_id, count in database.query(
+            "SELECT external_id, count(*) FROM artifacts WHERE external_id IS NOT NULL "
+            "GROUP BY track_id, external_id HAVING count(*) > 1 ORDER BY external_id"
+        )
+    ]
+    if duplicated:
+        checks.append(
+            _failed(
+                "artifact_external_identity",
+                "one producer identifier names more than one artifact, so a re-ingested "
+                "package cannot tell which row is the recording it brought",
+                artifacts=", ".join(duplicated[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok("artifact_external_identity", "every producer identifier names one artifact")
+        )
+    # One file, one owner. A *file* is workspace-global while the rows describing it are per
+    # track, so two live rows on one path meant either learner's purge or retention sweep
+    # would delete the other's recording. The command refuses it now; this finds the ones
+    # that arrived before it did, or through a restore.
+    shared = [
+        f"{relative_path} ({count} live artifacts)"
+        for relative_path, count in database.query(
+            "SELECT relative_path, count(*) FROM artifacts WHERE purged_at IS NULL "
+            "AND retained GROUP BY relative_path HAVING count(*) > 1 ORDER BY relative_path"
+        )
+    ]
+    if shared:
+        checks.append(
+            _failed(
+                "artifact_path_ownership",
+                "one file is registered by more than one live artifact, so a purge or a "
+                "retention sweep on either would delete a recording the other still claims",
+                paths=", ".join(shared[:20]),
+            )
+        )
+    else:
+        checks.append(_ok("artifact_path_ownership", "every registered file has one owner"))
+    # A clip is an excerpt of a recording this workspace has a record of. Not a foreign
+    # key, because a purge repoints the source row's own key.
+    # Everything that makes a row a clip rather than a whole recording wearing a label.
+    # Clip provenance buys retention a whole recording does not get, so a check that only
+    # asked whether *some* source row existed was a check a full conversation could pass.
+    malformed_clips = [
+        f"{artifact_id}: {reason}" for artifact_id, reason in _clip_problems(database)
+    ]
+    if malformed_clips:
+        checks.append(
+            _failed(
+                "clip_provenance",
+                "a row claims to be a selected clip without being one, which would earn a "
+                "whole recording the longer retention a clip is given",
+                clips=", ".join(malformed_clips[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok("clip_provenance", "every clip is audio, of this track's audio, over a window")
+        )
+    # A claim about how something sounded rests on a *recording*. The basis rule was
+    # checked and the file's kind was not, so a transcript artifact satisfied a confirmed
+    # audio claim and `db check` reported it clean.
+    mistyped = [
+        f"{observation_id} -> {artifact_id} ({kind})"
+        for observation_id, artifact_id, kind in database.query(
+            "SELECT observation.observation_id, artifact.artifact_id, artifact.kind "
+            "FROM pronunciation_observations observation "
+            "JOIN artifacts artifact ON artifact.artifact_id = observation.audio_artifact_id "
+            "WHERE artifact.kind <> 'audio' ORDER BY observation.observation_id"
+        )
+    ]
+    mistyped.extend(
+        f"{utterance_id} -> {artifact_id} ({kind})"
+        for utterance_id, artifact_id, kind in database.query(
+            "SELECT utterance.utterance_id, artifact.artifact_id, artifact.kind "
+            "FROM utterances utterance "
+            "JOIN artifacts artifact ON artifact.artifact_id = utterance.audio_artifact_id "
+            "WHERE artifact.kind <> 'audio' ORDER BY utterance.utterance_id"
+        )
+    )
+    if mistyped:
+        checks.append(
+            _failed(
+                "acoustic_claim_is_audio",
+                "a claim about how something sounded rests on a file that is not a "
+                "recording; a correct transcript proves nothing about how it sounded, and "
+                "that is no less true when the transcript is a file",
+                references=", ".join(mistyped[:20]),
+            )
+        )
+    else:
+        checks.append(_ok("acoustic_claim_is_audio", "every acoustic claim rests on a recording"))
     return checks
 
 
-def _transcript_checks(database: Database) -> list[CheckResult]:
+def _clip_problems(database: Database) -> list[tuple[str, str]]:
+    """Why each row that claims to be a clip is not one.
+
+    Every row with *any* clip field set is inspected, not only those naming a source: a row
+    carrying offsets and no source was invisible to a query keyed on the source, and so was
+    a whole recording recorded as a clip of itself, which qualified for the longer retention
+    a clip is given.
+    """
+
+    problems: list[tuple[str, str]] = []
+    sources = {
+        str(artifact_id): (str(track_id), str(kind))
+        for artifact_id, track_id, kind in database.query(
+            "SELECT artifact_id, track_id, kind FROM artifacts"
+        )
+    }
+    for artifact_id, track_id, kind, source, starts, ends in database.query(
+        "SELECT artifact_id, track_id, kind, clip_of_artifact_id, clip_starts_at_ms, "
+        "clip_ends_at_ms FROM artifacts WHERE clip_of_artifact_id IS NOT NULL "
+        "OR clip_starts_at_ms IS NOT NULL OR clip_ends_at_ms IS NOT NULL "
+        "ORDER BY artifact_id"
+    ):
+        identifier = str(artifact_id)
+        if source is None:
+            problems.append(
+                (identifier, "has clip offsets and names no recording they are offsets into")
+            )
+            continue
+        if str(source) == identifier:
+            problems.append(
+                (identifier, "is recorded as an excerpt of itself, which is the whole thing")
+            )
+            continue
+        held = sources.get(str(source))
+        if held is None:
+            problems.append((identifier, f"names {source}, which is not here"))
+            continue
+        if held[0] != str(track_id):
+            problems.append((identifier, f"is an excerpt of another learner's {source}"))
+            continue
+        if held[1] != "audio" or str(kind) != "audio":
+            problems.append((identifier, "is not audio, or is not audio's excerpt"))
+            continue
+        if starts is None or ends is None:
+            problems.append((identifier, "has no window, so it is the whole recording"))
+            continue
+        if int(starts) < 0 or int(ends) <= int(starts):
+            problems.append((identifier, f"has an impossible window {starts}-{ends}ms"))
+    return problems
+
+
+def _transcript_checks(
+    database: Database, *, supersession: bool, override_provenance: bool
+) -> list[CheckResult]:
     """The transcript layers say what they actually did.
 
     A revision filed as a `normalization` that changed the words is the defect this whole
@@ -1706,23 +1911,36 @@ def _transcript_checks(database: Database) -> list[CheckResult]:
             "SELECT utterance_id, raw_text, visibility FROM utterances"
         )
     }
-    layer_text = {
+    # Before 0027 a layer held exactly one reading, enforced by a unique index, so the
+    # current-reading question did not exist and neither did the column that answers it.
+    current_filter = " WHERE superseded_at IS NULL" if supersession else ""
+    # Keyed by *revision*, not by layer. A layer can hold a superseded reading beside the
+    # current one, and keying by layer compared one revision's words against another
+    # revision's kind -- which reported a perfectly honest normalization as a lie.
+    revision_text = {
+        str(revision_id): (str(text), str(visibility))
+        for revision_id, text, visibility in database.query(
+            "SELECT revision_id, text, visibility FROM transcript_revisions"
+        )
+    }
+    current_by_layer = {
         (str(utterance_id), str(layer)): (str(text), str(visibility))
         for utterance_id, layer, text, visibility in database.query(
             "SELECT utterance_id, layer, text, visibility FROM transcript_revisions"
+            + current_filter
         )
     }
     dishonest: list[str] = []
     unverifiable = 0
-    for revision_id, utterance_id, layer, derived_from in database.query(
-        "SELECT revision_id, utterance_id, layer, derived_from FROM transcript_revisions "
+    for revision_id, utterance_id, derived_from in database.query(
+        "SELECT revision_id, utterance_id, derived_from FROM transcript_revisions "
         "WHERE kind = 'normalization' ORDER BY revision_id"
     ):
-        after = layer_text[(str(utterance_id), str(layer))]
+        after = revision_text[str(revision_id)]
         before = (
             raw_text.get(str(utterance_id))
             if str(derived_from) == "raw"
-            else layer_text.get((str(utterance_id), str(derived_from)))
+            else current_by_layer.get((str(utterance_id), str(derived_from)))
         )
         if before is None or before[1] != "full" or after[1] != "full":
             # A workspace that kept only a hash cannot be asked this question, and
@@ -1810,6 +2028,92 @@ def _transcript_checks(database: Database) -> list[CheckResult]:
         )
     else:
         checks.append(_ok("acoustic_claim_basis", "every acoustic claim rests on audio"))
+    if not supersession:
+        return checks
+    # One *current* reading per layer. DuckDB has no partial index, so the rule that
+    # replaced 0025's unique index lives here: a second current row would make "what does
+    # this layer say" a question with two answers.
+    contested = [
+        f"{utterance_id}/{layer} ({count} current readings)"
+        for utterance_id, layer, count in database.query(
+            "SELECT utterance_id, layer, count(*) FROM transcript_revisions "
+            "WHERE superseded_at IS NULL GROUP BY utterance_id, layer "
+            "HAVING count(*) > 1 ORDER BY utterance_id"
+        )
+    ]
+    if contested:
+        checks.append(
+            _failed(
+                "revision_supersession",
+                "a transcript layer has more than one current reading, so what it says the "
+                "learner said has two answers",
+                layers=", ".join(contested[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok("revision_supersession", "every transcript layer has one current reading")
+        )
+    known_revisions = {
+        str(revision_id)
+        for (revision_id,) in database.query("SELECT revision_id FROM transcript_revisions")
+    }
+    unpaired = [
+        str(revision_id)
+        for revision_id, superseded_at, superseded_by in database.query(
+            "SELECT revision_id, superseded_at, superseded_by FROM transcript_revisions "
+            "ORDER BY revision_id"
+        )
+        if (superseded_at is None) != (superseded_by is None)
+        or (superseded_by is not None and str(superseded_by) not in known_revisions)
+    ]
+    if unpaired:
+        checks.append(
+            _failed(
+                "revision_supersession_pairing",
+                "a superseded reading does not name the reading that replaced it, so the "
+                "history it was kept for cannot be followed",
+                revisions=", ".join(unpaired[:20]),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "revision_supersession_pairing",
+                "every superseded reading names the one that replaced it",
+            )
+        )
+    if not override_provenance:
+        return checks
+    # The CHECK in 0028 says this, and a table rebuilt without it -- a restore, a
+    # hand-repair, a looser build -- would not. An override asserts that somebody heard
+    # the sound, so it needs a reviewer who could have and a reason they can be held to.
+    # Both halves of the CHECK, because a check that mirrors half a constraint passes the
+    # states the other half forbids: a reason recorded against an override that never
+    # happened reads as a judgement somebody made, and nobody made it.
+    unaccountable: list[str] = []
+    for interpretation_id, overrode, reviewer_kind, reason in database.query(
+        "SELECT interpretation_id, overrode_low_confidence, reviewer_kind, override_reason "
+        "FROM utterance_interpretations ORDER BY interpretation_id"
+    ):
+        stated = str(reason or "").strip()
+        if overrode:
+            if str(reviewer_kind) not in transcript_policy.OVERRIDE_REVIEWERS or not stated:
+                unaccountable.append(f"{interpretation_id} ({reviewer_kind})")
+        elif stated:
+            unaccountable.append(f"{interpretation_id} (a reason for no override)")
+    if unaccountable:
+        checks.append(
+            _failed(
+                "override_provenance",
+                "an override of the transcriber's own uncertainty has no reviewer who "
+                "could have heard the audio, or no reason; it marks the learner wrong on "
+                "an authority nobody can be held to",
+                interpretations=", ".join(unaccountable[:20]),
+            )
+        )
+    else:
+        checks.append(_ok("override_provenance", "every low-confidence override names who and why"))
     return checks
 
 
@@ -2054,13 +2358,33 @@ def check_database(
         ):
             checks.extend(_mastery_checks(database))
         if available["sessions"]:
-            checks.extend(_session_checks(database))
+            checks.extend(_session_checks(database, present=expected))
         if available["sources"]:
             checks.extend(_source_checks(database))
         if available["artifacts"]:
-            checks.extend(_artifact_checks(database))
+            checks.extend(
+                _artifact_checks(
+                    database,
+                    external_identity=any(
+                        name == "external_id"
+                        for name, _ in expected_schema(applied).get("artifacts", ())
+                    ),
+                )
+            )
         if available["transcripts"]:
-            checks.extend(_transcript_checks(database))
+            checks.extend(
+                _transcript_checks(
+                    database,
+                    supersession=any(
+                        name == "superseded_at"
+                        for name, _ in expected_schema(applied).get("transcript_revisions", ())
+                    ),
+                    override_provenance=any(
+                        name == "overrode_low_confidence"
+                        for name, _ in expected_schema(applied).get("utterance_interpretations", ())
+                    ),
+                )
+            )
         if available["error_model"]:
             checks.extend(_error_model_checks(database))
         if available["estimates"] and any(

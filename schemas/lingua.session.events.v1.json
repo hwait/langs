@@ -160,6 +160,18 @@
           "default": null,
           "title": "Dimension"
         },
+        "external_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Session Id"
+        },
         "help_level": {
           "default": "none",
           "enum": [
@@ -472,6 +484,18 @@
           "default": null,
           "title": "Explanation"
         },
+        "external_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Session Id"
+        },
         "learner_form": {
           "anyOf": [
             {
@@ -724,6 +748,18 @@
           "default": null,
           "title": "Error"
         },
+        "external_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Session Id"
+        },
         "kind": {
           "minLength": 1,
           "title": "Kind",
@@ -924,6 +960,18 @@
           "title": "Category",
           "type": "string"
         },
+        "external_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Session Id"
+        },
         "note": {
           "maxLength": 2000,
           "minLength": 1,
@@ -1107,6 +1155,17 @@
       "additionalProperties": false,
       "description": "One pronunciation observation, and what it is based on.\n\n`confirmed` requires audio. A correct transcript proves nothing about how something\nsounded, so a transcript-based observation is recorded as `observed` or `uncertain`\nand never becomes a confirmed pronunciation claim at close.",
       "properties": {
+        "acoustic_dimension": {
+          "default": "intelligibility",
+          "enum": [
+            "intelligibility",
+            "phonetic-accuracy",
+            "prosody",
+            "native-likeness"
+          ],
+          "title": "Acoustic Dimension",
+          "type": "string"
+        },
         "audio_artifact_id": {
           "anyOf": [
             {
@@ -1124,6 +1183,18 @@
           "default": "pronunciation",
           "title": "Dimension",
           "type": "string"
+        },
+        "external_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Session Id"
         },
         "note": {
           "minLength": 1,
@@ -1345,6 +1416,18 @@
           "default": false,
           "title": "Completed",
           "type": "boolean"
+        },
+        "external_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Session Id"
         },
         "lookups": {
           "default": 0,

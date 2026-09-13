@@ -265,11 +265,13 @@ def test_a_mishearing_is_recorded_and_counted_against_nobody(
         running.paths,
         utterance="utt_001",
         classification="learner-error",
+        category="orthography",
         corrected_form="Chciałbym kupić bilet do Krakowa.",
         track=running.track_id,
         clock=running.clock,
     )
     assert mistake.counts_against_the_learner
+    assert mistake.error_id is not None
 
 
 def test_transcript_only_input_cannot_create_a_confirmed_pronunciation_claim(
@@ -529,14 +531,24 @@ def test_an_adapter_maps_a_transcription_export_and_stops_there(
         "Chcialbym kupic bilet.",
         "Do Krakowa prosze.",
     ]
-    # Nothing the provider carried beyond the contract reached the package.
+    # The contract's fields and nothing else: the certainty is carried because the
+    # contract has a place for it, and the temperatures and logprobs are not.
     assert set(utterances[0]) == {
         "utterance_id",
         "speaker",
         "started_at",
         "ended_at",
         "text",
+        "confidence",
     }
+    assert set(utterances[1]) == {
+        "utterance_id",
+        "speaker",
+        "started_at",
+        "ended_at",
+        "text",
+    }, "a segment that reported no certainty carries none"
+    assert adapted["transcriber"]["confidence_basis"]
     report = speaking_service.validate(
         running.paths, package=adapted, track=running.track_id, clock=running.clock
     )

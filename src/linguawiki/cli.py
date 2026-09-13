@@ -944,7 +944,16 @@ def _source_parser(subcommands: Any) -> None:
     link.add_argument("--source", required=True)
     link.add_argument("--unit", required=True)
     link.add_argument("--target", required=True)
-    link.add_argument("--relation", default="extracted-from")
+    link.add_argument(
+        "--target-kind",
+        choices=("knowledge-item", "example", "error-pattern"),
+        default="knowledge-item",
+    )
+    link.add_argument(
+        "--relation",
+        choices=("encountered-in", "extracted-from", "illustrated-by", "practised-in"),
+        default="extracted-from",
+    )
     _add_track_selector(link)
     _add_workspace(link)
     status_action = actions.add_parser("status", help="move a source through its lifecycle")
@@ -974,7 +983,7 @@ def _artifact_parser(subcommands: Any) -> None:
         "--not-retained",
         dest="retained",
         action="store_false",
-        help="record that the file existed and was not kept",
+        help="record that the file existed and was not kept -- the file is then deleted",
     )
     _add_track_selector(register)
     _add_workspace(register)
@@ -986,6 +995,26 @@ def _artifact_parser(subcommands: Any) -> None:
     listing.add_argument("--limit", type=int, default=50)
     _add_track_selector(listing)
     _add_workspace(listing)
+    clip = actions.add_parser(
+        "clip", help="register a selected excerpt of a recording, which outlives the whole"
+    )
+    clip.add_argument("--path", dest="relative_path", required=True)
+    clip.add_argument("--of", dest="clip_of", required=True, help="the recording it came from")
+    # Required: a clip with no window is the whole recording wearing a label that earns
+    # it longer retention than a whole recording gets.
+    clip.add_argument("--from-ms", dest="clip_starts_at_ms", type=int, required=True)
+    clip.add_argument("--to-ms", dest="clip_ends_at_ms", type=int, required=True)
+    clip.add_argument("--media-type")
+    _add_track_selector(clip)
+    _add_workspace(clip)
+    sweep = actions.add_parser(
+        "sweep", help="apply this track's audio retention policy to what it still holds"
+    )
+    sweep.add_argument(
+        "--dry-run", action="store_true", help="report what would go without deleting it"
+    )
+    _add_track_selector(sweep)
+    _add_workspace(sweep)
     purge = actions.add_parser("purge", help="delete a file and settle what depended on it")
     purge.add_argument("--artifact", required=True)
     purge.add_argument(
@@ -996,7 +1025,6 @@ def _artifact_parser(subcommands: Any) -> None:
         action="store_true",
         help="report the consequences without deleting anything",
     )
-    purge.add_argument("--keep-file", dest="remove_file", action="store_false")
     _add_track_selector(purge)
     _add_workspace(purge)
 
@@ -1050,6 +1078,17 @@ def _transcript_parser(subcommands: Any) -> None:
     interpret.add_argument(
         "--classification", choices=transcript_policy.CLASSIFICATIONS, required=True
     )
+    interpret.add_argument("--category", help="the error category a learner-error is filed under")
+    interpret.add_argument("--signature", help="the recurring form, if not the line itself")
+    interpret.add_argument("--attach-to", help="file against this existing pattern")
+    interpret.add_argument("--distinct", action="store_true", help="insist this is a new pattern")
+    interpret.add_argument(
+        "--despite-low-confidence",
+        action="store_true",
+        help="blame the learner although the transcriber was unsure; needs a human or "
+        "learner reviewer who listened, and --override-reason",
+    )
+    interpret.add_argument("--override-reason", help="why the transcriber's doubt was overruled")
     interpret.add_argument("--confidence", choices=("low", "medium", "high"), default="medium")
     interpret.add_argument(
         "--reviewer-kind", choices=("deterministic", "ai", "learner", "human"), default="ai"
@@ -1097,6 +1136,7 @@ def _speaking_parser(subcommands: Any) -> None:
     _add_workspace(package)
     validate = actions.add_parser("validate", help="say what ingesting this would do")
     _add_input(validate)
+    validate.add_argument("--session", help="the session ingestion would attach it to")
     validate.add_argument("--adapter", choices=speaking_service.ADAPTERS, default="lingua")
     validate.add_argument("--external-session-id")
     validate.add_argument("--language", dest="target_language")
@@ -2841,7 +2881,11 @@ def _run_session(args: argparse.Namespace, clock: Clock, command: str) -> int:
                 "a session package is a lingua.session.v1 object",
                 details=(ErrorDetail(field="input", reason="payload is not an object"),),
             )
-        ingested = session_service.ingest_package(
+        # Through `speaking.ingest`, not `sessions.ingest_package`. Staging a package's
+        # events without storing its transcript is half an ingestion: the utterances the
+        # events are *about* never arrive, so an acoustic claim has no utterance to name
+        # and the close refuses work this command accepted.
+        ingested = speaking_service.ingest(
             paths,
             package=payload,
             session=args.session,
@@ -2858,7 +2902,8 @@ def _run_session(args: argparse.Namespace, clock: Clock, command: str) -> int:
                 if ingested.duplicate
                 else f"{ingested.staged_events} event(s) staged"
             ),
-            f"  content hash {ingested.package_hash}",
+            f"  {ingested.imported_utterances} utterance(s) imported, "
+            f"{ingested.skipped_utterances} already present",
             f"  retention: {ingested.retention_policy}; audio "
             + ("available" if ingested.audio_available else "not retained"),
         ]
@@ -3067,6 +3112,7 @@ def _run_source(args: argparse.Namespace, clock: Clock, command: str) -> int:
             source=args.source,
             unit=args.unit,
             target=args.target,
+            target_kind=args.target_kind,
             relation=args.relation,
             track=args.track,
             clock=clock,
@@ -3113,13 +3159,23 @@ def _run_artifact(args: argparse.Namespace, clock: Clock, command: str) -> int:
         return 0
     if args.action == "verify":
         verified = artifact_service.verify(paths, track=args.track, clock=clock)
+        # Independent counts, not nested ones. `altered` includes a tombstoned recording
+        # whose file has come back, which is by definition not among the present files, so
+        # "0 present, 1 of them altered" was a summary contradicting itself.
         lines = [
             f"{verified.checked} artifact(s) checked",
-            f"  {verified.present} file(s) present, {len(verified.altered)} of them altered",
+            f"  {verified.present} intact where the record says, "
+            f"{len(verified.altered)} not what the record says",
             f"  {len(verified.missing)} missing without a tombstone, {len(verified.purged)} purged",
+            f"  {len(verified.escaped)} path(s) leading outside the workspace, "
+            f"{len(verified.unreadable)} unreadable",
         ]
+        # Named, not counted. A count in a warning tells an operator something is wrong and
+        # not which file to go and look at.
         lines.extend(f"  altered: {entry}" for entry in verified.altered)
         lines.extend(f"  missing: {entry}" for entry in verified.missing)
+        lines.extend(f"  escaped: {entry}" for entry in verified.escaped)
+        lines.extend(f"  unreadable: {entry}" for entry in verified.unreadable)
         _print(
             _envelope(command, verified, clock, verified.warnings), "\n".join(lines), args.format
         )
@@ -3134,11 +3190,55 @@ def _run_artifact(args: argparse.Namespace, clock: Clock, command: str) -> int:
             lines.append(f"  {entry.artifact_id}  {entry.kind:10} {state:28} {entry.relative_path}")
         _print(_envelope(command, listing, clock, listing.warnings), "\n".join(lines), args.format)
         return 0
+    if args.action == "clip":
+        clipped = artifact_service.register(
+            paths,
+            relative_path=args.relative_path,
+            kind="audio",
+            origin="learner-recording",
+            media_type=args.media_type,
+            clip_of=args.clip_of,
+            clip_starts_at_ms=args.clip_starts_at_ms,
+            clip_ends_at_ms=args.clip_ends_at_ms,
+            track=args.track,
+            clock=clock,
+            command=command,
+        )
+        window = (
+            f" ({clipped.clip_starts_at_ms}-{clipped.clip_ends_at_ms}ms)"
+            if clipped.clip_starts_at_ms is not None
+            else ""
+        )
+        lines = [
+            f"{clipped.artifact_id}: {clipped.relative_path}{window}",
+            f"  a selected clip of {clipped.clip_of_artifact_id}",
+            "  a clip is kept past the retention window while a pronunciation target it "
+            "supports is unfinished; the whole recording is not",
+        ]
+        _print(_envelope(command, clipped, clock, clipped.warnings), "\n".join(lines), args.format)
+        return 0
+    if args.action == "sweep":
+        swept = artifact_service.sweep(
+            paths, dry_run=args.dry_run, track=args.track, clock=clock, command=command
+        )
+        verb = "would be" if swept.dry_run else "was"
+        lines = [
+            f"retention policy {swept.policy}"
+            + (f" over {swept.retention_days} day(s)" if swept.retention_days else ""),
+            f"  {swept.considered} recording(s) considered; {len(swept.purged)} {verb} purged",
+            f"  {len(swept.invalidated_observations)} acoustic claim(s) {verb} invalidated",
+        ]
+        if swept.unclipped_recordings:
+            lines.append(
+                f"  {len(swept.unclipped_recordings)} whole recording(s) that evidence "
+                "rests on are going: clip what matters first with `artifact clip`"
+            )
+        _print(_envelope(command, swept, clock, swept.warnings), "\n".join(lines), args.format)
+        return 0
     purged = artifact_service.purge(
         paths,
         artifact=args.artifact,
         reason=args.reason,
-        remove_file=args.remove_file,
         dry_run=args.dry_run,
         track=args.track,
         clock=clock,
@@ -3267,6 +3367,12 @@ def _run_transcript(args: argparse.Namespace, clock: Clock, command: str) -> int
             meaning=payload.get("meaning"),
             corrected_form=payload.get("corrected_form"),
             explanation=payload.get("explanation"),
+            category=args.category,
+            signature=payload.get("signature"),
+            attach_to=args.attach_to,
+            distinct=args.distinct,
+            despite_low_confidence=args.despite_low_confidence,
+            override_reason=args.override_reason,
             confidence=args.confidence,
             reviewer_kind=args.reviewer_kind,
             reviewer=args.reviewer,
@@ -3276,10 +3382,14 @@ def _run_transcript(args: argparse.Namespace, clock: Clock, command: str) -> int
         )
         lines = [
             f"{interpreted.interpretation_id}: {interpreted.classification}",
-            "  counts against the learner"
+            f"  counts against the learner, as {interpreted.error_id}"
             if interpreted.counts_against_the_learner
             else "  recorded, and counted against nobody",
         ]
+        if interpreted.overrode_low_confidence:
+            lines.append(
+                f"  the transcriber's own uncertainty was overruled: {interpreted.override_reason}"
+            )
         _print(_envelope(command, interpreted, clock), "\n".join(lines), args.format)
         return 0
     claim = transcript_service.record_pronunciation(
@@ -3360,7 +3470,11 @@ def _run_speaking(args: argparse.Namespace, clock: Clock, command: str) -> int:
         return 0
     if args.action == "validate":
         report = speaking_service.validate(
-            paths, package=_adapted_package(args), track=args.track, clock=clock
+            paths,
+            package=_adapted_package(args),
+            session=args.session,
+            track=args.track,
+            clock=clock,
         )
         lines = [
             f"{report.package_id or 'this package'}: "
@@ -3407,7 +3521,19 @@ def _run_privacy(args: argparse.Namespace, clock: Clock, command: str) -> int:
         "hold their words",
         f"  {retention.artifacts_held} recording(s) held, {retention.artifacts_purged} purged; "
         f"{retention.claims_resting_on_audio} claim(s) rest on audio",
+        f"  audio retention: {retention.audio_retention_policy}"
+        + (
+            f" over {retention.audio_retention_days} day(s)"
+            if retention.audio_retention_days
+            else ""
+        ),
     ]
+    if retention.unkept_files_still_present:
+        lines.append(
+            f"  {len(retention.unkept_files_still_present)} recording(s) are recorded as "
+            "removed and their files are still here: "
+            + ", ".join(retention.unkept_files_still_present)
+        )
     lines.extend(f"  path: {entry.path} -- {entry.reason}" for entry in report.paths.violations)
     lines.extend(f"  leak: {entry.path} -- {entry.reason}" for entry in report.content_leaks)
     lines.extend(f"  log:  {entry.path} -- {entry.reason}" for entry in report.log_leaks)

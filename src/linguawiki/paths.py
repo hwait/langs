@@ -56,9 +56,29 @@ def assert_safe_destructive_target(path: Path, *, purpose: str) -> Path:
 
 
 def assert_within(path: Path, root: Path, *, purpose: str) -> Path:
-    """Require a destructive target to stay inside its owning workspace."""
+    """Require a destructive target to stay inside its owning workspace.
 
-    resolved = path.resolve()
+    Resolution itself can fail: `Path.resolve` raises `RuntimeError` on a symlink loop under
+    Python 3.12 and `OSError` for other filesystem trouble. A path whose location cannot be
+    established has not been shown to be inside the workspace, so it is refused here rather
+    than crashing whichever caller happened to touch it.
+    """
+
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError) as failure:
+        raise LinguaWikiError(
+            "unresolvable_target",
+            f"{purpose} target at {path} cannot be resolved to a location, so it cannot be "
+            f"shown to stay inside {root}: {failure}",
+            details=(
+                ErrorDetail(
+                    field=purpose,
+                    reason="unresolvable",
+                    context={"path": str(path), "workspace": str(root)},
+                ),
+            ),
+        ) from failure
     if resolved != root and root not in resolved.parents:
         raise LinguaWikiError(
             "unsafe_target",

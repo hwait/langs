@@ -88,6 +88,16 @@ PRONUNCIATION_DIMENSIONS: tuple[str, ...] = (
 #: flat statement can be identical.
 AUDIO_ONLY_DIMENSIONS: tuple[str, ...] = ("prosody", "native-likeness")
 
+#: Who may overrule the low-confidence rule. Only somebody who could have *listened*: the
+#: rule exists because the machine was unsure about the sound, and another machine reading
+#: the same uncertain text has no more evidence than the first one had.
+OVERRIDE_REVIEWERS: tuple[str, ...] = ("human", "learner")
+
+#: Below this, the transcriber was unsure enough that blaming the learner for the words is
+#: as likely to be blaming the machine. The plan's rule: low-confidence speech creates a
+#: possible transcription error, not a confirmed learner error.
+BLAME_CONFIDENCE_FLOOR = 0.5
+
 #: What an evidence claim rests on. `transcript` means text only; `audio` means the sound
 #: is available; `direct` means the observation was made live, in the session itself.
 EVIDENCE_BASES: tuple[str, ...] = ("direct", "transcript", "audio")
@@ -321,11 +331,13 @@ def assert_policy_is_sound() -> None:
 
 __all__ = [
     "AUDIO_ONLY_DIMENSIONS",
+    "BLAME_CONFIDENCE_FLOOR",
     "CLASSIFICATIONS",
     "CONFIRMED_STATUS",
     "EVIDENCE_BASES",
     "LAYERS",
     "LAYER_SOURCES",
+    "OVERRIDE_REVIEWERS",
     "PRONUNCIATION_DIMENSIONS",
     "PRONUNCIATION_STATUSES",
     "PURGE_REASONS",

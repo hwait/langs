@@ -1,9 +1,13 @@
-"""The DuckDB behaviours the Stage 3 schema is shaped around, asserted as facts.
+"""The DuckDB behaviours the schema is shaped around, asserted as facts.
 
 Four decisions in migrations 0019-0022 exist only because of how DuckDB handles updates
 and deletes on referenced rows: `target_content_id` is not a foreign key on three tables,
 the evidence-atom rule is a named check rather than a unique index, and a merged-away
 error pattern is superseded rather than deleted.
+
+Stage 5 added two more, in migration 0027: a transcript layer's "one *current* reading"
+rule is a `db check` rather than a partial unique index, and the index it replaced could
+not be recreated under its own name.
 
 Those reasons live in comments, which cannot fail. This file states them as executable
 facts instead, so a `duckdb` version bump that changes any of them fails here and points
@@ -153,6 +157,57 @@ def test_the_same_delete_succeeds_outside_a_transaction(
     connection.execute("DELETE FROM parent WHERE id = 'p1'")
 
     assert connection.execute("SELECT count(*) FROM parent").fetchone() == (1,)
+
+
+def test_a_partial_unique_index_cannot_be_created(
+    connection: duckdb.DuckDBPyConnection,
+) -> None:
+    """Why `revision_supersession` is a `db check` and not a constraint.
+
+    A transcript layer may hold many readings and only one *current* one, which is exactly
+    what a partial unique index expresses. Without it the rule has to be asserted over the
+    data instead -- and the repository's rule is that an unenforced uniqueness requirement
+    is paired with a named check, never left to convention.
+    """
+
+    connection.execute(
+        "CREATE TABLE readings ("
+        "  revision_id VARCHAR PRIMARY KEY,"
+        "  utterance_id VARCHAR NOT NULL,"
+        "  layer VARCHAR NOT NULL,"
+        "  superseded_at TIMESTAMP)"
+    )
+    with pytest.raises(duckdb.Error) as failure:
+        connection.execute(
+            "CREATE UNIQUE INDEX readings_current ON readings (utterance_id, layer) "
+            "WHERE superseded_at IS NULL"
+        )
+    assert "partial" in str(failure.value).lower()
+
+    # The unconditional form works, which is the one 0025 had and 0027 had to drop: it
+    # made a second reading impossible, so a re-review deleted its predecessor.
+    connection.execute("CREATE UNIQUE INDEX readings_layer ON readings (utterance_id, layer)")
+
+
+def test_an_index_cannot_be_recreated_under_its_own_name_in_one_transaction(
+    connection: duckdb.DuckDBPyConnection,
+) -> None:
+    """Why 0027 renames `utterances_external` rather than redefining it.
+
+    A migration is one transaction, and the index it drops is still holding its name when
+    the `CREATE` runs. Reusing the name failed only when the migration was applied for
+    real -- a fresh in-memory build of the schema, which runs outside a transaction,
+    accepted it.
+    """
+
+    connection.execute("CREATE TABLE rows_ (a VARCHAR, b VARCHAR)")
+    connection.execute("CREATE UNIQUE INDEX rows_key ON rows_ (a)")
+    connection.execute("BEGIN TRANSACTION")
+    connection.execute("DROP INDEX rows_key")
+    with pytest.raises(duckdb.Error) as failure:
+        connection.execute("CREATE UNIQUE INDEX rows_key ON rows_ (a, b)")
+    assert "already exists" in str(failure.value)
+    connection.execute("ROLLBACK")
 
 
 def test_the_pinned_duckdb_is_the_one_these_facts_were_established_on() -> None:

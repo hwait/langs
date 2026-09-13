@@ -203,6 +203,14 @@ def test_the_speaking_surface_refuses_before_it_ingests(
     utterances[1]["text"] = "dokad pan jedzie i kiedy"
     path = _write(tmp_path, "filled.json", package)
 
+    # The session comes first, because review runs exactly the checks ingestion runs: a
+    # package is an account of *a session*, and reviewing one against a workspace with no
+    # open session correctly reports that it cannot be ingested.
+    assert _run(polish_workspace, "plan", "create", "--minutes", "60", "--mode", "speaking") == 0
+    capsys.readouterr()
+    assert _run(polish_workspace, "session", "start") == 0
+    capsys.readouterr()
+
     assert _run(polish_workspace, "speaking", "validate", "--input", path) == 0
     validated = _json(capsys)
     assert validated["data"]["valid"]
@@ -225,10 +233,6 @@ def test_the_speaking_surface_refuses_before_it_ingests(
     )
     assert _json(capsys, stream="err")["error"]["code"] == "naive_timestamp"
 
-    assert _run(polish_workspace, "plan", "create", "--minutes", "60", "--mode", "speaking") == 0
-    capsys.readouterr()
-    assert _run(polish_workspace, "session", "start") == 0
-    capsys.readouterr()
     assert _run(polish_workspace, "speaking", "ingest", "--input", path) == 0
     ingested = _json(capsys)
     assert ingested["data"]["imported_utterances"] == 2

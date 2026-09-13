@@ -30,6 +30,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from pydantic import Field, ValidationError
@@ -88,7 +89,7 @@ SESSION_ORIGIN = "session"
 MATERIALIZED_KINDS: Mapping[str, str] = {
     "attempt.observed": "attempt",
     "correction.given": "error-occurrence",
-    "pronunciation.assessment": "observation",
+    "pronunciation.assessment": "pronunciation",
     "source.progress": "comprehension",
     "observation.noted": "observation",
     "follow_up": "followup",
@@ -606,8 +607,11 @@ def _source_continuity(database: Database, *, track_id: str) -> dict[str, float]
     argument for a pronunciation block: a component that applied to every area would be a
     weight on a constant, which is the thing Stage 4 refused to ship.
 
-    Abandoned sources are excluded. The learner already said they are not coming back, and
-    a planner that kept proposing them would be arguing with them once a session.
+    Material the learner has put down is excluded, and the filter has to name the
+    vocabularies that exist to do it. Stage 5 compared `source.status <> 'abandoned'` --
+    and `abandoned` is a *progress* status, never a source one, so the comparison was true
+    of every row and excluded nothing. An archived source went on arguing for a reading
+    block once a session, which is the planner arguing with a decision the learner made.
     """
 
     by_area: dict[str, float] = {}
@@ -616,7 +620,7 @@ def _source_continuity(database: Database, *, track_id: str) -> dict[str, float]
         "count(*) FILTER (WHERE progress.status = 'in-progress'), count(*) "
         "FROM track_source_progress progress "
         "JOIN sources source ON source.source_id = progress.source_id "
-        "WHERE progress.track_id = ? AND source.status <> 'abandoned' "
+        "WHERE progress.track_id = ? AND source.status NOT IN ('archived', 'rejected') "
         "AND progress.status <> 'abandoned' GROUP BY source.kind",
         [track_id],
     ):
@@ -1778,7 +1782,14 @@ def _own_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in payload.items()
-        if key not in ("source", "package_id", "utterance_id", "transcript_layer")
+        if key
+        not in (
+            "source",
+            "package_id",
+            "external_session_id",
+            "utterance_id",
+            "transcript_layer",
+        )
     }
 
 
@@ -2459,6 +2470,105 @@ def _staged_rows(
     return tuple(rows)
 
 
+def _materialize_pronunciation(
+    transaction: Database,
+    *,
+    row: _StagedRow,
+    payload: Any,
+    track_id: str,
+    now: datetime,
+) -> str:
+    """Write a staged pronunciation event as the acoustic claim it is.
+
+    Stage 4 wrote it as a generic session observation, because the table for acoustic
+    claims did not exist yet. It does now, and the difference is not filing: a claim in
+    `pronunciation_observations` names the audio it rests on, so purging that audio
+    invalidates it. A generic observation named nothing, so a `confirmed` claim from a
+    recording the learner later deleted went on standing with nothing able to find it.
+
+    The basis comes from the staged row rather than the payload. It was decided when the
+    observation was staged, from what the workspace actually had, which is the only moment
+    anyone knew.
+    """
+
+    from linguawiki import transcripts as transcript_policy
+    from linguawiki.ids import PronunciationId
+
+    audio_artifact_id: str | None = None
+    named = getattr(payload, "audio_artifact_id", None)
+    if named is not None:
+        # Kept and unpurged, or it is not audio this claim may rest on. A row that exists
+        # is not the same fact as a recording anyone can still listen to, and resolving on
+        # existence alone let a `confirmed` claim cite a file that had been deleted at the
+        # door for want of consent.
+        audio_artifact_id = (
+            str(
+                transaction.scalar(
+                    "SELECT artifact_id FROM artifacts WHERE track_id = ? "
+                    "AND (artifact_id = ? OR external_id = ?) "
+                    # Audio, kept, and unpurged. A transcript file satisfied a `confirmed`
+                    # claim for want of the first condition, which is the acoustic rule
+                    # defeated by a file extension.
+                    "AND kind = 'audio' AND purged_at IS NULL AND retained",
+                    [track_id, str(named), str(named)],
+                )
+                or ""
+            )
+            or None
+        )
+    basis = row.evidence_basis if audio_artifact_id is not None else "transcript"
+    status = str(payload.status)
+    dimension = str(payload.acoustic_dimension)
+    # The same rule the command obeys, reached the other way. A close that quietly
+    # downgraded a refused claim would be a way around it; a close that refuses says the
+    # package promised evidence it did not bring.
+    transcript_policy.assert_acoustic_claim_has_audio(
+        status=status,
+        dimension=dimension,
+        basis=basis,
+        reference=f"staged event {row.staged_event_id}",
+    )
+    utterance_id = None
+    external_utterance = getattr(payload, "utterance_id", None)
+    if external_utterance is not None:
+        # Scoped to the external session the event came from. A producer's utterance IDs
+        # are unique inside one call, so resolving on the ID alone attached one
+        # conversation's acoustic claims to another conversation's words.
+        external_session = getattr(payload, "external_session_id", None)
+        utterance_id = transaction.scalar(
+            "SELECT utterance_id FROM utterances WHERE track_id = ? AND external_id = ? "
+            "AND external_session_id IS NOT DISTINCT FROM ?",
+            [
+                track_id,
+                str(external_utterance),
+                None if external_session is None else str(external_session),
+            ],
+        )
+    observation_id = str(PronunciationId.new())
+    transaction.execute(
+        "INSERT INTO pronunciation_observations (observation_id, track_id, utterance_id, "
+        "dimension, status, basis, audio_artifact_id, target_content_id, note, "
+        "reviewer_kind, reviewer, invalidated_at, invalidation_reason, policy_version, "
+        "observed_at, recorded_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ai', NULL, NULL, NULL, ?, ?, ?)",
+        [
+            observation_id,
+            track_id,
+            None if utterance_id is None else str(utterance_id),
+            dimension,
+            status,
+            basis,
+            audio_artifact_id,
+            payload.target,
+            payload.note[:2000],
+            transcript_policy.TRANSCRIPT_POLICY_VERSION,
+            naive_utc(row.occurred_at),
+            naive_utc(now),
+        ],
+    )
+    return observation_id
+
+
 def _materialize(
     transaction: Database,
     *,
@@ -2559,6 +2669,15 @@ def _materialize(
             materialized_id = error_report.recorded_occurrence_id
             counts["errors"] += 1
             errors_touched.append(error_report.error_id)
+        elif row.kind == "pronunciation.assessment":
+            materialized_id = _materialize_pronunciation(
+                transaction,
+                row=row,
+                payload=payload,
+                track_id=track_id,
+                now=now,
+            )
+            counts["observations"] += 1
         elif row.kind == "source.progress":
             materialized_id = source_service.materialize_progress(
                 transaction,
@@ -3097,6 +3216,7 @@ PROTECTED_PACKAGE_FIELDS: frozenset[str] = frozenset(
         "response_hash",
         "source",
         "package_id",
+        "external_session_id",
         "utterance_id",
         "transcript_layer",
         "status",
@@ -3163,6 +3283,240 @@ def _package_manifest(package: Any, *, retention: str) -> dict[str, Any]:
     }
 
 
+def _package_audio_available(
+    database: Database, validated: Any, *, audio: Mapping[str, str], root: Path
+) -> bool:
+    """Whether a recording this package names is audio this workspace can still play.
+
+    Four conditions, and each was wrong once: the artifact has to be *audio*, it has to be
+    *kept*, it has to be one this *package* declared, and the file has to be there with the
+    bytes it was registered with. Counting resolved artifacts made a transcript-only package
+    claim audio; omitting the field from the duplicate return made a re-ingest claim none
+    while its recording sat there; and reading only the row said "available" of a recording
+    somebody had deleted by hand.
+
+    The last condition costs a hash of one file, which is a file this command has usually
+    just hashed. That is the price of the word meaning what it says.
+    """
+
+    from linguawiki.services import artifacts as artifact_service
+
+    declared = {str(artifact.artifact_id) for artifact in validated.artifacts}
+    resolved = [artifact_id for external, artifact_id in audio.items() if external in declared]
+    if not resolved:
+        return False
+    placeholders = ", ".join("?" for _ in resolved)
+    playable = database.query(
+        f"SELECT relative_path, sha256 FROM artifacts WHERE artifact_id IN ({placeholders}) "
+        "AND kind = 'audio' AND retained AND purged_at IS NULL",
+        resolved,
+    )
+    # `contained_file` rather than a join: a registered path replaced by a symlink out of
+    # the workspace made a file somewhere else count as the learner's recording. And
+    # `digest_or_none` rather than a bare hash, because a recording that is unreadable, or
+    # that disappears between the check and the open, means "not available" -- raising turned
+    # a duplicate retry, which this command deliberately accepts as a no-op, into a failure.
+    return any(
+        (contained := artifact_service.contained_file(root, str(relative_path))) is not None
+        and artifact_service.digest_or_none(contained) == str(digest)
+        for relative_path, digest in playable
+    )
+
+
+def package_problems(
+    database: Database,
+    validated: Any,
+    *,
+    package_hash: str,
+    session: str | None,
+    track: str | None,
+    root: Path,
+) -> tuple[str, list[tuple[str, str]], tuple[str, str] | None, Mapping[str, Any]]:
+    """Every reason this package could not be ingested, collected rather than raised.
+
+    One implementation, used by the review that reports problems and by the ingestion that
+    refuses on them. They had drifted twice: review checked the track hint and not the
+    language, the session, the event identity, or whether an event could be materialized,
+    so it called packages valid that ingestion refused -- and it ran the audio checks on an
+    exact duplicate, which ingestion deliberately accepts as a no-op retry.
+
+    Returns the resolved track, the problems as `(code, message)` pairs, the duplicate this
+    content already has here, and what the workspace holds of its audio. The codes travel
+    with the messages because a skill reading the error envelope needs to tell "this names
+    audio nobody has" from "this session is closed", and a refusal that collapsed several
+    distinct failures into one generic code took that away.
+    """
+
+    from linguawiki.services import artifacts as artifact_service
+    from linguawiki.services import transcripts as transcript_service
+
+    problems: list[tuple[str, str]] = []
+    track_id = learner_service.resolve_track(database, track)
+    record = learner_service.track_context(database, track_id)
+    for check in (_assert_package_belongs,):
+        try:
+            check(validated, track_id=track_id, record=record)
+        except LinguaWikiError as failure:
+            # A package on the wrong track or in the wrong language says nothing reliable
+            # about anything else, so this is the one group that stops the pass.
+            return track_id, [(failure.payload.code, failure.payload.message)], None, {}
+    duplicate = database.one(
+        "SELECT ingestion_id, session_id, track_id FROM session_packages WHERE package_hash = ?",
+        [package_hash],
+    )
+    if duplicate is not None:
+        if str(duplicate[2]) != track_id:
+            problems.append(
+                (
+                    "package_track_conflict",
+                    f"this package's content is already ingested on track {duplicate[2]}, "
+                    f"and this ingestion is for {track_id}. One recording belongs to one "
+                    "learner: export it from the producer under that learner's own "
+                    "session, or ingest it on the track that owns it.",
+                )
+            )
+            return track_id, problems, None, {}
+        # A retry of content already here changes nothing, so nothing else is checked: the
+        # audio it once named may since have been purged, and that is not a reason to
+        # refuse a no-op.
+        return track_id, problems, (str(duplicate[0]), str(duplicate[1] or "")), {}
+    try:
+        session_id = resolve_session(
+            database,
+            session or (str(validated.session_id) if validated.session_id else None),
+            track_id=track_id,
+        )
+        _assert_loggable(session_id=session_id, status=str(_session_row(database, session_id)[2]))
+    except LinguaWikiError as failure:
+        # Without a session to attach to, the event checks below have nothing to run
+        # against; the audio and transcript checks still do.
+        problems.append((failure.payload.code, failure.payload.message))
+        session_id = None
+    staged_events = [event for event in validated.events if event.kind in PACKAGE_EVENT_KINDS]
+    if session_id is not None:
+        try:
+            _assert_events_are_new(
+                database,
+                session_id=session_id,
+                event_ids=[str(event.event_id) for event in staged_events],
+                external_session_id=validated.external_session_id,
+                track_id=track_id,
+            )
+        except LinguaWikiError as failure:
+            problems.append((failure.payload.code, failure.payload.message))
+    retention = _package_retention(record)
+    for event in staged_events:
+        try:
+            assert_materializable(
+                _retained_payload(
+                    _package_event_payload(event, package=validated, retention=retention),
+                    preferences=_preferences(record),
+                ),
+                kind=event.kind,
+                reference=f"event {event.event_id}",
+            )
+        except LinguaWikiError as failure:
+            problems.append((failure.payload.code, failure.payload.message))
+    try:
+        transcript_service.assert_import_is_possible(database, validated, track_id=track_id)
+    except LinguaWikiError as failure:
+        problems.append((failure.payload.code, failure.payload.message))
+    registered = artifact_service.registered_by_producer(database, track_id=track_id)
+    problems.extend(
+        (artifact_service.AUDIO_PROBLEM_CODE, entry)
+        for entry in artifact_service.declared_audio_problems(
+            validated,
+            root=root,
+            registered=registered,
+            # Workspace-wide, like the writer's own rule: producer identifiers are per track
+            # but the files they name are not.
+            owners=artifact_service.path_owners(database),
+            track_id=track_id,
+            audio_consent=bool(_preferences(record).get("audio_retention_consent")),
+        )
+    )
+    return track_id, problems, None, registered
+
+
+@dataclass(frozen=True, slots=True)
+class _Preflight:
+    """What a read-only pass over a package established."""
+
+    track_id: str
+    #: Set when this content is already ingested here. Nothing is registered and nothing
+    #: is staged: a duplicate must not have the side effects of a first ingestion.
+    duplicate_of: tuple[str, str] | None
+    registered: Mapping[str, Any]
+
+
+def _preflight_package(
+    paths: WorkspacePaths,
+    validated: Any,
+    *,
+    package_hash: str,
+    session: str | None,
+    track: str | None,
+    clock: Clock,
+) -> _Preflight:
+    """Every refusal a package can earn, in one read-only pass.
+
+    Nothing here writes, and that is the whole design. Registering the audio used to happen
+    at the top of this function, *before* the track, language, session-state, duplicate,
+    event-identity, and materializability checks that ran inside the writer -- so a package
+    refused for being in the wrong language had already left its recording registered in
+    the learner's workspace. Every check that can refuse now runs before anything is
+    written, and the write happens once this returns.
+
+    The checks are repeated inside the writer afterwards. They are cheap, and they are the
+    real guard against a workspace that changed between the read and the write; what this
+    pass buys is that the *common* case refuses without side effects.
+    """
+
+    with open_reader(paths, clock=clock) as database:
+        track_id, problems, duplicate_of, registered = package_problems(
+            database,
+            validated,
+            package_hash=package_hash,
+            session=session,
+            track=track,
+            root=paths.root,
+        )
+    if problems:
+        codes = {code for code, _ in problems}
+        raise LinguaWikiError(
+            # One code when every problem agrees on what went wrong, whether there is one
+            # of them or five; the shared code only when they genuinely differ, because a
+            # single code cannot honestly describe a mixed list.
+            codes.pop() if len(codes) == 1 else "package_not_ingestable",
+            "; ".join(message for _, message in problems),
+            details=tuple(ErrorDetail(field=code, reason=message) for code, message in problems),
+        )
+    return _Preflight(track_id=track_id, duplicate_of=duplicate_of, registered=registered)
+
+
+def _assert_package_belongs(validated: Any, *, track_id: str, record: Any) -> None:
+    """Refuse a package that is somebody else's, or in another language."""
+
+    if validated.track_hint is not None and str(validated.track_hint) != track_id:
+        raise LinguaWikiError(
+            "package_track_mismatch",
+            f"the package names track {validated.track_hint}, and this ingestion is "
+            f"for {track_id}; an external recording belongs to one learner",
+            details=(ErrorDetail(field="track_hint", reason=str(validated.track_hint)),),
+        )
+    if validated.target_language.lower() != record.target_language.lower():
+        raise LinguaWikiError(
+            "package_language_mismatch",
+            f"the package is a {validated.target_language} session and this track "
+            f"studies {record.target_language}; a recording in another language is "
+            "not this track's evidence",
+            details=(
+                ErrorDetail(field="target_language", reason=validated.target_language),
+                ErrorDetail(field="track", reason=record.target_language),
+            ),
+        )
+
+
 def ingest_package(
     paths: WorkspacePaths,
     *,
@@ -3176,7 +3530,15 @@ def ingest_package(
 ) -> IngestReport:
     """Validate an externally produced session and stage its events.
 
-    Three refusals matter here, and each is about not trusting a file:
+    Every refusal a package can earn happens here, before the first row is written, and
+    that is deliberate. Staging the events and storing the transcript are separate
+    transactions -- each idempotent on its own content -- so nothing can undo the other,
+    and the order is the only thing that keeps a rejected package from leaving half of
+    itself behind. The checks live in this function rather than in `speaking.ingest`
+    because this is the *lower* entry point: anything that stages a package's events comes
+    through here, and a safeguard only one caller runs is a safeguard with a way around it.
+
+    Refusals about not trusting a file:
 
     - an unsupported schema is refused with the name and version it declared, so the
       operator can migrate the producer rather than guess why nothing happened;
@@ -3187,12 +3549,23 @@ def ingest_package(
       one learner's, and attaching it elsewhere would put their work in another
       learner's model.
 
+    - a layer declared `normalized` whose words differ from the raw layer is refused, and
+      so is audio the package names that is missing, altered, outside the private roots,
+      or already held here under different bytes;
+    - a package confirming pronunciation on a track that has not consented to keeping
+      audio is refused: the recording would be deleted at the door and the claim would
+      rest on nothing.
+
     Events are staged, never materialized. A package is somebody else's account of a
     session, and it becomes part of the learner's model through the same close as
     everything else.
+
+    This stages the events; it does not store the transcript. `speaking.ingest` does both
+    and is what every command surface calls.
     """
 
     from linguawiki.contracts import SessionPackage
+    from linguawiki.services import artifacts as artifact_service
 
     schema_name = package.get("schema_name", "lingua.session.v1")
     schema_version = package.get("schema_version", 1)
@@ -3212,27 +3585,33 @@ def ingest_package(
     )
     package_hash = canonical_hash(validated.model_dump(mode="json"))
     active_clock = clock or SystemClock()
+    preflight = _preflight_package(
+        paths,
+        validated,
+        package_hash=package_hash,
+        session=session,
+        track=track,
+        clock=active_clock,
+    )
+    audio: dict[str, str] = {}
+    if preflight.duplicate_of is None:
+        # After every refusal and before the first staged row: a package that cannot be
+        # ingested registers nothing, and a package that can has its recording in place
+        # before an utterance or a claim needs to name it.
+        from linguawiki.services import artifacts as artifact_service
+
+        audio = artifact_service.register_declared_audio(
+            paths,
+            validated,
+            track=preflight.track_id,
+            registered=preflight.registered,
+            clock=active_clock,
+            command=command,
+        )
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = learner_service.resolve_track(database, track)
         record = learner_service.track_context(database, track_id)
-        if validated.track_hint is not None and str(validated.track_hint) != track_id:
-            raise LinguaWikiError(
-                "package_track_mismatch",
-                f"the package names track {validated.track_hint}, and this ingestion is "
-                f"for {track_id}; an external recording belongs to one learner",
-                details=(ErrorDetail(field="track_hint", reason=str(validated.track_hint)),),
-            )
-        if validated.target_language.lower() != record.target_language.lower():
-            raise LinguaWikiError(
-                "package_language_mismatch",
-                f"the package is a {validated.target_language} session and this track "
-                f"studies {record.target_language}; a recording in another language is "
-                "not this track's evidence",
-                details=(
-                    ErrorDetail(field="target_language", reason=validated.target_language),
-                    ErrorDetail(field="track", reason=record.target_language),
-                ),
-            )
+        _assert_package_belongs(validated, track_id=track_id, record=record)
         existing = database.one(
             "SELECT ingestion_id, session_id, event_count, track_id FROM session_packages "
             "WHERE package_hash = ?",
@@ -3265,6 +3644,17 @@ def ingest_package(
                 mode=validated.mode,
                 staged_events=0,
                 skipped_events=len(validated.events),
+                audio_available=_package_audio_available(
+                    database,
+                    validated,
+                    root=paths.root,
+                    audio={
+                        external: held.artifact_id
+                        for external, held in artifact_service.registered_by_producer(
+                            database, track_id=track_id
+                        ).items()
+                    },
+                ),
                 retention_policy=_package_retention(record),
                 duplicate=True,
                 warnings=(
@@ -3280,8 +3670,11 @@ def ingest_package(
         row = _session_row(database, session_id)
         _assert_loggable(session_id=session_id, status=str(row[2]))
         retention = _package_retention(record)
-        audio_available = any(
-            str(artifact.kind) == "audio" and artifact.retained for artifact in validated.artifacts
+        # This package's *audio*, as this workspace holds it. `bool(audio)` counted every
+        # resolved artifact, so a transcript-only package reported audio available -- and a
+        # transcript is exactly what cannot support an acoustic claim.
+        audio_available = _package_audio_available(
+            database, validated, audio=audio, root=paths.root
         )
         staged_events = [event for event in validated.events if event.kind in PACKAGE_EVENT_KINDS]
         skipped = len(validated.events) - len(staged_events)
@@ -3483,6 +3876,9 @@ def _package_event_payload(event: Any, *, package: Any, retention: str) -> dict[
         {
             "source": "package",
             "package_id": package.package_id,
+            # The session an utterance ID is unique inside. Without it a close resolved
+            # one conversation's events against another conversation's utterances.
+            "external_session_id": package.external_session_id,
             "utterance_id": utterance_id,
             "transcript_layer": source_layer,
         }

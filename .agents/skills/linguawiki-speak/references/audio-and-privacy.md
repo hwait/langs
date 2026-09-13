@@ -13,9 +13,43 @@ linguawiki artifact purge --artifact art_... --reason learner-request --dry-run 
 
 ## Register even what you do not keep
 
-`--not-retained` records that a file existed and was **not** kept. That row is what makes
-a later claim explicable rather than merely unsupported: "there was a recording, the
-learner chose not to keep it" is a different fact from "there was never any audio".
+`--not-retained` records that a file existed and was **not** kept, and **deletes it**. So
+does a package entry with `"retained": false` -- the declaration is an instruction, not a
+note, and offering those bytes again later gets them deleted again rather than registered.
+The row is what makes a later claim explicable rather than merely unsupported: "there was
+a recording, the learner chose not to keep it" is a different fact from "there was never
+any audio". What it must never mean is "we wrote that down and kept the file anyway".
+
+## Retention policy
+
+A track can say what happens to recordings once they are ingested, rather than leaving
+every one to be purged by hand:
+
+- `keep` — until the learner says otherwise;
+- `rolling-days` — for `audio_retention_days`, then swept;
+- `delete-after-ingestion` — the claims made from a recording outlive the recording.
+
+`artifact sweep --dry-run` shows what a policy would remove.
+
+## Clip the moment that matters
+
+```bash
+linguawiki artifact clip --path artifacts/audio/moment.m4a --of art_... \
+  --from-ms 12000 --to-ms 16000 --format json
+```
+
+Both offsets are required, and the window has to be real (`0 <= from < to`) of a recording
+on this track. A "clip" with no window would be the whole conversation wearing a label that
+earns it longer retention, which is the arrangement the plan is written to avoid.
+
+A **selected clip** is kept past the retention window while a pronunciation target it
+supports is unfinished. A **whole conversation** is not: the plan prefers keeping short
+clips to keeping entire recordings indefinitely, and a sweep names every full recording it
+is about to take evidence with, so the moments worth keeping can be clipped first.
+
+That is the order to work in: hear something worth a claim, clip it, make the claim about
+the clip. Then the retention policy can do its job without the learner choosing between
+their privacy settings and their evidence.
 
 ## Verify tells three different things apart
 

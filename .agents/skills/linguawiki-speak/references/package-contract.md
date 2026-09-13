@@ -29,6 +29,17 @@ An utterance is `{utterance_id, speaker, started_at, ended_at, text}`. The
 the same utterance across a checkpoint export and the completed export of the same call.
 Keep it stable between exports or the same words will be stored twice.
 
+## Audio a package declares is opened, not believed
+
+A manifest entry is a claim about a file. Every `retained` artifact is checked before
+anything is stored: it must sit under `artifacts/` or `imports/`, exist, hash to what the
+package says, and not already name different bytes in this workspace. It is then
+registered, so `artifact verify` checks it and `artifact purge` can reach it.
+
+A package confirming pronunciation on a track that has not consented to keeping audio is
+refused outright. The recording would be deleted at the door, and the claim would rest on
+nothing.
+
 ## Rules the contract enforces
 
 - exactly one `raw` layer, and unique layer kinds;

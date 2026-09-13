@@ -11,6 +11,8 @@ linguawiki source add  --workspace <path> --kind podcast --title "..." [--creato
 linguawiki source list --workspace <path> [--status ...] [--kind ...] --format json
 linguawiki source show --workspace <path> --source <id-or-title> --format json
 linguawiki source status --workspace <path> --source <id> --status active|completed|... --format json
+linguawiki source link   --workspace <path> --source <id> --unit <label> --target <key> \
+  [--target-kind knowledge-item|example|error-pattern] [--relation ...] --format json
 ```
 
 Units arrive as a payload because a unit may carry an excerpt, and an excerpt is text from
@@ -37,6 +39,9 @@ learner may sync, back up, or share.
 Prefer material the learner has already started: `source list` shows `in-progress` first
 and the planner scores unfinished material as a reason to plan that kind of block. A half
 -read book the learner returns to teaches more than a new one they open.
+
+Archiving or rejecting a source settles the learner's progress with it, and the planner
+stops proposing it. Setting it back to `active` picks it up where they left off.
 
 Reject material that is above the level for *unaided* work. If the first unaided pass
 comes back below `gist`, say so and choose something else rather than glossing the whole

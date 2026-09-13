@@ -25,12 +25,16 @@ linguawiki transcript normalize   --workspace <path> --utterance <id> --input te
 linguawiki transcript review      --workspace <path> --utterance <id> --input text.json \
   [--confidence low|medium|high] --format json
 linguawiki transcript interpret   --workspace <path> --utterance <id> \
-  --classification learner-error|transcription-artifact|uncertain [--input detail.json] --format json
+  --classification learner-error|transcription-artifact|uncertain \
+  [--category <error category>] [--attach-to <error-id>] [--distinct] \
+  [--despite-low-confidence --override-reason "<why>" --reviewer-kind human] \
+  [--input detail.json] --format json
 linguawiki transcript pronunciation --workspace <path> --dimension <d> --status <s> \
   --basis direct|transcript|audio [--utterance <id>] [--audio <artifact-id>] --format json
 linguawiki artifact register --workspace <path> --path <relative> --kind audio --format json
 linguawiki artifact verify   --workspace <path> --format json
 linguawiki artifact purge    --workspace <path> --artifact <id> --reason <why> [--dry-run] --format json
+linguawiki artifact sweep    --workspace <path> [--dry-run] --format json
 linguawiki privacy audit     --workspace <path> --format json
 ```
 
@@ -50,22 +54,29 @@ passes: record what the evidence actually supports and say so to the learner.
 
 ## The loop
 
-1. **Get a package.** Either a voice application exported one, or you build one:
+1. **Have a session to attach it to.** `plan create` then `session start`, from
+   `linguawiki-learn` — usually before the conversation happens, since that is what the
+   learner sat down to do. A package is somebody's account of *a session*, so reviewing one
+   against a workspace with no open session tells you it cannot be ingested, which is true
+   and not what you wanted to find out.
+2. **Get a package.** Either a voice application exported one, or you build one:
    `speaking package --out package.json` writes a valid skeleton with timed stubs.
    Replace the stub text and times with what was actually said. Nothing is guessed for
    you, because a guessed timestamp produces a *valid* package that is wrong.
-2. **Review it with the learner before it is ingested.** `speaking validate` reports the
+3. **Review it with the learner before it is ingested.** `speaking validate` reports the
    layers, the counts, whether this content was already ingested, and what would be kept
    of their words. Read the `problems` array out loud if it is non-empty — every entry is
-   something that will refuse at ingest.
-3. **Ingest.** `speaking ingest` stages the events *and* stores the transcript. It is
+   something that will refuse at ingest, which is the point: review runs exactly the checks
+   ingestion runs, so "valid" means it will go in. Pass `--session` when you will ingest
+   with `--session`, or the two are answering questions about different sessions.
+4. **Ingest.** `speaking ingest` stages the events *and* stores the transcript. It is
    idempotent on content: a checkpoint export and the completed export of the same call
    share their utterances and the second one stages nothing. Say that plainly rather than
    reporting "0 events" as a failure.
-4. **Work the transcript.** `transcript show` gives the layers and where they disagree.
+5. **Work the transcript.** `transcript show` gives the layers and where they disagree.
    Normalize what needs tidying, review what you or the learner heard differently, and
    classify what was a mistake versus what the machine misheard.
-5. **Close the session.** Nothing an ingest staged is credited until `session close`.
+6. **Close the session.** Nothing an ingest staged is credited until `session close`.
    That is the boundary for speaking exactly as it is for everything else — see
    `linguawiki-learn`.
 
@@ -78,7 +89,11 @@ passes: record what the evidence actually supports and say so to the learner.
   find it, but by then it is in the learner's history.
 - Never correct a learner for a word the transcript may have misheard. Classify it as a
   `transcription-artifact` or `uncertain` and move on; a correction for something they
-  said right teaches them away from a form they had.
+  said right teaches them away from a form they had. Where the transcriber reported low
+  confidence the CLI refuses `learner-error` outright. Overriding it needs a `human` or
+  `learner` reviewer -- somebody who could have *listened*, which an `ai` reviewer reading
+  the same uncertain text cannot have done -- and a reason, and both are stored on the
+  interpretation where the learner can read them.
 
 ## References
 

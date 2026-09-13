@@ -17,11 +17,12 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from typing import Annotated
 
 from pydantic import Field, field_validator, model_validator
 
 from linguawiki.clock import Clock, SystemClock, aware_utc, validate_iana_timezone
-from linguawiki.contracts import LANGUAGE_TAG_PATTERN, PackManifest
+from linguawiki.contracts import LANGUAGE_TAG_PATTERN, PackManifest, Vocabulary
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.connection import Database, open_reader, open_writer
 from linguawiki.errors import ErrorDetail, LinguaWikiError
@@ -34,6 +35,16 @@ SCRIPT_PATTERN = re.compile(r"^[A-Z][a-z]{3}$")
 REGION_PATTERN = re.compile(r"^(?:[A-Z]{2}|\d{3})$")
 
 CORRECTION_MODES = ("fluency", "accuracy", "exam")
+
+
+#: From the implementation plan. A workspace that offers only a consent boolean cannot
+#: express "keep this until the pronunciation target is met and then delete it", which is
+#: the setting a learner recording themselves every week actually needs.
+AUDIO_RETENTION_POLICIES: tuple[str, ...] = ("keep", "rolling-days", "delete-after-ingestion")
+
+AudioRetentionPolicy = Annotated[
+    str, Vocabulary(AUDIO_RETENTION_POLICIES, "audio retention policy")
+]
 
 
 class TrackPreferences(ContractModel):
@@ -54,6 +65,13 @@ class TrackPreferences(ContractModel):
     audio_recording_available: bool | None = None
     transcript_retention_consent: bool | None = None
     audio_retention_consent: bool | None = None
+    #: What happens to a recording once it has been ingested. `keep` holds it until the
+    #: learner says otherwise; `rolling-days` holds it for `audio_retention_days` and then
+    #: it is swept; `delete-after-ingestion` keeps only the claims made from it. Consent
+    #: says the learner *allows* a recording to be kept; this says for how long, and the
+    #: two are different questions.
+    audio_retention_policy: AudioRetentionPolicy | None = None
+    audio_retention_days: int | None = Field(default=None, ge=1, le=3650)
     external_service_consent: bool | None = None
     prior_materials: tuple[str, ...] = ()
     anki_deck: str | None = None

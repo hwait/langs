@@ -257,14 +257,34 @@ def test_a_confirmed_pronunciation_observation_requires_audio(
 def test_an_audio_backed_observation_records_its_basis(
     running: tuple[PolishWorkspace, str],
 ) -> None:
+    """The basis is `audio` because the recording is *here*, not because a file said so.
+
+    This test used to name `inbox/call-1.opus` with a fabricated hash and no file behind
+    it, and the whole ingestion accepted it. The claim then had no artifact to rest on, so
+    no purge could ever invalidate it -- which is the one thing the acoustic rule is for.
+    """
+
+    import hashlib
+
+    from linguawiki.services import learners as learner_service
+
     workspace, session_id = running
+    learner_service.update_track(
+        workspace.paths,
+        track=workspace.track_id,
+        preferences=learner_service.TrackPreferences(audio_retention_consent=True),
+        clock=workspace.clock,
+    )
+    recording = workspace.root / "imports" / "call-1.opus"
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"OggS" + b"\x00" * 48)
     with_audio = package(
         artifacts=[
             {
                 "artifact_id": "art_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 "kind": "audio",
-                "relative_path": "inbox/call-1.opus",
-                "sha256": "a" * 64,
+                "relative_path": "imports/call-1.opus",
+                "sha256": hashlib.sha256(recording.read_bytes()).hexdigest(),
                 "retained": True,
             }
         ],
@@ -295,6 +315,14 @@ def test_an_audio_backed_observation_records_its_basis(
         workspace.paths, session=session_id, track=workspace.track_id, clock=workspace.clock
     )
     assert [event.evidence_basis for event in staged] == ["audio"]
+
+    # And the recording is a row a later purge can reach.
+    from linguawiki.services import artifacts as artifact_service
+
+    held = artifact_service.listing(
+        workspace.paths, track=workspace.track_id, clock=workspace.clock
+    )
+    assert [entry.relative_path for entry in held.artifacts] == ["imports/call-1.opus"]
     close = session_service.close(
         workspace.paths,
         outcome="completed",

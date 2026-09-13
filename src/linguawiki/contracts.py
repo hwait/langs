@@ -17,6 +17,7 @@ from pydantic_core import CoreSchema, core_schema
 
 from linguawiki import evidence as evidence_policy
 from linguawiki import sources as source_policy
+from linguawiki import transcripts as transcript_policy
 from linguawiki.clock import require_utc, require_utc_if_set, validate_iana_timezone
 from linguawiki.errors import ErrorPayload
 from linguawiki.ids import (
@@ -266,6 +267,12 @@ class TranscriptUtterance(ContractModel):
     started_at: datetime
     ended_at: datetime
     text: str
+    #: The transcriber's own confidence in this line, 0..1, when it reported one.
+    #: Optional because a person taking notes has none -- but where it exists it must
+    #: survive ingestion, because a low confidence is the difference between "the learner
+    #: said this wrong" and "the machine may have misheard", and only the first is a
+    #: mistake to teach from.
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
     _started_at_utc = field_validator("started_at")(require_utc)
     _ended_at_utc = field_validator("ended_at")(require_utc)
@@ -275,6 +282,21 @@ class TranscriptUtterance(ContractModel):
         if self.ended_at < self.started_at:
             raise ValueError("utterance ended_at precedes started_at")
         return self
+
+
+class Transcriber(ContractModel):
+    """Who produced the text, so a systematic mishearing can be traced to its cause.
+
+    Added as an optional block rather than as required fields: a hand-written package has
+    no transcriber, and the manual path has to stay first-class.
+    """
+
+    name: str = Field(min_length=1)
+    version: str | None = None
+    #: What the confidence numbers on this package's utterances mean, when they carry
+    #: any. Left free-form because every transcriber scales its own differently, and a
+    #: number whose scale is unrecorded is worse than no number.
+    confidence_basis: str | None = None
 
 
 class TranscriptLayer(ContractModel):
@@ -373,6 +395,7 @@ class SessionPackage(ContractModel):
     started_at: datetime
     ended_at: datetime
     learning_targets: tuple[ContentId, ...] = ()
+    transcriber: Transcriber | None = None
     transcript_layers: tuple[TranscriptLayer, ...]
     events: tuple[SessionEvent, ...] = ()
     artifacts: tuple[SessionArtifact, ...] = ()
@@ -555,6 +578,9 @@ ComprehensionBand = Annotated[
     str, Vocabulary(source_policy.COMPREHENSION_BANDS, "comprehension band")
 ]
 StudyMode = Annotated[str, Vocabulary(source_policy.STUDY_MODES, "study mode")]
+PronunciationDimension = Annotated[
+    str, Vocabulary(transcript_policy.PRONUNCIATION_DIMENSIONS, "pronunciation dimension")
+]
 
 
 class StagedPayloadBase(ContractModel):
@@ -580,6 +606,10 @@ class StagedPayloadBase(ContractModel):
     response_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     source: Literal["package"] | None = None
     package_id: str | None = None
+    #: Which external session the utterance below belongs to. A producer's utterance IDs
+    #: are unique inside one call and no further, so without this an event from one
+    #: conversation resolved to another conversation's words.
+    external_session_id: str | None = None
     utterance_id: str | None = Field(default=None, pattern=r"^utt_[A-Za-z0-9_-]+$")
     transcript_layer: Literal["raw", "normalized", "reviewed-hearing"] | None = None
 
@@ -645,6 +675,11 @@ class StagedPronunciationPayload(StagedPayloadBase):
     note: NonBlankStr
     target: str | None = None
     dimension: str = "pronunciation"
+    #: *What* about the sound is being judged, as opposed to which ability dimension the
+    #: observation belongs to. Separate because a learner can be perfectly intelligible
+    #: and nothing like a native speaker, and because prosody and native-likeness can only
+    #: ever be judged from audio -- a rule that needs to know which one this is.
+    acoustic_dimension: PronunciationDimension = "intelligibility"
     audio_artifact_id: ArtifactId | None = None
 
     @model_validator(mode="after")

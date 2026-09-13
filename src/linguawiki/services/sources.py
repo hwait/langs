@@ -119,6 +119,24 @@ class ComprehensionReport(ContractModel):
     warnings: tuple[str, ...] = ()
 
 
+def _assert_minutes(minutes: int | None, *, field: str = "minutes") -> int | None:
+    """Refuse negative study time.
+
+    Minutes accumulate, so a negative one *subtracts* from work the learner already did:
+    ten minutes followed by minus five reported five. There is no reading of the record
+    under which that is true, and no command that needs it.
+    """
+
+    if minutes is not None and minutes < 0:
+        raise LinguaWikiError(
+            "invalid_minutes",
+            f"{minutes} minutes is not a length of time anyone studied for; time spent "
+            "accumulates, so a negative value would subtract work the learner did",
+            details=(ErrorDetail(field=field, reason=str(minutes)),),
+        )
+    return minutes
+
+
 def _resolve_source(database: Database, source: str, *, track_id: str) -> str:
     """Resolve a source reference inside the track that owns it.
 
@@ -338,6 +356,26 @@ def add(
             "invalid_source_title",
             "a source needs a title to be found by",
             details=(ErrorDetail(field="title", reason="blank title"),),
+        )
+    if total_units is not None and total_units < len(units):
+        # Coverage is completed units over this number. A total smaller than the units
+        # actually catalogued reports a source as finished while chapters remain, which is
+        # the one thing progress exists to get right.
+        raise LinguaWikiError(
+            "invalid_total_units",
+            f"this source declares {total_units} unit(s) and {len(units)} were catalogued; "
+            "a work cannot be shorter than the part of it that is written down, and "
+            "coverage computed from the smaller number would report it finished early",
+            details=(
+                ErrorDetail(field="total_units", reason=str(total_units)),
+                ErrorDetail(field="units", reason=str(len(units))),
+            ),
+        )
+    if total_units is not None and total_units < 1:
+        raise LinguaWikiError(
+            "invalid_total_units",
+            "a source with no units is not a source the learner can work through",
+            details=(ErrorDetail(field="total_units", reason=str(total_units)),),
         )
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
@@ -717,6 +755,7 @@ def record_comprehension(
             "a reread or a lookup cannot happen a negative number of times",
             details=(ErrorDetail(field="replays", reason=str(replays)),),
         )
+    _assert_minutes(minutes)
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = learner_service.resolve_track(database, track)
@@ -857,6 +896,7 @@ def materialize_progress(
     source_policy.assert_known(
         mode, vocabulary=source_policy.STUDY_MODES, field="mode", code="unknown_study_mode"
     )
+    _assert_minutes(minutes)
     source_id = _resolve_source(transaction, source, track_id=track_id)
     unit_id = None if unit is None else _resolve_unit(transaction, unit, source_id=source_id)
     existing = [
@@ -966,6 +1006,7 @@ def position(
         source_policy.assert_known(
             mode, vocabulary=source_policy.STUDY_MODES, field="mode", code="unknown_study_mode"
         )
+    _assert_minutes(minutes)
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = learner_service.resolve_track(database, track)
@@ -1011,6 +1052,7 @@ def complete_unit(
     way of doing that is a way of getting it wrong.
     """
 
+    _assert_minutes(minutes)
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = learner_service.resolve_track(database, track)
@@ -1109,6 +1151,24 @@ def set_status(
                 "UPDATE sources SET status = ?, updated_at = ? WHERE source_id = ?",
                 [status, naive_utc(now), source_id],
             )
+            if status in ("archived", "rejected"):
+                # Putting a source down settles the learner's progress with it. Without
+                # this the progress row stayed `in-progress` forever, no command could
+                # move it, and the planner went on proposing material the learner had
+                # explicitly set aside.
+                transaction.execute(
+                    "UPDATE track_source_progress SET status = 'abandoned', updated_at = ? "
+                    "WHERE track_id = ? AND source_id = ? AND status <> 'completed'",
+                    [naive_utc(now), track_id, source_id],
+                )
+            elif status == "active":
+                # Picking it back up is the reverse, and only for progress this command
+                # set aside: a completed source stays completed.
+                transaction.execute(
+                    "UPDATE track_source_progress SET status = 'in-progress', updated_at = ? "
+                    "WHERE track_id = ? AND source_id = ? AND status = 'abandoned'",
+                    [naive_utc(now), track_id, source_id],
+                )
             migration_module.record_audit_entry(
                 transaction,
                 command=command,
@@ -1205,19 +1265,30 @@ def _resolve_link_target(
         from linguawiki.services import knowledge as knowledge_service
 
         return knowledge_service.resolve_item(database, target, track_id=track_id)
-    table, column = (
-        ("examples", "example_id") if target_kind == "example" else ("error_patterns", "error_id")
+    if target_kind == "error-pattern":
+        # Scoped to the track. An error pattern belongs to one learner, and a source
+        # belonging to another linking to it would put one learner's mistakes in the
+        # other's history -- which `errors show` then reports as theirs.
+        from linguawiki.services import errors as error_service
+
+        return error_service.resolve_error(database, track_id=track_id, error=target)
+    # An example belongs to a pack item, which is track-scoped through the item. Quoted
+    # rather than interpolated even though the names are literals chosen here: the
+    # repository's rule is that every identifier reaching SQL goes through this, and an
+    # exception "because this one is safe" is how the rule stops being checkable.
+    scoped = quote_identifier("examples")
+    key = quote_identifier("example_id")
+    row = database.one(
+        f"SELECT example.{key}, example.content_id FROM {scoped} example WHERE example.{key} = ?",
+        [target],
     )
-    # Quoted rather than interpolated even though both names are literals chosen here:
-    # the repository's rule is that every identifier reaching SQL goes through this, and
-    # an exception "because this one is safe" is how the rule stops being checkable.
-    scoped = quote_identifier(table)
-    key = quote_identifier(column)
-    row = database.one(f"SELECT {key} FROM {scoped} WHERE {key} = ?", [target])
     if row is None:
         raise LinguaWikiError(
             "link_target_not_found",
             f"no {target_kind} {target} in this workspace",
             details=(ErrorDetail(field="target", reason="unknown target"),),
         )
+    from linguawiki.services import knowledge as knowledge_service
+
+    knowledge_service.resolve_item(database, str(row[1]), track_id=track_id)
     return str(row[0])

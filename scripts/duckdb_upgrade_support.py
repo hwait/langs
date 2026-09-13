@@ -646,8 +646,16 @@ def _spoken(paths: object, *, root: Path) -> None:
         paths,  # type: ignore[arg-type]
         utterance="utt_spoken_1",
         classification="learner-error",
+        category="orthography",
         corrected_form="Chciałbym kupić bilet.",
         meaning="I would like to buy a ticket.",
+        # A recorded override, because it is the row whose *absence* an upgrade would not
+        # notice: without it the fixture proves nothing about the column that says a
+        # person overruled the transcriber's own doubt.
+        despite_low_confidence=True,
+        reviewer_kind="human",
+        reviewer="fixture-listener",
+        override_reason="Listened to the recording; the ending is wrong.",
         clock=Clock(),
     )
     transcript_service.record_pronunciation(
@@ -661,7 +669,20 @@ def _spoken(paths: object, *, root: Path) -> None:
     )
     learner_service.update_track(
         paths,  # type: ignore[arg-type]
-        preferences=learner_service.TrackPreferences(audio_retention_consent=True),
+        preferences=learner_service.TrackPreferences(
+            audio_retention_consent=True,
+            audio_retention_policy="rolling-days",
+            audio_retention_days=30,
+        ),
+        clock=Clock(),
+    )
+    # A second reading of the same layer, so a superseded revision is in the fixture: it
+    # is the row an upgrade is most likely to lose, being the one nothing points at.
+    transcript_service.review(
+        paths,  # type: ignore[arg-type]
+        utterance="utt_spoken_2",
+        text="Dokąd pani jedzie dzisiaj?",
+        reviewer="fixture-second-listener",
         clock=Clock(),
     )
     recording = root / "artifacts" / "audio" / "fixture.wav"
@@ -682,6 +703,21 @@ def _spoken(paths: object, *, root: Path) -> None:
         utterance="utt_spoken_1",
         audio=artifact.artifact_id,
         note="Question intonation flattened.",
+        clock=Clock(),
+    )
+    # A selected clip of the recording above. It is the row whose *retention* differs from
+    # its source's, so an upgrade that lost the clip columns would silently turn a kept
+    # excerpt into another whole recording due for deletion.
+    clip = root / "artifacts" / "audio" / "moment.wav"
+    clip.write_bytes(b"RIFF" + b"\x02" * 24)
+    artifact_service.register(
+        paths,  # type: ignore[arg-type]
+        relative_path="artifacts/audio/moment.wav",
+        kind="audio",
+        origin="learner-recording",
+        clip_of=artifact.artifact_id,
+        clip_starts_at_ms=4_000,
+        clip_ends_at_ms=7_500,
         clock=Clock(),
     )
     second = root / "artifacts" / "audio" / "withdrawn.wav"
@@ -725,6 +761,11 @@ def _spoken_package() -> dict[str, object]:
         "schema_version": 1,
         "package_id": "pkg_upgrade_spoken",
         "external_session_id": "fixture-external-2",
+        "transcriber": {
+            "name": "fixture-transcriber",
+            "version": "1",
+            "confidence_basis": "exp(avg_logprob) per segment, 0..1",
+        },
         "target_language": "pl",
         "mode": "completed",
         "started_at": "2026-02-03T05:00:00Z",
@@ -739,6 +780,7 @@ def _spoken_package() -> dict[str, object]:
                         "started_at": "2026-02-03T05:01:00Z",
                         "ended_at": "2026-02-03T05:01:06Z",
                         "text": "chcialbym kupic bilet",
+                        "confidence": 0.2,
                     },
                     {
                         "utterance_id": "utt_spoken_2",

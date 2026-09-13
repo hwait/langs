@@ -210,11 +210,22 @@ def candidate_violation(path: PurePosixPath, policy: PrivacyPolicy) -> str | Non
     return privacy_violation(path, policy) or unsafe_top_level(path)
 
 
-def check_privacy(root: Path, *, policy: PrivacyPolicy | None = None) -> PrivacyReport:
-    """Report private files that could reach Git and any missing ignore rules."""
+def check_privacy(
+    root: Path,
+    *,
+    policy: PrivacyPolicy | None = None,
+    listing: CandidateListing | None = None,
+) -> PrivacyReport:
+    """Report private files that could reach Git and any missing ignore rules.
+
+    `listing` lets a caller that has already enumerated the candidates pass them in. The
+    audit used to list them twice and keep only the first listing's *failure*: when the
+    second came back unavailable, the content scan silently examined nothing and the audit
+    reported a clean workspace.
+    """
 
     active_policy = policy or workspace_policy()
-    listing = candidate_listing(root, active_policy)
+    listing = listing if listing is not None else candidate_listing(root, active_policy)
     warnings: list[str] = []
     if listing.source == CandidateSource.FILESYSTEM:
         warnings.append(
@@ -251,6 +262,32 @@ def check_privacy(root: Path, *, policy: PrivacyPolicy | None = None) -> Privacy
 # check that flagged them would be turned off within a week.
 LEAK_MATCH_MINIMUM = 24
 
+#: File types the content scan reads. Everything a learner workspace commits is text of
+#: one of these kinds; a binary is governed by the path rules instead, and a suffix this
+#: does not list is reported as unscanned rather than silently passed.
+SCANNED_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".md",
+        ".markdown",
+        ".txt",
+        ".json",
+        ".jsonl",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".csv",
+        ".html",
+        ".rst",
+        ".py",
+        ".sql",
+        ".cfg",
+        ".ini",
+        ".lock",
+        ".j2",
+        "",
+    }
+)
+
 
 class RetentionSummary(ContractModel):
     """What this workspace is holding of the learner, in the terms they consented in."""
@@ -261,6 +298,13 @@ class RetentionSummary(ContractModel):
     utterances_with_words: int = 0
     artifacts_held: int = 0
     artifacts_purged: int = 0
+    #: Recordings whose row says they are gone -- purged, or registered as not kept --
+    #: and whose bytes are still on disk. Always zero in a workspace the commands built;
+    #: anything else is a privacy claim that is not true, and the audit exists to say so.
+    unkept_files_still_present: tuple[str, ...] = ()
+    #: What this track does with recordings once they are ingested.
+    audio_retention_policy: str = "keep"
+    audio_retention_days: int | None = None
     #: Claims that would stop standing if every held recording were purged today. The
     #: number a learner actually needs before choosing to delete anything.
     claims_resting_on_audio: int = 0
@@ -287,6 +331,10 @@ class PrivacyAuditReport(ContractModel):
     #: The same, found in the audit log -- which is inside the database and therefore not
     #: in Git, but is read back into reports and shown to skills.
     log_leaks: tuple[PrivacyCandidate, ...] = ()
+    #: Files that could be committed and could not be read. They are failures, not
+    #: footnotes: a scan that skips what it cannot parse reports a clean workspace for a
+    #: page holding the learner's transcript and one invalid byte.
+    unscanned: tuple[PrivacyCandidate, ...] = ()
     retention: RetentionSummary
     #: What deleting each held recording would cost, before anyone deletes one.
     purge_consequences: tuple[PurgeConsequence, ...] = ()
@@ -354,15 +402,21 @@ def audit(
     privacy control, it is an apology.
     """
 
+    from linguawiki.services import artifacts as artifact_service
     from linguawiki.services import learners as learner_service
     from linguawiki.services import transcripts as transcript_service
 
     active_clock = clock or SystemClock()
     root = paths.root
-    path_report = check_privacy(root)
+    # Enumerated once and used for both halves: which files could be committed, and what
+    # is inside them. Two listings meant two answers, and the scan trusted the one whose
+    # failure it had discarded.
+    candidates = candidate_listing(root, workspace_policy())
+    path_report = check_privacy(root, listing=candidates)
     warnings: list[str] = []
     leaks: list[PrivacyCandidate] = []
     log_leaks: list[PrivacyCandidate] = []
+    unscanned: list[PrivacyCandidate] = []
     with open_reader(paths, clock=active_clock) as database:
         track_id = learner_service.resolve_track(database, track)
         record = learner_service.track_context(database, track_id)
@@ -375,6 +429,30 @@ def audit(
                 "WHERE before_summary IS NOT NULL OR after_summary IS NOT NULL"
             )
         ]
+        # Counted from the disk rather than from the flag. A row saying a recording was
+        # not kept, or was purged, while the bytes are still there is the one state the
+        # retention record must never be in -- and it is exactly the state the audit would
+        # otherwise report as a workspace holding nothing.
+        # `contained_file`, like every other read of a stored path: a symlink to a file
+        # outside the workspace is not this recording sitting here, and reporting it as one
+        # contradicted `artifact verify` about the same row.
+        #
+        # And a path a *live* row owns is that recording, not this tombstone's returning: a
+        # learner who purged a conversation and recorded a new one under the same filename
+        # would otherwise be told forever that the deleted one was still here.
+        owned = artifact_service.active_paths(database)
+        unkept = tuple(
+            str(artifact_id)
+            for artifact_id, relative_path in database.query(
+                "SELECT artifact_id, relative_path FROM artifacts WHERE track_id = ? "
+                "AND (purged_at IS NOT NULL OR NOT retained) ORDER BY artifact_id",
+                [track_id],
+            )
+            # One predicate shared with `artifact verify`, so the two cannot disagree
+            # about whether a tombstone's old path is explained or the recording is back.
+            if not artifact_service.tombstone_path_is_excused(root, str(relative_path), owned=owned)
+            and artifact_service.contained_file(root, str(relative_path)) is not None
+        )
         retention = RetentionSummary(
             transcript_policy=transcript_service.retention_policy(preferences),
             audio_consent=bool(preferences.get("audio_retention_consent")),
@@ -401,6 +479,12 @@ def audit(
                     [track_id],
                 )
             ),
+            audio_retention_policy=str(preferences.get("audio_retention_policy") or "keep"),
+            audio_retention_days=(
+                int(str(preferences["audio_retention_days"]))
+                if preferences.get("audio_retention_days") is not None
+                else None
+            ),
             claims_resting_on_audio=int(
                 database.scalar(
                     "SELECT count(*) FROM pronunciation_observations WHERE track_id = ? "
@@ -408,6 +492,7 @@ def audit(
                     [track_id],
                 )
             ),
+            unkept_files_still_present=unkept,
             sources_with_excerpts=int(
                 database.scalar(
                     "SELECT count(DISTINCT unit.source_id) FROM source_units unit "
@@ -451,37 +536,80 @@ def audit(
                     )
                 )
                 break
-    wiki_root = root / "wiki"
-    if wiki_root.is_dir():
-        for candidate in sorted(wiki_root.rglob("*")):
-            if not candidate.is_file() or candidate.suffix.lower() not in (".md", ".markdown"):
-                continue
-            try:
-                text = candidate.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                warnings.append(f"{candidate} could not be read and was not checked")
-                continue
-            for body, description in bodies:
-                if body in text:
-                    leaks.append(
-                        PrivacyCandidate(
-                            path=str(candidate.relative_to(root)),
-                            reason=f"this committed page holds {description}",
-                        )
+    # Every file that could reach Git, not only the generated pages. Stage 5 searched
+    # `wiki/**/*.md`, and a transcript pasted into AGENTS.md -- which is on the Git-safe
+    # list and therefore *certain* to be committed -- was reported as a clean workspace.
+    # The path rules say which files may be committed; this says what is inside them.
+    if candidates.source == CandidateSource.UNAVAILABLE:
+        # The path report already fails on this. Saying it here too is what keeps the
+        # *content* half from reading as "searched and found nothing".
+        unscanned.append(
+            PrivacyCandidate(
+                path=str(root),
+                reason="the list of files that could be committed could not be obtained, "
+                f"so nothing was scanned: {candidates.failure}",
+            )
+        )
+    for relative in candidates.paths:
+        candidate = root / relative
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in SCANNED_SUFFIXES:
+            unscanned.append(
+                PrivacyCandidate(
+                    path=relative,
+                    reason="this file could be committed and is not a kind the content "
+                    "scan reads, so nothing here says what is inside it",
+                )
+            )
+            continue
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as failure:
+            unscanned.append(
+                PrivacyCandidate(
+                    path=relative,
+                    reason=f"this file could be committed and could not be read: {failure}",
+                )
+            )
+            continue
+        for body, description in bodies:
+            if body in text:
+                leaks.append(
+                    PrivacyCandidate(
+                        path=relative,
+                        reason=f"this file could be committed and holds {description}",
                     )
-                    break
+                )
+                break
     if not bodies:
         warnings.append(
             "there is nothing private stored yet, so the content scan proves nothing about "
             "what this workspace would do once there is"
         )
+    if retention.unkept_files_still_present:
+        warnings.append(
+            f"{len(retention.unkept_files_still_present)} recording(s) are recorded as not "
+            "kept while their files are still on disk; the learner has been told these "
+            "were removed"
+        )
+    if unscanned:
+        warnings.append(
+            f"{len(unscanned)} file(s) that could be committed were not read, so nothing "
+            "here says whether they hold private content"
+        )
     return PrivacyAuditReport(
-        ok=path_report.ok and not leaks and not log_leaks,
+        ok=path_report.ok
+        and not leaks
+        and not log_leaks
+        and not unscanned
+        and not retention.unkept_files_still_present,
         root=str(root),
         track_id=track_id,
         paths=path_report,
         content_leaks=tuple(leaks),
         log_leaks=tuple(log_leaks),
+        unscanned=tuple(unscanned),
         retention=retention,
         purge_consequences=tuple(consequences),
         warnings=tuple((*path_report.warnings, *warnings)),

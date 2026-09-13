@@ -21,8 +21,11 @@ Once a contract version is released:
 | 3 | `linguawiki.cli.status.v1` | `stage` is now `3`; `database_schema_version` is now `22`. | Both track the running release, as before. Stage 3 added migrations 0019-0022 and no new wire contract: the learner model is reported through the generic success envelope, whose `data` is deliberately unconstrained. |
 | 4 | `linguawiki.cli.status.v1` | `stage` is now `4`; `database_schema_version` is now `23`. | Both track the running release, as before. Stage 4 added migration 0023 and one new published contract, below. |
 | 4 | `lingua.session.events.v1` | **New** contract: the batch `session log` accepts -- a sequence number, an idempotency key, an optional content hash, and an ordered array of `attempt.observed`, `correction.given`, `pronunciation.assessment`, `observation.noted`, or `follow_up` events. | Additive: a new schema name, no change to any existing contract. Deliberately *not* an extension of `lingua.session.v1`, which is a whole externally produced session; see below. |
-| 5 | `linguawiki.cli.status.v1` | `stage` is now `5`; `database_schema_version` is now `26`. | Both track the running release, as before. Stage 5 added migrations 0024-0026 and no new wire contract. |
+| 5 | `linguawiki.cli.status.v1` | `stage` is now `5`; `database_schema_version` is now `29`. | Both track the running release, as before. Stage 5 added migrations 0024-0029. |
 | 5 | `lingua.session.events.v1` | Added the `source.progress` event kind: a catalogued source, what the learner understood of it, and with how much help. | Additive within the contract's existing `events` discriminator. A producer that never emits one is unaffected; a consumer that does not know the kind sees an event it cannot interpret, which is why the kind list is published in the schema rather than assumed. |
+| 5 | `lingua.session.v1` | Added optional `transcriber` (name, version, confidence basis) and optional per-utterance `confidence`. | Additive and optional: a producer that reports neither is unchanged, and a hand-written package has no transcriber at all. Required because the plan's rule that low-confidence speech becomes a possible transcription error rather than a learner error cannot be applied to a number that was discarded at the door. |
+| 5 | `lingua.session.events.v1` | Added optional `external_session_id` to every staged payload. | Additive and optional, and set by the ingestion path rather than by a caller -- a flush has its own provenance stripped. Required because a producer's utterance IDs are unique only inside one call, so a close resolved one conversation's events against another conversation's words. |
+| 5 | `lingua.session.events.v1` | Added optional `acoustic_dimension` to the pronunciation payload, defaulting to `intelligibility`. | Additive and defaulted. Its absence is why a package's pronunciation event used to materialize as a loose note: the acoustic dimension decides whether audio is required at all, and a payload that could not name one could not become the claim it was. |
 | 2 | `lingua.pack.v1` and friends | **New** contracts for the language-pack directory format: `lingua.pack.v1` (manifest), `lingua.pack.capabilities.v1`, `lingua.pack.source-policy.v1`, `lingua.pack.proficiency.v1`, `lingua.pack.assessment.v1`, `lingua.pack.activities.v1`, `lingua.pack.references.v1`, `lingua.pack.bundle.v1`, `lingua.pack.expectations.v1`, and the JSONL line contracts `lingua.pack.knowledge.v1`, `lingua.pack.relation.v1`, `lingua.pack.example.v1`. | Additive: new schema names, no change to any existing contract. |
 
 Stage 5 amended `lingua.session.events.v1` once, by adding `source.progress`, and
@@ -52,11 +55,14 @@ statuses, and estimate statuses -- each of which lives in one module and is vers
 and `estimates.CALCULATION_VERSION`. Those version strings are stored on every row they
 produced, so a policy change can be told apart from a data change and replayed.
 
-`lingua.workspace.v1`, `lingua.session.v1`, `lingua.content.v1`, and `linguawiki.lock.v1` are
-unchanged since Stage 0 -- including through Stage 5, which both ingests
-`lingua.session.v1` packages and now stores their transcript layers, without amending
-them. That is the stronger claim: Stage 5 is the release that consumes the whole of that
-contract, and it needed nothing added. `history_policy` in particular stays the constant `git-wiki`; the other
+`lingua.workspace.v1`, `lingua.content.v1`, and `linguawiki.lock.v1` are unchanged since
+Stage 0. `lingua.session.v1` gained two optional fields in Stage 5 and is otherwise
+unchanged: old producers stay valid, old consumers ignore them, and no existing field
+changed meaning. Both additions exist because a *rule* could not be written without them,
+not because the shape was untidy -- a transcriber's confidence that is discarded at
+ingestion makes "low-confidence speech is not a confirmed learner error" unimplementable,
+and a pronunciation event that cannot name its acoustic dimension cannot become an
+acoustic claim. `history_policy` in particular stays the constant `git-wiki`; the other
 policies in the implementation plan need an amendment recorded here first.
 
 Stage 2 deliberately did **not** amend `lingua.content.v1`. Its four review states
