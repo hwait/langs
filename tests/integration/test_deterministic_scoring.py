@@ -1156,3 +1156,124 @@ def test_a_workspace_that_served_a_rubric_scored_task_is_still_healthy(
     checks = _checks(polish_workspace)
     for name in ("served_answer_key_complete", "served_answer_key_wellformed"):
         assert checks[name].status == "ok", checks[name].context  # type: ignore[attr-defined]
+
+
+def test_a_retry_that_asks_to_keep_less_is_refused_rather_than_ignored(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """Retention is part of what a result records, so a retry cannot quietly change it.
+
+    Comparing only the score and the answer's hash made a retry asking for `withheld`
+    return success with the full text still stored -- the caller was told its request to
+    stop keeping the learner's words had been honoured, and it had not.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        response=correct,
+        response_visibility="full",
+        clock=polish_workspace.clock,
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response=correct,
+            response_visibility="withheld",
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_result_conflict"
+    assert "full" in str(failure.value.payload.details[-1].context)
+    _score, _source, _policy, visibility, excerpt, _digest = _result_row(
+        polish_workspace, run.run_id, served.content_id
+    )
+    assert (visibility, excerpt) == ("full", correct), "the row is unchanged by a refusal"
+
+
+def test_a_retry_with_the_same_retention_request_is_still_a_repeat(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+
+    for _ in range(2):
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response=correct,
+            response_visibility="full",
+            clock=polish_workspace.clock,
+        )
+
+    with open_reader(polish_workspace.paths) as database:
+        results = database.scalar(
+            "SELECT count(*) FROM assessment_results WHERE run_id = ? AND content_id = ?",
+            [run.run_id, served.content_id],
+        )
+    assert int(results) == 1
+
+
+@pytest.mark.parametrize("blank", ["\t\n", " \t ", "\u00a0"])
+def test_a_whitespace_only_snapshot_column_is_damage_to_both_readers(
+    polish_workspace: PolishWorkspace, blank: str
+) -> None:
+    """One predicate, or the reader and the diagnostic describe the same row differently.
+
+    DuckDB's `trim` removes spaces where Python's `str.strip` removes every kind of
+    whitespace, so a prompt of `"\\t\\n"` was absent to the scorer -- which refused the row
+    as a partial snapshot -- and present to `db check`, which called it whole.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET prompt_snapshot = ? WHERE run_id = ? AND content_id = ?",
+        [blank, run.run_id, served.content_id],
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response=correct,
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_snapshot_partial"
+    check = _checks(polish_workspace)["served_answer_key_complete"]
+    assert check.status == "failed", "db check called whole what the scorer refused"  # type: ignore[attr-defined]
+
+
+def test_an_answer_key_no_parser_will_read_is_refused_not_raised(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """Python refuses an integer literal past 4300 digits with a plain `ValueError`.
+
+    It is not a `JSONDecodeError`, so it escaped the scorer as `internal_error` and aborted
+    `db check`, whose contract is never to raise.
+    """
+
+    run_id, content_id = _scored_run(polish_workspace)
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET expected_json = ? WHERE run_id = ? AND content_id = ?",
+        ['{"answers": [' + "9" * 4301 + "]}", run_id, content_id],
+    )
+
+    check = _checks(polish_workspace)["served_answer_key_wellformed"]
+
+    assert check.status == "failed"  # type: ignore[attr-defined]
+    assert content_id in "".join(check.context.values())  # type: ignore[attr-defined]

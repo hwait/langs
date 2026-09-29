@@ -1090,6 +1090,33 @@ class AnswerKey(ContractModel):
     answers: tuple[NonBlankStr, ...] = Field(min_length=1)
 
 
+#: What a group of serve-time snapshot columns amounts to. `absent` is every column NULL,
+#: which is what a row served before the snapshot existed holds and the only thing it has
+#: ever held; `whole` is every column carrying something; anything else is `partial`, which
+#: is damage rather than history.
+SNAPSHOT_ABSENT = "absent"
+SNAPSHOT_WHOLE = "whole"
+SNAPSHOT_PARTIAL = "partial"
+
+
+def served_snapshot_state(columns: Sequence[object]) -> str:
+    """Classify a serve-time snapshot group: whole, wholly absent, or damaged.
+
+    One function, because the writer and `db check` must describe the same row the same
+    way and twice already did not. Expressing it as a SQL predicate is what made them
+    diverge: DuckDB's `trim` removes spaces where `str.strip` removes every kind of
+    whitespace, so a prompt of `"\t\n"` was absent to the scorer -- which refused the row
+    as partial -- and present to the diagnostic, which called it whole. A reader sent to
+    look at a row a check calls healthy learns nothing.
+    """
+
+    if all(column is None for column in columns):
+        return SNAPSHOT_ABSENT
+    if all(column is not None and str(column).strip() for column in columns):
+        return SNAPSHOT_WHOLE
+    return SNAPSHOT_PARTIAL
+
+
 def reads_as_json_object(raw: str) -> bool:
     """Whether stored text is a JSON object, answered rather than raised.
 
@@ -1133,6 +1160,11 @@ def parse_answer_key(raw: str | None) -> AnswerKey:
         document = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise refuse(f"not valid JSON: {exc}") from exc
+    except ValueError as exc:
+        # Not every refusal from the decoder is a `JSONDecodeError`. Python caps integer
+        # string conversion at 4300 digits and raises a plain `ValueError` past it, which
+        # escaped as an unhandled crash from syntactically valid JSON.
+        raise refuse(f"holds a value no parser will read: {exc}") from exc
     except RecursionError as exc:
         # Not a `ValueError`, so it escaped as an unhandled crash rather than a refusal:
         # out of `db check`, whose contract is never to raise, and out of the scorer, where

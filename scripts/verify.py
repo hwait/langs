@@ -101,12 +101,13 @@ def _verify(scratch: str) -> int:
             ]
         )
     run(pytest_command, env=environment)
-    if args.fast:
-        run(["git", "diff", "--check"])
-        return 0
-    with tempfile.TemporaryDirectory(prefix="linguawiki-dist-") as distribution_directory:
-        run([python, "-m", "hatchling", "build", "-d", distribution_directory])
-        run([python, "scripts/check_distribution.py", "--dist", distribution_directory])
+    if not args.fast:
+        with tempfile.TemporaryDirectory(prefix="linguawiki-dist-") as distribution_directory:
+            run([python, "-m", "hatchling", "build", "-d", distribution_directory])
+            run([python, "scripts/check_distribution.py", "--dist", distribution_directory])
+    # Whatever the tier. These two are not part of a gate the caller selected -- they were
+    # asked for by name, and `--fast` returning before them meant a run that skipped a
+    # DuckDB upgrade proof still exited 0 and reported success.
     if args.clean_environment:
         clean_environment = [python, "scripts/check_clean_environment.py"]
         if args.uv is not None:

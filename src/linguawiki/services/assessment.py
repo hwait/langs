@@ -26,7 +26,14 @@ from typing import Any
 from pydantic import Field
 
 from linguawiki.clock import Clock, SystemClock, aware_utc
-from linguawiki.contracts import PackMaturity, parse_answer_key, reads_as_json_object
+from linguawiki.contracts import (
+    SNAPSHOT_ABSENT,
+    SNAPSHOT_WHOLE,
+    PackMaturity,
+    parse_answer_key,
+    reads_as_json_object,
+    served_snapshot_state,
+)
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.connection import Database, open_reader, open_writer
 from linguawiki.errors import ErrorDetail, LinguaWikiError
@@ -894,15 +901,13 @@ def _scorable_key(
 
     expected_json, prompt_snapshot, rubric_json = snapshot
     columns = (expected_json, prompt_snapshot, rubric_json)
-    # Whole or wholly absent, and nothing between. Absent is NULL specifically: a genuine
-    # pre-0030 row has never held anything else, so three empty strings are damage a
-    # restore or a hand-edit left behind -- and reading them as absent sent the row down
-    # the legacy branch to be scored off the live, mutable bank the snapshot exists to
-    # replace. `served_answer_key_complete` draws the line in the same place, so the
-    # writer and the diagnostic cannot describe one row two ways.
-    if all(column is None for column in columns):
+    # Whole or wholly absent, and nothing between -- decided by the one predicate
+    # `served_answer_key_complete` also asks, so the writer and the diagnostic cannot
+    # describe a row two different ways.
+    state = served_snapshot_state(columns)
+    if state == SNAPSHOT_ABSENT:
         pass
-    elif all(column is not None and str(column).strip() for column in columns):
+    elif state == SNAPSHOT_WHOLE:
         key = parse_answer_key(str(expected_json))
         # The rubric body travels with the key and is part of the same record. A record
         # `db check` calls unreadable must not quietly produce a credited score.
@@ -976,6 +981,7 @@ def _assert_repeat(
     content_id: str,
     score: float,
     response_hash: str | None,
+    visibility: str,
 ) -> None:
     """Accept a retry of a recorded result, and refuse a second, different one.
 
@@ -987,10 +993,16 @@ def _assert_repeat(
     A recorded row that kept no hash is not evidence of a different answer, so a retry
     that supplies one while agreeing on the score is still a repeat: the first call simply
     had nothing to hash.
+
+    Retention is compared too, and that is the case with teeth: a retry asking for
+    `withheld` where `full` is recorded was accepted as a repeat, so the caller was told
+    its request to stop keeping the learner's words had been honoured while the text sat
+    there. Nothing here can grant that request -- the row is an observation, and no command
+    withdraws a stored excerpt -- so the honest answer is to refuse and name what is kept.
     """
 
     recorded = database.one(
-        "SELECT raw_score, response_hash FROM assessment_results "
+        "SELECT raw_score, response_hash, response_visibility FROM assessment_results "
         "WHERE run_id = ? AND content_id = ?",
         [run_id, content_id],
     )
@@ -1011,6 +1023,15 @@ def _assert_repeat(
                 field="response",
                 reason="a different answer is already recorded for this task",
                 context={"recorded": str(recorded[1]), "offered": response_hash},
+            )
+        )
+    if recorded[2] is not None and str(recorded[2]) != visibility:
+        conflicts.append(
+            ErrorDetail(
+                field="response_visibility",
+                reason="the recorded result keeps a different amount of the answer, and a "
+                "retry cannot change what was kept",
+                context={"recorded": str(recorded[2]), "offered": visibility},
             )
         )
     if conflicts:
@@ -1172,6 +1193,7 @@ def record(
                 content_id=content_id,
                 score=resolved_score,
                 response_hash=response_hash,
+                visibility=visibility,
             )
             return _run_report(database, run_id)
         states = {state.dimension: state for state in _dimension_states(database, run_id, kinds)}

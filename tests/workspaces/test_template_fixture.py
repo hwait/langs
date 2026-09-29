@@ -10,10 +10,11 @@ holding it to the original.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from linguawiki.db.backup import table_row_counts
-from linguawiki.db.connection import open_reader
+from linguawiki.db.connection import open_reader, quote_identifier, quote_identifiers
 from linguawiki.db.integrity import check_database
 from linguawiki.paths import workspace_paths
 from linguawiki.services import packs as pack_service
@@ -38,9 +39,49 @@ def _built_the_long_way(base: Path) -> Path:
     return root
 
 
+#: Identifiers a fresh build necessarily re-mints: the workspace's own ULID and the event
+#: ULIDs of the commands that built it. Content identifiers are *derived* from
+#: `(pack_key, kind, stable_key)` and so must match exactly -- blanking those would throw
+#: away the part of this comparison that actually checks the pack came across.
+MINTED = re.compile(r"\b(wsp|evt)_[0-9A-HJKMNP-TV-Z]{26}\b")
+
+
+def _anonymous(value: object) -> str:
+    return MINTED.sub(r"\1_<minted>", str(value))
+
+
 def _tables(root: Path) -> dict[str, int]:
     with open_reader(workspace_paths(root)) as database:
         return dict(table_row_counts(database))
+
+
+def _contents(root: Path) -> dict[str, list[tuple[object, ...]]]:
+    """Every row of every table, with only freshly minted identifiers blanked.
+
+    Row counts alone would pass a copy that carried the right number of wrong rows, which
+    is exactly the failure a template can introduce and the slow fixture cannot.
+    """
+
+    contents: dict[str, list[tuple[object, ...]]] = {}
+    with open_reader(workspace_paths(root)) as database:
+        for table in sorted(database.table_names()):
+            columns = [
+                str(name)
+                for (name,) in database.query(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = ? ORDER BY ordinal_position",
+                    [table],
+                )
+            ]
+            if not columns:
+                continue
+            projection = quote_identifiers(columns)
+            quoted = quote_identifier(table)
+            contents[table] = sorted(
+                tuple(_anonymous(value) for value in row)
+                for row in database.query(f"SELECT {projection} FROM {quoted}")
+            )
+    return contents
 
 
 def test_a_materialized_workspace_holds_what_a_real_install_holds(
@@ -56,6 +97,10 @@ def test_a_materialized_workspace_holds_what_a_real_install_holds(
     )
 
     assert _tables(copied_root) == _tables(real)
+    copied, built = _contents(copied_root), _contents(real)
+    assert set(copied) == set(built)
+    for table in sorted(built):
+        assert copied[table] == built[table], table
 
 
 def test_a_materialized_workspace_passes_every_integrity_check(

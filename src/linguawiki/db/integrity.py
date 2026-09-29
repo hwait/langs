@@ -6,7 +6,13 @@ import json
 
 from pydantic import Field
 
-from linguawiki.contracts import LockManifest, parse_answer_key, reads_as_json_object
+from linguawiki.contracts import (
+    SNAPSHOT_PARTIAL,
+    LockManifest,
+    parse_answer_key,
+    reads_as_json_object,
+    served_snapshot_state,
+)
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.backup import table_row_counts
 from linguawiki.db.connection import Database, quote_identifier
@@ -741,23 +747,17 @@ def _served_answer_key_checks(database: Database) -> list[CheckResult]:
     """
 
     checks: list[CheckResult] = []
-    # Whole or wholly absent, drawn exactly where `_scorable_key` draws it. Absent is all
-    # three NULL -- what a genuine pre-0030 row holds and the only thing it has ever held.
-    # A row carrying an empty or whitespace-only value is damage, not history: reading it
-    # as absent sent the writer to the mutable bank while a check that asked only
-    # `IS NOT NULL` called the same row healthy. A check that mirrors half the writer's
-    # predicate calls damage clean, and that is the reading an operator trusts.
+    # Asked in Python through the one predicate `_scorable_key` uses, not as a SQL
+    # expression. A SQL version is how this diverged: DuckDB's `trim` removes spaces where
+    # `str.strip` removes every kind of whitespace, so a prompt of "\t\n" was damage to
+    # the writer and whole to this check. One function answers the question.
     partial = [
         f"{run_id}/{content_id}"
-        for run_id, content_id in database.query(
-            "SELECT run_id, content_id FROM assessment_run_tasks "
-            "WHERE NOT (expected_json IS NULL AND prompt_snapshot IS NULL "
-            "           AND rubric_json IS NULL) "
-            "  AND NOT (coalesce(trim(expected_json), '') <> '' "
-            "           AND coalesce(trim(prompt_snapshot), '') <> '' "
-            "           AND coalesce(trim(rubric_json), '') <> '') "
-            "ORDER BY run_id, content_id"
+        for run_id, content_id, expected_json, prompt_snapshot, rubric_json in database.query(
+            "SELECT run_id, content_id, expected_json, prompt_snapshot, rubric_json "
+            "FROM assessment_run_tasks ORDER BY run_id, content_id"
         )
+        if served_snapshot_state((expected_json, prompt_snapshot, rubric_json)) == SNAPSHOT_PARTIAL
     ]
     if partial:
         checks.append(
