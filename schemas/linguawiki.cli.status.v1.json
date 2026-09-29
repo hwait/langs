@@ -19,21 +19,27 @@
           "title": "Contract Schema Version",
           "type": "integer"
         },
+        "database_schema_version": {
+          "minimum": 1,
+          "title": "Database Schema Version",
+          "type": "integer"
+        },
         "persistence": {
-          "const": "not-initialized",
-          "default": "not-initialized",
+          "const": "available",
+          "default": "available",
           "title": "Persistence",
           "type": "string"
         },
         "stage": {
-          "const": 0,
-          "default": 0,
+          "const": 5,
+          "default": 5,
           "title": "Stage",
           "type": "integer"
         }
       },
       "required": [
-        "application_version"
+        "application_version",
+        "database_schema_version"
       ],
       "title": "StatusData",
       "type": "object"
@@ -71,6 +77,14 @@
       "default": 1,
       "title": "Schema Version",
       "type": "integer"
+    },
+    "warnings": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
     }
   },
   "required": [

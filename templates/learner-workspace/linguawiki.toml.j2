@@ -1,11 +1,11 @@
 schema_name = "lingua.workspace.v1"
 schema_version = 1
-workspace_id = "{{ workspace_id }}"
-created_at = "{{ created_at }}"
-timezone = "{{ timezone }}"
+workspace_id = {{ workspace_id | tomlstr }}
+created_at = {{ created_at | tomlstr }}
+timezone = {{ timezone | tomlstr }}
 history_policy = "git-wiki"
-backup_root = "{{ backup_root }}"
+backup_root = {{ backup_root | tomlstr }}
 
 [runtime]
 python = ">=3.12"
-core_version = "{{ core_version }}"
+core_version = {{ core_version | tomlstr }}

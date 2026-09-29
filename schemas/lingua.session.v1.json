@@ -240,6 +240,46 @@
       "title": "SpeakerRole",
       "type": "string"
     },
+    "Transcriber": {
+      "additionalProperties": false,
+      "description": "Who produced the text, so a systematic mishearing can be traced to its cause.\n\nAdded as an optional block rather than as required fields: a hand-written package has\nno transcriber, and the manual path has to stay first-class.",
+      "properties": {
+        "confidence_basis": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence Basis"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Transcriber",
+      "type": "object"
+    },
     "TranscriptLayer": {
       "additionalProperties": false,
       "allOf": [
@@ -339,6 +379,20 @@
     "TranscriptUtterance": {
       "additionalProperties": false,
       "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
         "ended_at": {
           "format": "date-time",
           "pattern": "(?:Z|\\+00:00)$",
@@ -554,6 +608,17 @@
       ],
       "default": null,
       "title": "Track Hint"
+    },
+    "transcriber": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Transcriber"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "transcript_layers": {
       "allOf": [

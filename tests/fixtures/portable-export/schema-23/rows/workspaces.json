@@ -1,0 +1,13 @@
+[
+  {
+    "created_at": "2026-09-10T11:04:13.502666Z",
+    "history_policy": "git-wiki",
+    "is_singleton": true,
+    "name": "Polish LinguaWiki",
+    "normalized_name": "polish-linguawiki",
+    "timezone": "Europe/Warsaw",
+    "track_policy": "single",
+    "updated_at": "2026-09-10T11:04:13.677377Z",
+    "workspace_id": "wsp_01M25FTNDYMSCPCY9VN08ZMWMC"
+  }
+]

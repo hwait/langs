@@ -1,0 +1,398 @@
+{
+  "$defs": {
+    "OriginClass": {
+      "description": "Controlled item-level origin classes from the pack-authoring workflow.",
+      "enum": [
+        "authentic-source",
+        "learner-produced",
+        "source-derived",
+        "ai-adapted",
+        "ai-generated",
+        "synthetic-media",
+        "human-authored"
+      ],
+      "title": "OriginClass",
+      "type": "string"
+    },
+    "PackDescriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "descriptor": {
+          "minLength": 1,
+          "title": "Descriptor",
+          "type": "string"
+        },
+        "dimension": {
+          "minLength": 1,
+          "title": "Dimension",
+          "type": "string"
+        },
+        "level": {
+          "minLength": 1,
+          "title": "Level",
+          "type": "string"
+        },
+        "locale": {
+          "minLength": 1,
+          "title": "Locale",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/PackItemProvenance"
+        },
+        "stable_key": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+          "title": "Stable Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stable_key",
+        "level",
+        "dimension",
+        "locale",
+        "descriptor",
+        "provenance"
+      ],
+      "title": "PackDescriptor",
+      "type": "object"
+    },
+    "PackItemDependency": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Hash"
+        },
+        "kind": {
+          "enum": [
+            "content",
+            "source",
+            "template",
+            "artifact",
+            "policy"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "on_change": {
+          "default": "needs-review",
+          "enum": [
+            "needs-review",
+            "quarantine",
+            "ignore"
+          ],
+          "title": "On Change",
+          "type": "string"
+        },
+        "reference": {
+          "minLength": 1,
+          "title": "Reference",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "reference"
+      ],
+      "title": "PackItemDependency",
+      "type": "object"
+    },
+    "PackItemOrigin": {
+      "additionalProperties": false,
+      "description": "One origin of a persistent pack item.",
+      "properties": {
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locator"
+        },
+        "origin_class": {
+          "$ref": "#/$defs/OriginClass"
+        },
+        "origin_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin Hash"
+        },
+        "privacy": {
+          "enum": [
+            "public",
+            "private",
+            "synthetic"
+          ],
+          "title": "Privacy",
+          "type": "string"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
+        },
+        "rights": {
+          "minLength": 1,
+          "title": "Rights",
+          "type": "string"
+        },
+        "transformation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transformation"
+        }
+      },
+      "required": [
+        "origin_class",
+        "rights",
+        "privacy"
+      ],
+      "title": "PackItemOrigin",
+      "type": "object"
+    },
+    "PackItemProvenance": {
+      "additionalProperties": false,
+      "description": "The provenance envelope every persistent pack item carries.\n\n`origin` and `reviews` may name a manifest-declared profile instead of repeating\nthe same five axes on every item; the loader resolves a profile into item-level\nrows before anything is hashed or stored, so item-level provenance is never lost.",
+      "properties": {
+        "content_hash": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "dependencies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PackItemDependency"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "generation_run": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generation Run"
+        },
+        "lifecycle": {
+          "enum": [
+            "draft",
+            "candidate",
+            "approved-personal",
+            "verified",
+            "publication-ready",
+            "needs-review",
+            "rejected",
+            "deprecated"
+          ],
+          "title": "Lifecycle",
+          "type": "string"
+        },
+        "origin_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin Profile"
+        },
+        "origins": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PackItemOrigin"
+          },
+          "title": "Origins",
+          "type": "array"
+        },
+        "review_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Profile"
+        },
+        "reviews": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PackItemReview"
+          },
+          "propertyNames": {
+            "enum": [
+              "linguistic",
+              "pedagogical",
+              "source-alignment",
+              "rights",
+              "privacy"
+            ]
+          },
+          "title": "Reviews",
+          "type": "object"
+        },
+        "risk_tier": {
+          "maximum": 4,
+          "minimum": 0,
+          "title": "Risk Tier",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "lifecycle",
+        "risk_tier",
+        "content_hash"
+      ],
+      "title": "PackItemProvenance",
+      "type": "object"
+    },
+    "PackItemReview": {
+      "additionalProperties": false,
+      "description": "One review axis of one item, in that axis's own state vocabulary.\n\nThe state vocabulary differs per axis on purpose: `cleared` means something for\nrights and nothing for pronunciation correctness. `services.provenance` maps each\nstate onto the pass/pending/fail gate the frozen content contract enforces.",
+      "properties": {
+        "evidence_reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Reference"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Method"
+        },
+        "reviewer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reviewer"
+        },
+        "reviewer_kind": {
+          "$ref": "#/$defs/ReviewerKind"
+        },
+        "state": {
+          "minLength": 1,
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "reviewer_kind"
+      ],
+      "title": "PackItemReview",
+      "type": "object"
+    },
+    "ReviewerKind": {
+      "enum": [
+        "machine",
+        "ai",
+        "learner",
+        "human",
+        "not-applicable"
+      ],
+      "title": "ReviewerKind",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "descriptors": {
+      "items": {
+        "$ref": "#/$defs/PackDescriptor"
+      },
+      "title": "Descriptors",
+      "type": "array"
+    },
+    "framework": {
+      "minLength": 1,
+      "title": "Framework",
+      "type": "string"
+    },
+    "schema_name": {
+      "const": "lingua.pack.proficiency.v1",
+      "default": "lingua.pack.proficiency.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "framework",
+    "descriptors"
+  ],
+  "title": "PackProficiencyFile",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.pack.proficiency.v1"
+}

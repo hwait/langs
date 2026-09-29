@@ -1,0 +1,14 @@
+{
+  "adapters": {},
+  "aspect": true,
+  "extensions": {},
+  "grammatical_case": true,
+  "inflection": true,
+  "pronunciation_contrasts": true,
+  "romanization": false,
+  "schema_name": "lingua.pack.capabilities.v1",
+  "schema_version": 1,
+  "script_learning_required": false,
+  "tone": false,
+  "word_segmentation": "whitespace"
+}

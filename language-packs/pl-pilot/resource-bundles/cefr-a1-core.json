@@ -1,0 +1,108 @@
+{
+  "bundle_key": "cefr-a1-core",
+  "bundle_type": "core",
+  "depends_on": [],
+  "framework": "cefr",
+  "items": [
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.dzien-dobry"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.do-widzenia"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.tak"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.nie"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.prosze"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.dziekuje"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.woda"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.chleb"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.dom"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.praca"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.czas"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.dzis"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.lex.jutro"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.byc-terazniejszy"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "pl.gram.to-jest"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a1.reading.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a1.listening.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a1.vocabulary-control.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a1.grammar-control.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a1.writing.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a1.spoken-production.en"
+    },
+    {
+      "item_kind": "descriptor",
+      "item_ref": "cefr.a1.pronunciation.en"
+    }
+  ],
+  "level": "A1",
+  "license": "CC-BY-4.0",
+  "provenance": {
+    "content_hash": "df626ecacfdfd9d265aec39e41c79c1c88d181d45bae39737c06c6789b32bd33",
+    "lifecycle": "verified",
+    "origin_profile": "authored-original",
+    "review_profile": "authored-verified",
+    "risk_tier": 2
+  },
+  "schema_name": "lingua.pack.bundle.v1",
+  "schema_version": 1,
+  "title": "CEFR A1 prerequisites for the Polish pilot"
+}

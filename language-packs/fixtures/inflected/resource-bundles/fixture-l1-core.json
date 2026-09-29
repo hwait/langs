@@ -1,0 +1,28 @@
+{
+  "bundle_key": "fixture-l1-core",
+  "bundle_type": "core",
+  "depends_on": [],
+  "framework": "fixture-bands-v1",
+  "items": [
+    {
+      "item_kind": "knowledge",
+      "item_ref": "qix.lex.lum"
+    },
+    {
+      "item_kind": "knowledge",
+      "item_ref": "qix.prag.greeting"
+    }
+  ],
+  "level": "L1",
+  "license": "CC0-1.0",
+  "provenance": {
+    "content_hash": "9d5caf8ac1828e4711050536b8bf6dc3970c2196ec6005546e1552339a5b26a9",
+    "lifecycle": "verified",
+    "origin_profile": "synthetic",
+    "review_profile": "fixture-verified",
+    "risk_tier": 0
+  },
+  "schema_name": "lingua.pack.bundle.v1",
+  "schema_version": 1,
+  "title": "Fixture L1 core"
+}

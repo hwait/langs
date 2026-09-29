@@ -1,0 +1,173 @@
+{
+  "schema_name": "lingua.pack.activities.v1",
+  "schema_version": 1,
+  "templates": [
+    {
+      "level": "A2",
+      "minutes": 15,
+      "mode": "retrieval",
+      "provenance": {
+        "content_hash": "a8de1ea7b6c34442bccc41aad4866fe45d4f5c39beca94aed8d0c9d41698daad",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "pl.act.retrieval",
+      "structure": {
+        "inputs": [
+          "due knowledge targets"
+        ],
+        "produces": [
+          "recognition and recall evidence"
+        ],
+        "steps": [
+          "recall from the prompt alone",
+          "check",
+          "re-attempt the misses after a delay"
+        ]
+      },
+      "title": "Spaced retrieval of the week's targets"
+    },
+    {
+      "level": "A2",
+      "minutes": 20,
+      "mode": "reading",
+      "provenance": {
+        "content_hash": "8dae01e3e9f856c7c086a0275d2758516f8208bba3d32b0751665afefaa7a5eb",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "pl.act.reading",
+      "structure": {
+        "inputs": [
+          "one A2 text of 120-200 words"
+        ],
+        "produces": [
+          "comprehension evidence",
+          "vocabulary candidates"
+        ],
+        "steps": [
+          "read once for gist",
+          "answer three factual questions",
+          "reread and collect two unknown words"
+        ]
+      },
+      "title": "Short text with targeted extraction"
+    },
+    {
+      "level": "A2",
+      "minutes": 20,
+      "mode": "listening",
+      "provenance": {
+        "content_hash": "de5031c096efb5a577671141dd0513db7d32e543f13f37ffab8ed455fa60a748",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "pl.act.listening",
+      "structure": {
+        "inputs": [
+          "one clear A2 recording of 60-120 seconds"
+        ],
+        "produces": [
+          "listening evidence"
+        ],
+        "steps": [
+          "listen once without the text",
+          "note three facts",
+          "listen again and check"
+        ]
+      },
+      "title": "Twice-listened audio with a note"
+    },
+    {
+      "level": "A2",
+      "minutes": 20,
+      "mode": "speaking",
+      "provenance": {
+        "content_hash": "a32ac1890b00228b23967767e4aec2c63b442ba3acf312813e89d4d215742099",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "pl.act.speaking",
+      "structure": {
+        "inputs": [
+          "one situation from a covered theme"
+        ],
+        "note": "Pronunciation claims need the audio, not the transcript.",
+        "produces": [
+          "spoken-interaction evidence",
+          "correction candidates"
+        ],
+        "steps": [
+          "prepare five phrases",
+          "run the role-play",
+          "repeat with one corrected form"
+        ]
+      },
+      "title": "Role-play a predictable transaction"
+    },
+    {
+      "level": "A2",
+      "minutes": 20,
+      "mode": "writing",
+      "provenance": {
+        "content_hash": "69f64d7e6ce710e88139a1691e4335d61dcc46081564c9c6d4ea3a569de24b0c",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "pl.act.writing",
+      "structure": {
+        "inputs": [
+          "one writing prompt"
+        ],
+        "produces": [
+          "writing evidence",
+          "error candidates"
+        ],
+        "steps": [
+          "plan three points",
+          "write 60-80 words",
+          "self-check the case endings",
+          "receive corrections"
+        ]
+      },
+      "title": "Guided short message"
+    },
+    {
+      "level": "A2",
+      "minutes": 20,
+      "mode": "grammar",
+      "provenance": {
+        "content_hash": "0b67ba3ce722414c990376c481673590f213ae5b50257970ce3d4ec39f72cc2c",
+        "lifecycle": "verified",
+        "origin_profile": "authored-original",
+        "review_profile": "authored-verified",
+        "risk_tier": 2
+      },
+      "stable_key": "pl.act.grammar",
+      "structure": {
+        "inputs": [
+          "one grammar target"
+        ],
+        "produces": [
+          "controlled and spontaneous production evidence"
+        ],
+        "steps": [
+          "read the pattern",
+          "controlled practice",
+          "use it in a free sentence"
+        ]
+      },
+      "title": "One pattern, three contexts"
+    }
+  ]
+}

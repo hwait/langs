@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One typed edge in `seed/relations.jsonl`.",
+  "properties": {
+    "relation_type": {
+      "enum": [
+        "prerequisite",
+        "form-of",
+        "sense-of",
+        "contrast",
+        "collocation",
+        "government",
+        "example-of",
+        "related",
+        "error-target",
+        "curriculum-objective"
+      ],
+      "title": "Relation Type",
+      "type": "string"
+    },
+    "source_key": {
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+      "title": "Source Key",
+      "type": "string"
+    },
+    "target_key": {
+      "anyOf": [
+        {
+          "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Key"
+    },
+    "target_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Ref"
+    }
+  },
+  "required": [
+    "source_key",
+    "relation_type"
+  ],
+  "title": "PackRelation",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.pack.relation.v1"
+}

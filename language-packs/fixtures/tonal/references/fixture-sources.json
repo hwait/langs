@@ -1,0 +1,82 @@
+{
+  "recommendations": [
+    {
+      "creator": "LinguaWiki fixtures",
+      "level": "L2",
+      "license": "CC0-1.0",
+      "locator": null,
+      "modality": "text",
+      "notes": "Synthetic placeholder; nothing to download.",
+      "provenance": {
+        "content_hash": "469e88db428204593aa196d9b13b9517b1e9b9c2542e1d55d00d168adb17b5ae",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rights_status": "cleared",
+      "stable_key": "ztx.src.text",
+      "support_language": "en",
+      "title": "Fixture text source"
+    },
+    {
+      "creator": "LinguaWiki fixtures",
+      "level": "L2",
+      "license": "CC0-1.0",
+      "locator": null,
+      "modality": "audio",
+      "notes": "Synthetic placeholder; nothing to download.",
+      "provenance": {
+        "content_hash": "9de54a62cabb2abc482e6eee290e6f524febb658ec3f36c11ca452312e988310",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rights_status": "cleared",
+      "stable_key": "ztx.src.audio",
+      "support_language": "en",
+      "title": "Fixture audio source"
+    },
+    {
+      "creator": "LinguaWiki fixtures",
+      "level": "L2",
+      "license": "CC0-1.0",
+      "locator": null,
+      "modality": "speech",
+      "notes": "Synthetic placeholder; nothing to download.",
+      "provenance": {
+        "content_hash": "180a860d1b0b6d98e9a2baaabdff0e9d8f7ef85fa870715a8684976b1a271634",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rights_status": "cleared",
+      "stable_key": "ztx.src.speech",
+      "support_language": "en",
+      "title": "Fixture speech source"
+    },
+    {
+      "creator": "LinguaWiki fixtures",
+      "level": "L2",
+      "license": "CC0-1.0",
+      "locator": null,
+      "modality": "writing",
+      "notes": "Synthetic placeholder; nothing to download.",
+      "provenance": {
+        "content_hash": "8f86e9701e8adeb8fef498fe575198c90f79784b03e6cfffbd251aaf76b24f0b",
+        "lifecycle": "verified",
+        "origin_profile": "synthetic",
+        "review_profile": "fixture-verified",
+        "risk_tier": 0
+      },
+      "rights_status": "cleared",
+      "stable_key": "ztx.src.writing",
+      "support_language": "en",
+      "title": "Fixture writing source"
+    }
+  ],
+  "schema_name": "lingua.pack.references.v1",
+  "schema_version": 1
+}

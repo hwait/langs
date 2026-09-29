@@ -1,0 +1,14 @@
+-- Make a framework transition reachable through supported commands.
+--
+-- A track's framework is part of its identity: every level label it records is a label of
+-- that framework, and core never relates two frameworks. So a track cannot be moved to a
+-- replacement framework -- it has to be archived and a new track created. That workflow
+-- was blocked from both ends: the pack update refused while any track named the old
+-- framework, and a replacement track was rejected as a duplicate because this unique
+-- index counted archived tracks.
+--
+-- Uniqueness now means "at most one track a learner is still taught in, per language,
+-- region, and script". DuckDB has no partial unique index, so the rule moves to the
+-- application and to the named `active_track_uniqueness` check in `db check` -- the same
+-- treatment `is_primary` already has.
+DROP INDEX learning_tracks_target;

@@ -1,0 +1,21 @@
+-- Which knowledge items a task targeted, as of the moment it was served.
+--
+-- Migration 0016 snapshotted what a task *demanded* -- its type, modality, difficulty,
+-- family -- because a pack is mutable and a run is not. It did not snapshot which items
+-- the task targeted, so that one fact still had to be read back from the bank, where a
+-- later pack edit could change it or a drifted item could make it untrustworthy. An
+-- observation attributed to a bank task is an observation about what that task tested,
+-- so the targets belong with the rest of the served record.
+--
+-- Null means "not snapshotted": every row served before this migration. That is not the
+-- same as an empty list, which means the task named no targets at all -- and neither is
+-- permission to attribute an item observation to the task, because neither says which
+-- item it tested.
+--
+-- The repository's other JSON columns carry `CHECK (json_valid(...))`. This one cannot:
+-- DuckDB refuses `ALTER TABLE ... ADD COLUMN` with any constraint ("Adding columns with
+-- constraints not yet supported"), and a table this widely referenced cannot be
+-- recreated. So the guarantee is asserted by the named `served_targets_wellformed` check
+-- instead, which parses the text defensively -- a diagnostic that aborts on malformed
+-- input reports less than one that reports the malformed input.
+ALTER TABLE assessment_run_tasks ADD COLUMN target_refs_json VARCHAR;

@@ -1,0 +1,77 @@
+{
+  "$defs": {
+    "PackSourceClass": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "rank": {
+          "minimum": 1,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "source_class": {
+          "minLength": 1,
+          "title": "Source Class",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_class",
+        "rank",
+        "description"
+      ],
+      "title": "PackSourceClass",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Pack-declared authoritative source classes. Core never ranks institutions.",
+  "properties": {
+    "escalation": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Escalation",
+      "type": "array"
+    },
+    "prohibited": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Prohibited",
+      "type": "array"
+    },
+    "schema_name": {
+      "const": "lingua.pack.source-policy.v1",
+      "default": "lingua.pack.source-policy.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_classes": {
+      "items": {
+        "$ref": "#/$defs/PackSourceClass"
+      },
+      "title": "Source Classes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "source_classes"
+  ],
+  "title": "PackSourcePolicy",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.pack.source-policy.v1"
+}

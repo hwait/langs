@@ -1,0 +1,72 @@
+{
+  "$defs": {
+    "PackMaturity": {
+      "description": "What a pack may promise. Onboarding offers only what the level supports.",
+      "enum": [
+        "fixture",
+        "pilot",
+        "onboarding-ready",
+        "placement-ready"
+      ],
+      "title": "PackMaturity",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`tests/expectations.json`: what the pack author asserts about their own pack.\n\nA pack ships its own validation test rather than trusting the core's generic\ncoverage gate to notice that a file was accidentally emptied.",
+  "properties": {
+    "maturity": {
+      "$ref": "#/$defs/PackMaturity"
+    },
+    "minimum_counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Minimum Counts",
+      "type": "object"
+    },
+    "refuses_maturity": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PackMaturity"
+      },
+      "title": "Refuses Maturity",
+      "type": "array"
+    },
+    "required_dimensions": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Dimensions",
+      "type": "array"
+    },
+    "required_themes": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Themes",
+      "type": "array"
+    },
+    "schema_name": {
+      "const": "lingua.pack.expectations.v1",
+      "default": "lingua.pack.expectations.v1",
+      "title": "Schema Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "maturity"
+  ],
+  "title": "PackExpectations",
+  "type": "object",
+  "x-linguawiki-semantic-model": "lingua.pack.expectations.v1"
+}

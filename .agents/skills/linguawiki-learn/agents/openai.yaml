@@ -1,0 +1,7 @@
+interface:
+  display_name: "LinguaWiki lesson"
+  short_description: "Plan, teach, and close one lesson so its observations count once"
+  default_prompt: "Use $linguawiki-learn to run today's lesson."
+
+policy:
+  allow_implicit_invocation: true

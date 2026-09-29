@@ -1,0 +1,11 @@
+-- Record when a pack stops shipping an assessment form.
+--
+-- Descriptors and bundles are content records, so an update that drops one marks it
+-- `deprecated` and learner state keeps pointing at a row that says so. An assessment
+-- *definition* is not a content record and had no such marker, so a withdrawn form was
+-- indistinguishable from a current one -- which left `pack_framework_scoping` unable to
+-- tell a form the pack still serves from one it abandoned under an older framework.
+--
+-- Nullable because ALTER TABLE ADD COLUMN cannot be otherwise; a null means 'active',
+-- which is what every row written before this migration was.
+ALTER TABLE assessment_definitions ADD COLUMN status VARCHAR;

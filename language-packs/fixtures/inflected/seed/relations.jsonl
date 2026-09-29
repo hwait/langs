@@ -1,0 +1,4 @@
+{"relation_type": "form-of", "source_key": "qix.form.lumi", "target_key": "qix.lex.lum"}
+{"relation_type": "prerequisite", "source_key": "qix.gram.oblique", "target_key": "qix.lex.lum"}
+{"relation_type": "prerequisite", "source_key": "qix.pron.contrast", "target_key": "qix.form.lumi"}
+{"relation_type": "related", "source_key": "qix.prag.greeting", "target_key": "qix.lex.lum"}

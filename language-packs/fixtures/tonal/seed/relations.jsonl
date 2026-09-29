@@ -1,0 +1,4 @@
+{"relation_type": "prerequisite", "source_key": "ztx.lex.diamond-open", "target_key": "ztx.char.diamond"}
+{"relation_type": "prerequisite", "source_key": "ztx.pron.tone", "target_key": "ztx.char.diamond"}
+{"relation_type": "prerequisite", "source_key": "ztx.gram.classifier", "target_key": "ztx.lex.diamond-open"}
+{"relation_type": "related", "source_key": "ztx.culture.marker", "target_key": "ztx.char.diamond"}

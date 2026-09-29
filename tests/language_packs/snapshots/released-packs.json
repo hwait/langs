@@ -1,0 +1,14 @@
+{
+  "fixture-inflected": {
+    "0.1.0": "7db8003f614bdce5e01492541d317b51dedfcc52a82c1c8d8a9310351dd29a3d",
+    "0.1.1": "b1b43022738fd72d5c0b75bfbd4b931a31d42844683053f294e6ccd4a949e769"
+  },
+  "fixture-tonal": {
+    "0.1.0": "2fb5c11315561aba3846b0cccdb252312be45986100dc29ef986849f1c0098db",
+    "0.1.1": "bb39211d4ad9c0eb17d843d23961bf9108be25b053c88c3e29961dde1ff5a76a"
+  },
+  "pl-pilot": {
+    "0.1.0": "4a2efd6db7d3b8f2990e8beac90a8a02a05a8338476d602d9b0c248fca0a81af",
+    "0.1.1": "5927f339a3f99260ecaa0e1f2e2916fc6eb77ec6e59fb954510f471f7b82e571"
+  }
+}

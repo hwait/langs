@@ -1,22 +1,144 @@
 {
+  "schema_name": "lingua.pack.v1",
   "schema_version": 1,
-  "pack_id": "pak_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "data_format_version": 1,
+  "pack_key": "fixture-inflected",
   "name": "Synthetic Inflected Fixture",
+  "version": "0.1.1",
   "language": "qix-Latn",
+  "scripts": [
+    "Latn"
+  ],
+  "writing_direction": "ltr",
+  "license": "CC0-1.0",
+  "maintainers": [
+    "LinguaWiki contributors"
+  ],
   "maturity": "fixture",
   "frameworks": [
     {
-      "id": "fixture-bands-v1",
-      "levels": ["L1", "L2"]
+      "framework_id": "fixture-bands-v1",
+      "name": "Synthetic Fixture Bands",
+      "version": "1",
+      "source": "synthetic",
+      "levels": [
+        "L1",
+        "L2"
+      ]
     }
   ],
-  "dimensions": ["reading", "listening", "spoken-production", "written-production"],
-  "capabilities": {
-    "word_segmentation": "whitespace",
-    "inflection": true,
-    "grammatical_case": true,
-    "tone": false,
-    "romanization": false
+  "bands": [
+    "L2"
+  ],
+  "dimensions": [
+    "reading",
+    "listening",
+    "spoken-production",
+    "written-production",
+    "form-control"
+  ],
+  "dimension_kinds": {
+    "form-control": "form",
+    "listening": "receptive",
+    "reading": "receptive",
+    "spoken-production": "productive",
+    "written-production": "productive"
   },
-  "content_files": ["content.json"]
+  "modalities": [
+    "text",
+    "audio",
+    "speech",
+    "writing"
+  ],
+  "support_languages": [
+    "en"
+  ],
+  "themes": [
+    "fixture-objects",
+    "fixture-structure",
+    "fixture-sound",
+    "fixture-interaction"
+  ],
+  "bundles": [
+    {
+      "bundle_key": "fixture-l1-core",
+      "file": "resource-bundles/fixture-l1-core.json",
+      "depends_on": []
+    },
+    {
+      "bundle_key": "fixture-l2-core",
+      "file": "resource-bundles/fixture-l2-core.json",
+      "depends_on": [
+        "fixture-l1-core"
+      ]
+    }
+  ],
+  "origin_profiles": {
+    "synthetic": [
+      {
+        "origin_class": "human-authored",
+        "reference": "LinguaWiki synthetic fixture",
+        "locator": null,
+        "transformation": null,
+        "origin_hash": null,
+        "rights": "CC0 synthetic fixture",
+        "privacy": "synthetic"
+      }
+    ]
+  },
+  "review_profiles": {
+    "fixture-verified": {
+      "linguistic": {
+        "state": "reference-verified",
+        "reviewer_kind": "human",
+        "reviewer": "fixture-author",
+        "method": "synthetic fixture review",
+        "evidence_reference": null
+      },
+      "pedagogical": {
+        "state": "teacher-verified",
+        "reviewer_kind": "human",
+        "reviewer": "fixture-author",
+        "method": "synthetic fixture review",
+        "evidence_reference": null
+      },
+      "privacy": {
+        "state": "shareable",
+        "reviewer_kind": "human",
+        "reviewer": "fixture-author",
+        "method": "no learner data",
+        "evidence_reference": null
+      },
+      "rights": {
+        "state": "cleared",
+        "reviewer_kind": "human",
+        "reviewer": "fixture-author",
+        "method": "CC0 fixture policy",
+        "evidence_reference": null
+      },
+      "source-alignment": {
+        "state": "verified",
+        "reviewer_kind": "human",
+        "reviewer": "fixture-author",
+        "method": "generated from the fixture specification",
+        "evidence_reference": null
+      }
+    }
+  },
+  "files": {
+    "activities/fixture-activities.json": "5da3318397b24eca592e4e8404c0d50621bb4fc11f37024c0c0606ced9f6d39e",
+    "assessments/fixture-calibration.json": "6129a498a042ce4f9cdb774f600639730e2cdfbc895a888a0fa6b7e6da6c1569",
+    "capabilities.json": "f336e79e1a8ef007d002b3ede2afaafb0034109b4f659689c271565f4571e3ac",
+    "content.json": "ea8fbeb577a6926c9541c9bcedeb8b6d0195206bebdc7134a2db7d87b73e65d9",
+    "proficiency/fixture-bands-v1.json": "029502b01f5faaf34a37e2cd65c3eda8bec66e5d5a324c309f411552be2231b0",
+    "references/fixture-sources.json": "a1c59ddecb7767e1966555e428e81f779da4fec0b421a1819f7b1226523c9df0",
+    "resource-bundles/fixture-l1-core.json": "22f6441f77accfacfa8679a8f369084744eee22c9e4346d71ce252c05f4718bc",
+    "resource-bundles/fixture-l2-core.json": "baaa80ff703541e7e6c6830f2f6244291cdb32cb895e924b98eb0306e4c4a83f",
+    "seed/examples.jsonl": "d3b8f0ce3e5879968ce0edd11757de0ecee050850a957b7f7e5233d790803f4c",
+    "seed/knowledge.jsonl": "50bc44178e5b828b7e596074089a978d902cf749b12e5af403645c61223cdb01",
+    "seed/relations.jsonl": "214f3b9c150dcde7aef5dd53518ddcd8648dec7371c415fa9a786b54eb379a01",
+    "source-policy.json": "e9cf69a3196ab449ef34c5702da549ab5a2e5fc2057b317f9626bd072e8cf524",
+    "tests/expectations.json": "49713e144060f714af180707ef63b880e225db4e1a45df5cc9b47a35e70ba50d"
+  },
+  "content_address": "b1b43022738fd72d5c0b75bfbd4b931a31d42844683053f294e6ccd4a949e769"
 }

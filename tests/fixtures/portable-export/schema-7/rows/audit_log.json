@@ -1,0 +1,13 @@
+[
+  {
+    "actor": "cli",
+    "affected_records_json": "[\"wsp_01M1H6WPVXDYMNZPWETG4AS8HT\"]",
+    "after_summary": "initialized workspace Synthetic LinguaWiki",
+    "audit_id": "evt_01M1H6WPXHWS6TGSQ4WA0CE6FA",
+    "before_summary": null,
+    "command": "workspace.init",
+    "correlation_id": "evt_01M1H6WPVXCFT31BR9KFX3911R",
+    "outcome": "succeeded",
+    "recorded_at": "2026-01-01T00:00:12Z"
+  }
+]

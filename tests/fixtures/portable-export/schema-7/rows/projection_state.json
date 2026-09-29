@@ -1,0 +1,11 @@
+[
+  {
+    "content_hash": "075f52ee678f4d1dd6ef7ccaf658c4b795fdce256a1c40268e73416eb19a9b70",
+    "generated_at": "2026-01-01T00:00:15Z",
+    "last_event_id": null,
+    "projection": "wiki",
+    "projection_version": 1,
+    "stale": false,
+    "updated_at": "2026-01-01T00:00:15Z"
+  }
+]

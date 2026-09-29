@@ -1,0 +1,13 @@
+[
+  {
+    "actor": "cli",
+    "affected_records_json": "[\"wsp_01M2ABJWCQBVWJVMGPZRZM6BW0\"]",
+    "after_summary": "initialized workspace Polish LinguaWiki",
+    "audit_id": "evt_01M2ABJWV0D45YA4NYMFY7YGWC",
+    "before_summary": null,
+    "command": "workspace.init",
+    "correlation_id": "evt_01M2ABJWCQ36WVF8S45NW9TE9F",
+    "outcome": "succeeded",
+    "recorded_at": "2026-09-12T08:26:16.800781Z"
+  }
+]

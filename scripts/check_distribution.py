@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify release artifacts contain the runtime and Stage 0 resource bundles."""
+"""Verify release artifacts contain the runtime, resource bundles, and shipped packs."""
 
 from __future__ import annotations
 
@@ -16,6 +16,15 @@ WHEEL_RESOURCES = {
     "linguawiki/resources/schemas/lingua.content.v1.json",
     "linguawiki/resources/skills/linguawiki/SKILL.md",
     "linguawiki/resources/templates/learner-workspace/linguawiki.toml.j2",
+    "linguawiki/db/sql/0001_schema_migration_history.sql",
+    "linguawiki/db/sql/0007_projection_and_job_state.sql",
+    "linguawiki/db/sql/0014_curriculum.sql",
+    # A workspace holds no core source, so a pack it installs by key has to travel in
+    # the wheel. Without the seed file itself, `pack install pl-pilot` would resolve the
+    # directory and then fail on a pack whose declared files are absent.
+    "linguawiki/resources/language-packs/pl-pilot/manifest.json",
+    "linguawiki/resources/language-packs/pl-pilot/seed/knowledge.jsonl",
+    "linguawiki/resources/language-packs/fixtures/inflected/manifest.json",
 }
 
 
