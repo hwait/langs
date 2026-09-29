@@ -12,14 +12,21 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_core import CoreSchema, core_schema
 
 from linguawiki import evidence as evidence_policy
 from linguawiki import sources as source_policy
 from linguawiki import transcripts as transcript_policy
 from linguawiki.clock import require_utc, require_utc_if_set, validate_iana_timezone
-from linguawiki.errors import ErrorPayload
+from linguawiki.errors import ErrorDetail, ErrorPayload, LinguaWikiError
 from linguawiki.ids import (
     ActivityId,
     ArtifactId,
@@ -1066,6 +1073,58 @@ class PackProficiencyFile(ContractModel):
         return self
 
 
+class AnswerKey(ContractModel):
+    """The forms a machine-scorable task accepts, typed rather than described.
+
+    `expected` was `dict[str, Any]` whose only rule was "not empty", so `{"answers": []}`,
+    `{"answers": "yes"}` and `{"unrecognized": true}` were all valid packs. Every one of
+    them reaches a scorer as an exception or a silent 0.0, which is a learner's zero
+    resting on a broken pack rather than on anything they did. `ContractModel` is
+    `extra="forbid"`, which is what refuses the unrecognized key.
+
+    A blank member is refused after stripping, not by `min_length=1`: `"   "` is a string
+    of length three that no comparison can ever match, so a pack carrying one declares an
+    answer that cannot be given.
+    """
+
+    answers: tuple[NonBlankStr, ...] = Field(min_length=1)
+
+
+def parse_answer_key(raw: str | None) -> AnswerKey:
+    """Read a stored answer key, refusing by name whichever rule it breaks.
+
+    The one place an answer key is parsed: the scorer, `pack validate`, and `db check` all
+    come through here, so "what is a usable key" has a single answer. Revalidation is the
+    point rather than a formality -- a serve-time snapshot is a round trip through JSON
+    and can be hand-edited, damaged, or restored from another release between the serve
+    and the score, and neither `assessment_run_tasks.expected_json` nor the column it was
+    copied from could carry a `json_valid` constraint (DuckDB refuses a constrained
+    `ALTER TABLE ADD COLUMN`).
+    """
+
+    def refuse(reason: str) -> LinguaWikiError:
+        return LinguaWikiError(
+            "assessment_answer_key_malformed",
+            f"the answer key cannot be used to score: {reason}",
+            details=(ErrorDetail(field="expected", reason=reason),),
+        )
+
+    if raw is None or not raw.strip():
+        raise refuse("no answer key was recorded for this task")
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise refuse(f"not valid JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise refuse(f"not a JSON object but {type(document).__name__}")
+    try:
+        return AnswerKey.model_validate(document)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        field = ".".join(str(part) for part in first["loc"]) or "expected"
+        raise refuse(f"{field} {first['msg'].lower()}") from exc
+
+
 class PackAssessmentTask(ContractModel):
     """One bank item. `difficulty` is on the ordinal grid the staircase works on."""
 
@@ -1085,7 +1144,7 @@ class PackAssessmentTask(ContractModel):
     prompt: str = Field(min_length=1)
     rubric_version: int = Field(default=1, ge=1)
     rubric: dict[str, Any] = Field(default_factory=dict)
-    expected: dict[str, Any] = Field(default_factory=dict)
+    expected: AnswerKey | None = None
     permitted_help: str = "none"
     is_anchor: bool = False
     target_keys: tuple[str, ...] = ()
@@ -1093,7 +1152,7 @@ class PackAssessmentTask(ContractModel):
 
     @model_validator(mode="after")
     def scored_tasks_declare_how_they_are_scored(self) -> PackAssessmentTask:
-        if self.task_type in {"objective", "short-response"} and not self.expected:
+        if self.task_type in {"objective", "short-response"} and self.expected is None:
             raise ValueError(f"{self.task_type} task must declare its expected answers")
         if self.task_type not in {"objective", "short-response"} and not self.rubric:
             raise ValueError(f"{self.task_type} task must declare a rubric")

@@ -1545,7 +1545,14 @@ def _install_assessments(database: Database, pack: LoadedPack, *, pack_id: str) 
                 task.prompt,
                 task.rubric_version,
                 json.dumps(task.rubric, ensure_ascii=False, sort_keys=True),
-                json.dumps(task.expected, ensure_ascii=False, sort_keys=True),
+                # A task with no key stores `{}`, the column's own default: the bank
+                # column is NOT NULL, and `expected_json` there has always meant
+                # "nothing to compare against" for a rubric-scored task.
+                json.dumps(
+                    {} if task.expected is None else task.expected.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
                 task.permitted_help,
                 task.is_anchor,
                 json.dumps(

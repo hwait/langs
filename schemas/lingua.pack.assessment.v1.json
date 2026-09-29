@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "AnswerKey": {
+      "additionalProperties": false,
+      "description": "The forms a machine-scorable task accepts, typed rather than described.\n\n`expected` was `dict[str, Any]` whose only rule was \"not empty\", so `{\"answers\": []}`,\n`{\"answers\": \"yes\"}` and `{\"unrecognized\": true}` were all valid packs. Every one of\nthem reaches a scorer as an exception or a silent 0.0, which is a learner's zero\nresting on a broken pack rather than on anything they did. `ContractModel` is\n`extra=\"forbid\"`, which is what refuses the unrecognized key.\n\nA blank member is refused after stripping, not by `min_length=1`: `\"   \"` is a string\nof length three that no comparison can ever match, so a pack carrying one declares an\nanswer that cannot be given.",
+      "properties": {
+        "answers": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Answers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "answers"
+      ],
+      "title": "AnswerKey",
+      "type": "object"
+    },
     "OriginClass": {
       "description": "Controlled item-level origin classes from the pack-authoring workflow.",
       "enum": [
@@ -33,9 +53,15 @@
           "type": "string"
         },
         "expected": {
-          "additionalProperties": true,
-          "title": "Expected",
-          "type": "object"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnswerKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "is_anchor": {
           "default": false,

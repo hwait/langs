@@ -207,7 +207,7 @@
   },
   "files": {
     "activities/pl-a2-activities.json": "58dfde870431c76fb64c83826f2e993aa87af10cf5e36505c54994abcf249fe4",
-    "assessments/pl-a2-calibration.json": "4c8bac53b2d384582e57741e002f5508cee7ab88206925683735c553478a38b4",
+    "assessments/pl-a2-calibration.json": "c283811eb39fe254b8b82c0b0e7dc3eaa2cd7c688ac3a9e1533ce1a9c489c746",
     "capabilities.json": "3c5da78aa3879401c8f9e8088c716a595070f829fdee02cabbbf3607fb523b5b",
     "proficiency/cefr.json": "92d139981ee20032ed0f69752115b3b76a3347a85b8e33fba0c0f9763e873ec2",
     "references/pl-a2-sources.json": "6407a01a9cb269432e23cc6287bd93e7844ceeaf440869ba40907ac2d34bfe15",
@@ -219,5 +219,5 @@
     "source-policy.json": "f8301f5b92063b22432c9dd6724c172829b40b3868d9df803855e47b490bb51c",
     "tests/expectations.json": "2ae012d7ebb35cec8b4a8da880f63937526f08fd8bbdd84abe2b3d9641e4a667"
   },
-  "content_address": "4a2efd6db7d3b8f2990e8beac90a8a02a05a8338476d602d9b0c248fca0a81af"
+  "content_address": "086976f69d83cdef2af184ebe9f296f62f25e0f18338dbce8184e0b73874eb4d"
 }

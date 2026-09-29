@@ -84,7 +84,7 @@
       "modality": "speech",
       "prompt": "Say three fixture sentences about a diamond.",
       "provenance": {
-        "content_hash": "9408ffda9df28faaa6c99dd094d85379bf4f6e545ab4128c0a4119d042492ab1",
+        "content_hash": "3e46c7a4e9860aed2ac510e4fa8a36390e978ea73972ffea407aeb4e21df781a",
         "lifecycle": "verified",
         "origin_profile": "synthetic",
         "review_profile": "fixture-verified",
@@ -108,7 +108,7 @@
       "modality": "writing",
       "prompt": "Write three fixture sentences.",
       "provenance": {
-        "content_hash": "672f37e6c34ec33b60802ebb76c6938f9d0c63ea1eca26fd315a24de28b65ef3",
+        "content_hash": "752b5ea274a11b2474ebb132afbb6e2e227f161da31d31a070b90d2c545b1db9",
         "lifecycle": "verified",
         "origin_profile": "synthetic",
         "review_profile": "fixture-verified",
@@ -132,7 +132,7 @@
       "modality": "speech",
       "prompt": "Produce the fixture length contrast.",
       "provenance": {
-        "content_hash": "1a05dcb93724fb63f81a20eaeb817d8aaeeaadff9964956148d5fa2c0bf00bbd",
+        "content_hash": "ce3711547212f3668919f467167202df9cce324ee194833d9f8c976b5f67e2fe",
         "lifecycle": "verified",
         "origin_profile": "synthetic",
         "review_profile": "fixture-verified",

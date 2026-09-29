@@ -269,3 +269,163 @@ def test_the_delivery_stage_constant_matches_the_wire_literal() -> None:
     annotation = StatusData.model_fields["stage"].annotation
     assert annotation is not None
     assert annotation.__args__ == (DELIVERY_STAGE,)  # type: ignore[attr-defined]
+
+
+def test_an_answer_key_must_carry_at_least_one_answer_that_can_be_matched() -> None:
+    """A malformed key is refused where it is authored, not where a learner is scored.
+
+    `expected` was `dict[str, Any]`, so `{"answers": []}`, `{"answers": "yes"}` and
+    `{"unrecognized": true}` all validated. Every one of them reaches a scorer as either
+    an exception or a silent 0.0 -- a learner's zero standing on a broken pack.
+    """
+
+    from linguawiki.contracts import AnswerKey
+
+    for rejected in (
+        {},
+        {"answers": []},
+        {"answers": "yes"},
+        {"unrecognized": True},
+        {"answers": ["yes"], "unrecognized": True},
+        {"answers": [1]},
+        {"answers": ["yes", ""]},
+        {"answers": ["yes", "   "]},
+    ):
+        with pytest.raises(PydanticValidationError):
+            AnswerKey.model_validate(rejected)
+    assert AnswerKey.model_validate({"answers": ["tak", "yes"]}).answers == ("tak", "yes")
+
+
+def test_a_scored_task_types_its_answer_key_rather_than_describing_it() -> None:
+    from linguawiki.contracts import PackAssessmentTask
+
+    common: dict[str, Any] = {
+        "stable_key": "pl.task.one",
+        "dimension": "reading",
+        "level": "A2",
+        "difficulty": 1.0,
+        "content_family": "family",
+        "modality": "text",
+        "prompt": "prompt",
+        "provenance": {
+            "origin_profile": "authored",
+            "review_profile": "verified",
+            "lifecycle": "verified",
+            "risk_tier": 2,
+            "content_hash": "a" * 64,
+        },
+    }
+
+    with pytest.raises(PydanticValidationError):
+        PackAssessmentTask.model_validate(
+            {**common, "task_type": "short-response", "expected": {"answers": []}}
+        )
+    with pytest.raises(PydanticValidationError):
+        PackAssessmentTask.model_validate(
+            {**common, "task_type": "short-response", "expected": {"unrecognized": True}}
+        )
+    task = PackAssessmentTask.model_validate(
+        {**common, "task_type": "short-response", "expected": {"answers": ["w środę"]}}
+    )
+    assert task.expected is not None
+    assert task.expected.answers == ("w środę",)
+    assert (
+        PackAssessmentTask.model_validate(
+            {**common, "task_type": "extended-productive", "rubric": {"version": 1}}
+        ).expected
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        (None, "no answer key"),
+        ("", "no answer key"),
+        ("{", "not JSON"),
+        ("[]", "not an object"),
+        ('"answers"', "not an object"),
+        ("{}", "no answers"),
+        ('{"answers": []}', "empty"),
+        ('{"answers": "yes"}', "not a list"),
+        ('{"answers": [1]}', "not a string"),
+        ('{"answers": ["  "]}', "blank"),
+        ('{"answers": ["yes"], "other": 1}', "unknown key"),
+    ],
+)
+def test_a_stored_answer_key_is_revalidated_on_the_way_out(raw: str | None, reason: str) -> None:
+    """The snapshot is a round trip through JSON and can be damaged between serve and score."""
+
+    from linguawiki.contracts import parse_answer_key
+    from linguawiki.errors import LinguaWikiError
+
+    with pytest.raises(LinguaWikiError) as failure:
+        parse_answer_key(raw)
+
+    assert failure.value.payload.code == "assessment_answer_key_malformed"
+    assert failure.value.payload.details, f"{reason} must name the rule that failed"
+
+
+def test_a_well_formed_stored_answer_key_parses() -> None:
+    from linguawiki.contracts import parse_answer_key
+
+    assert parse_answer_key('{"answers": ["tak"]}').answers == ("tak",)
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_a_model_produced_assessment_file_validates_against_its_published_schema(
+    optional: bool,
+) -> None:
+    """The model and the published schema describe one payload, so test them on real output.
+
+    Once with only the required fields, so the *defaults* are what is under test, and once
+    with every optional field set. A nullable field whose default is `null` satisfying the
+    union while failing a constraint declared beside it is exactly how a valid model dump
+    stopped validating against its own contract before.
+    """
+
+    from linguawiki.contracts import PackAssessmentFile, PackAssessmentTask
+
+    required: dict[str, Any] = {
+        "stable_key": "pl.task.one",
+        "dimension": "reading",
+        "task_type": "extended-productive",
+        "level": "A2",
+        "difficulty": 1.0,
+        "content_family": "family",
+        "modality": "writing",
+        "prompt": "prompt",
+        "rubric": {"dimensions": []},
+        "provenance": {
+            "origin_profile": "authored",
+            "review_profile": "verified",
+            "lifecycle": "verified",
+            "risk_tier": 2,
+            "content_hash": "a" * 64,
+        },
+    }
+    if optional:
+        required = {
+            **required,
+            "task_type": "short-response",
+            "modality": "text",
+            "rubric_version": 3,
+            "expected": {"answers": ["tak", "owszem"]},
+            "permitted_help": "dictionary-allowed",
+            "is_anchor": True,
+            "target_keys": ("pl.item.one",),
+        }
+    document = PackAssessmentFile.model_validate(
+        {
+            "form_key": "pl-a2-calibration",
+            "version": 1,
+            "purpose": "pilot-calibration",
+            "framework": "cefr",
+            "level_min": "A1",
+            "level_max": "B1",
+            "title": "Calibration",
+            "tasks": [PackAssessmentTask.model_validate(required).model_dump(mode="json")],
+        }
+    ).model_dump(mode="json")
+
+    validate_json_contract("lingua.pack.assessment.v1", document, schema_directory=SCHEMAS)

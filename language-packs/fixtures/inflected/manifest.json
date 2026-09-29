@@ -127,7 +127,7 @@
   },
   "files": {
     "activities/fixture-activities.json": "5da3318397b24eca592e4e8404c0d50621bb4fc11f37024c0c0606ced9f6d39e",
-    "assessments/fixture-calibration.json": "de2751d9d121db15d6d213de6cde990f22127b5b19b4db42781c39d93c376c82",
+    "assessments/fixture-calibration.json": "6129a498a042ce4f9cdb774f600639730e2cdfbc895a888a0fa6b7e6da6c1569",
     "capabilities.json": "f336e79e1a8ef007d002b3ede2afaafb0034109b4f659689c271565f4571e3ac",
     "content.json": "ea8fbeb577a6926c9541c9bcedeb8b6d0195206bebdc7134a2db7d87b73e65d9",
     "proficiency/fixture-bands-v1.json": "029502b01f5faaf34a37e2cd65c3eda8bec66e5d5a324c309f411552be2231b0",
@@ -140,5 +140,5 @@
     "source-policy.json": "e9cf69a3196ab449ef34c5702da549ab5a2e5fc2057b317f9626bd072e8cf524",
     "tests/expectations.json": "49713e144060f714af180707ef63b880e225db4e1a45df5cc9b47a35e70ba50d"
   },
-  "content_address": "7db8003f614bdce5e01492541d317b51dedfcc52a82c1c8d8a9310351dd29a3d"
+  "content_address": "4dbfe8937b4de6ba7ac0d0993071d54b4b8af0a2413bf562b387c7b7386c2d8a"
 }

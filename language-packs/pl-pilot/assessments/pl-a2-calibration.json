@@ -645,7 +645,7 @@
       "permitted_help": "dictionary-not-allowed",
       "prompt": "Write a message of about 40 words to a neighbour saying that the washing machine is broken and asking when the repair is possible.",
       "provenance": {
-        "content_hash": "471c8711e9d34cb7ca50504c02b3c67cb0b345b5618464458931630d8e92d236",
+        "content_hash": "b0e0f96ec063202f30be0c4f89584f6eb9b5edaf7852340334a09007291426dd",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -706,7 +706,7 @@
       "permitted_help": "dictionary-not-allowed",
       "prompt": "Write a short email of about 60 words to a hotel: you arrive tomorrow, your train is delayed, and you ask whether a late check-in is possible.",
       "provenance": {
-        "content_hash": "4ca5fa4d4c5abed3003ca2f513b070605ba6b9f83012118c87d2721cc623a1b7",
+        "content_hash": "a86cdcb882a65f738e77275c8c86765e2caa967ecbda7c0298dcb6b7324cdf43",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -767,7 +767,7 @@
       "permitted_help": "dictionary-not-allowed",
       "prompt": "Write about 60 words asking your manager to move a meeting from Monday to Wednesday, and give a reason.",
       "provenance": {
-        "content_hash": "3fb1027ea13c2897e37134a3e4f3607137a4e0e73e483f3861f458f8c3b84207",
+        "content_hash": "d079cb123007046282b6bda59c3ae863372d3000cccb36802a24620a08666d4f",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -828,7 +828,7 @@
       "permitted_help": "dictionary-not-allowed",
       "prompt": "Write about 80 words describing a visit to the doctor: your symptoms, what the doctor said, and what you have to do now.",
       "provenance": {
-        "content_hash": "5e0cad38d4734e230a6a243e5e917c0f8acc31757b14c206cee47d8f512b1912",
+        "content_hash": "43a812d5a0adf7ee23712baa296d3ae15abeff6be03a8be515e186408bdca1a7",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -889,7 +889,7 @@
       "permitted_help": "dictionary-not-allowed",
       "prompt": "Order a meal and a drink in a restaurant, ask one question about a dish, and ask for the bill. Speak for about one minute.",
       "provenance": {
-        "content_hash": "e8a4f0c44ce8a4e11e5dca29b7e61eaed0081c0f3ba613d25195201984c1d316",
+        "content_hash": "4a00e5156082faefb616734bb3da2a73bb8fd6194f8c7bb29fd0ffd21672b33e",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -950,7 +950,7 @@
       "permitted_help": "dictionary-not-allowed",
       "prompt": "Explain at a ticket office that you want a return ticket, ask about the platform and about a change of train. Speak for about one minute.",
       "provenance": {
-        "content_hash": "2218fe0790f6996f1770cd333344eb5560e0d0d499d29db3b676b1d9554e1b20",
+        "content_hash": "6687089a039fa2528d9dab8624af1d0fe5a780904da15a623430d44d0a836ed6",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1011,7 +1011,7 @@
       "permitted_help": "dictionary-not-allowed",
       "prompt": "Describe your flat and your daily routine at home in about a minute and a half.",
       "provenance": {
-        "content_hash": "4930855ed3e4b561e219dddf0dd2acacb3857fb978050938b8c1477c39f1671a",
+        "content_hash": "127e58bdd82f918e39966fa000ac723d418dfeccfb0983c04fc1af03c54914e2",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1072,7 +1072,7 @@
       "permitted_help": "dictionary-not-allowed",
       "prompt": "Describe your work, one colleague, and a typical meeting, and say what you would change. Speak for about two minutes.",
       "provenance": {
-        "content_hash": "2b8a1be3a18cc5925d5a7dbdda433d38b76aae8a702f9a4b1ae996c5142166d2",
+        "content_hash": "3e7d734ef7116c588b974273aa6d8e20af7283928b63d3c5ad1f526f22f73764",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1133,7 +1133,7 @@
       "permitted_help": "none",
       "prompt": "Say 'kasza' and 'Kasia' so the sz/ś contrast is audible.",
       "provenance": {
-        "content_hash": "4960396ebfe347b75b28e69fa472990d61ac388f8b232848d9417c1e33955e51",
+        "content_hash": "fd5b1555d4998f421ad86d5ed75652a27db691bed7a739feb99dea51f4b3f321",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1177,7 +1177,7 @@
       "permitted_help": "none",
       "prompt": "Say 'czy' and 'ci' so the cz/ć contrast is audible.",
       "provenance": {
-        "content_hash": "6f37dc16fcd0d996dfd2f57b9ae643603056fb577e64b8373338b9265db7ea34",
+        "content_hash": "11e73fa5e64b8c945acc187d234a9762b5e664d9c166d3f1f06c6352297c36d8",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1221,7 +1221,7 @@
       "permitted_help": "none",
       "prompt": "Say 'wąż' and 'wąs': keep the nasal vowel and the final consonant distinct.",
       "provenance": {
-        "content_hash": "9745fc70d9ad5484330390577c95e796ef95200f305e0ee1636252a0658fa472",
+        "content_hash": "41d9d5b6fad493c034863f74e414e9be29603c380e7f703de81e13c8f01bb529",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1265,7 +1265,7 @@
       "permitted_help": "none",
       "prompt": "Say 'dzwon', 'dźwig' and 'dżem' in one breath group.",
       "provenance": {
-        "content_hash": "04a8a632de6b6075019f48181cc7137a9c175132f83982b6c75a6cf38139e057",
+        "content_hash": "d10876f312abaf98924145b4e42ba8cc592381f4b63df3a58cb453846d8e73af",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1309,7 +1309,7 @@
       "permitted_help": "none",
       "prompt": "Say 'łódka' and 'udka': the ł must be a glide, not an l.",
       "provenance": {
-        "content_hash": "caa22cf0e5dbd6c106075a86ce4baf4cd38d1de265c55bdf5453387843040efb",
+        "content_hash": "7293615708f9deb3b54ce5b9f613f762999a380fb57394d94339afe3479fb0f5",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1353,7 +1353,7 @@
       "permitted_help": "none",
       "prompt": "Read aloud: 'Mieszkanie jest niedaleko dworca, koło apteki.' Keep the penultimate stress in every word.",
       "provenance": {
-        "content_hash": "9b54b2e500725ea4ae7e2397e289599831c162beefe2d5ba91d29330ddfb8c8c",
+        "content_hash": "85dbdf1ab6f54b85fe90dd0f16bbbbf8aed4cbbf839ed9829fec6d400156430e",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1397,7 +1397,7 @@
       "permitted_help": "none",
       "prompt": "Read aloud: 'Kupiłem chleb i róg w piekarni obok.' Devoice the final consonants.",
       "provenance": {
-        "content_hash": "c88fa3005b8f961aa7ac0dfa410455068ab9ec0cf8565958a76174389f717f8e",
+        "content_hash": "1022eff25121d0edea61fe36550d39271679156a17b8c7f6cb72249603941cd1",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
