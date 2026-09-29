@@ -753,13 +753,18 @@ def _served_answer_key_checks(database: Database) -> list[CheckResult]:
     """
 
     checks: list[CheckResult] = []
+    # "Present" here means what it means to the writer: a non-null, non-empty value.
+    # Reading it as `IS NOT NULL` alone passed a row holding `''` that `record` refuses as
+    # a partial snapshot -- a check that mirrors half the writer's predicate calls damage
+    # healthy, which is the reading an operator then trusts.
     partial = [
         f"{run_id}/{content_id}"
         for run_id, content_id in database.query(
             "SELECT run_id, content_id FROM assessment_run_tasks WHERE ("
-            "  expected_json IS NULL OR prompt_snapshot IS NULL OR rubric_json IS NULL) AND ("
-            "  expected_json IS NOT NULL OR prompt_snapshot IS NOT NULL "
-            "  OR rubric_json IS NOT NULL) "
+            "  coalesce(expected_json, '') = '' OR coalesce(prompt_snapshot, '') = '' "
+            "  OR coalesce(rubric_json, '') = '') AND ("
+            "  coalesce(expected_json, '') <> '' OR coalesce(prompt_snapshot, '') <> '' "
+            "  OR coalesce(rubric_json, '') <> '') "
             "ORDER BY run_id, content_id"
         )
     ]

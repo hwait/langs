@@ -746,3 +746,40 @@ def test_db_check_finds_a_result_that_kept_other_than_what_it_says(
     check = _checks(polish_workspace)["result_response_retention"]
 
     assert check.status == "failed", damage  # type: ignore[attr-defined]
+
+
+def test_an_empty_snapshot_column_is_damage_to_both_the_scorer_and_db_check(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """Absent means NULL. A column holding `''` is damage, and both readers must agree.
+
+    The service answered "is this present?" with truthiness while `db check` answered it
+    with `IS NOT NULL`, so an empty string read as a legacy row to one and as a partial
+    snapshot to the other -- the scorer would have fallen back to the mutable bank for a
+    record that `db check` was calling damaged.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET prompt_snapshot = '' WHERE run_id = ? AND content_id = ?",
+        [run.run_id, served.content_id],
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response=correct,
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_snapshot_partial"
+    check = _checks(polish_workspace)["served_answer_key_complete"]
+    assert check.status == "failed", (  # type: ignore[attr-defined]
+        "db check passed a row the writer refuses"
+    )
+    assert served.content_id in "".join(check.context.values())  # type: ignore[attr-defined]

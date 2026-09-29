@@ -893,7 +893,14 @@ def _scorable_key(
     """
 
     expected_json, prompt_snapshot, rubric_json = snapshot
-    present = [column for column in (expected_json, prompt_snapshot, rubric_json) if column]
+    # Present means non-null *and* non-empty: a prompt of `''` is not a prompt anybody was
+    # shown, and reading it as absent would send this row to the bank. `db check` defines
+    # presence the same way, so the two cannot disagree about which rows are damaged.
+    present = [
+        column
+        for column in (expected_json, prompt_snapshot, rubric_json)
+        if column not in (None, "")
+    ]
     if len(present) == 3:
         return _ScorableKey(parse_answer_key(str(expected_json)).answers, "run-snapshot")
     if present:
