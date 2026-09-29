@@ -479,7 +479,9 @@ def test_a_caller_supplied_excerpt_goes_through_the_same_consent_rule(
         polish_workspace, run.run_id, served.content_id
     )
     assert (visibility, excerpt) == ("withheld", None)
-    assert digest
+    # No hash either: the caller supplied its own truncation, not the learner's answer,
+    # so there is nothing here a later response could honestly be checked against.
+    assert digest is None
 
 
 def test_a_response_and_an_excerpt_are_two_accounts_of_one_answer(
@@ -783,3 +785,340 @@ def test_an_empty_snapshot_column_is_damage_to_both_the_scorer_and_db_check(
         "db check passed a row the writer refuses"
     )
     assert served.content_id in "".join(check.context.values())  # type: ignore[attr-defined]
+
+
+def test_recording_the_same_answer_twice_is_a_no_op(polish_workspace: PolishWorkspace) -> None:
+    """Retrying is safe: the same observation must never be credited twice."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+
+    for _ in range(2):
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response=correct,
+            clock=polish_workspace.clock,
+        )
+
+    with open_reader(polish_workspace.paths) as database:
+        results = database.scalar(
+            "SELECT count(*) FROM assessment_results WHERE run_id = ? AND content_id = ?",
+            [run.run_id, served.content_id],
+        )
+    assert int(results) == 1
+
+
+def test_re_recording_a_different_answer_is_a_conflict_rather_than_a_silent_no_op(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """Retrying is safe; overwriting is not, and neither is reporting success for neither.
+
+    The answered-task guard returned the run report unchanged, so a caller correcting a
+    mistyped answer got exit 0, a full report, and the original score still standing. It
+    had been told the correction landed.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        response="w czwartek, a mistyped answer",
+        clock=polish_workspace.clock,
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response=correct,
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_result_conflict"
+    assert _result_row(polish_workspace, run.run_id, served.content_id)[0] == 0.0
+
+
+def test_a_supplied_score_that_contradicts_the_recorded_one_is_refused_by_its_value(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        score=0.5,
+        clock=polish_workspace.clock,
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            score=1.0,
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_result_conflict"
+    assert "0.5" in str(failure.value.payload.details[0].context), "the recorded value is named"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "code"),
+    [
+        ({"response_visibility": "full"}, "transcript_consent_required"),
+        ({"response": "   "}, "invalid_arguments"),
+    ],
+)
+def test_an_answered_task_still_reaches_the_refusals_that_guard_a_first_attempt(
+    polish_workspace: PolishWorkspace, kwargs: dict[str, str], code: str
+) -> None:
+    """A guard placed after the path it guards is not a guard.
+
+    With the answered-task return above them, every refusal this stage added was
+    unreachable on a second call: asking to keep the full text without consent returned
+    exit 0, and the caller believed the transcript had been retained.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        response=correct,
+        clock=polish_workspace.clock,
+    )
+    _decline_transcripts(polish_workspace)
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            **{"response": correct, **kwargs},
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == code
+
+
+def test_an_all_empty_snapshot_is_damage_rather_than_a_pre_migration_row(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A genuine pre-0030 row holds NULL. Three empty strings are post-hoc damage.
+
+    Reading them as absent sent the row down the legacy branch and scored the learner off
+    the live, mutable bank the snapshot exists to replace -- while `db check` was
+    simultaneously reporting the same row as unreadable.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET expected_json = '', prompt_snapshot = '', "
+        "rubric_json = '' WHERE run_id = ? AND content_id = ?",
+        [run.run_id, served.content_id],
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response=correct,
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_snapshot_partial"
+    assert _checks(polish_workspace)["served_answer_key_complete"].status == "failed"  # type: ignore[attr-defined]
+
+
+def test_an_unreadable_rubric_body_is_refused_rather_than_scored_around(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """`db check` reports the record as damaged, so the scorer must not credit a score off it."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET rubric_json = ? WHERE run_id = ? AND content_id = ?",
+        ["{", run.run_id, served.content_id],
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response=correct,
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_answer_key_malformed"
+    assert _checks(polish_workspace)["served_answer_key_wellformed"].status == "failed"  # type: ignore[attr-defined]
+
+
+def test_db_check_reports_rather_than_raising_on_json_no_parser_will_accept(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A check is code, and inherits every weakness it was written to find.
+
+    Deeply nested but otherwise valid JSON raises `RecursionError`, which is not a
+    `ValueError` and so escaped every defensive parse here. A diagnostic that aborts with
+    a traceback tells an operator less than one that names the row.
+    """
+
+    run_id, content_id = _scored_run(polish_workspace)
+    nested = "[" * 20000 + "]" * 20000
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET expected_json = ?, rubric_json = ? "
+        "WHERE run_id = ? AND content_id = ?",
+        [nested, nested, run_id, content_id],
+    )
+
+    check = _checks(polish_workspace)["served_answer_key_wellformed"]
+
+    assert check.status == "failed"  # type: ignore[attr-defined]
+    assert content_id in "".join(check.context.values())  # type: ignore[attr-defined]
+
+
+def test_a_response_scored_against_unparseable_json_is_refused_not_crashed(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET expected_json = ? WHERE run_id = ? AND content_id = ?",
+        ["[" * 20000 + "]" * 20000, run.run_id, served.content_id],
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            response="cokolwiek",
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_answer_key_malformed"
+
+
+def test_a_caller_supplied_excerpt_does_not_pose_as_a_hash_of_the_whole_answer(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A field's name is a promise about what it counts.
+
+    `response_hash` exists so a withheld answer can be checked against one offered later.
+    Hashing a caller's own truncation under that name answers "no" for the learner's real
+    answer, which is the opposite of what the column is for -- and nothing on the row says
+    the hash covers something narrower.
+    """
+
+    import hashlib
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    excerpt = "w śro"
+
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        score=1.0,
+        response_excerpt=excerpt,
+        clock=polish_workspace.clock,
+    )
+
+    _score, _source, _policy, visibility, stored, digest = _result_row(
+        polish_workspace, run.run_id, served.content_id
+    )
+    assert (visibility, stored) == ("excerpt", excerpt)
+    assert digest is None, "no whole answer was ever supplied, so none can be attested"
+    assert digest != hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+
+
+def test_a_full_response_is_hashed_whole_even_when_only_an_excerpt_survives(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    import hashlib
+
+    from linguawiki.services.evidence import EXCERPT_LIMIT
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    long_answer = "w środę " + "bardzo długa odpowiedź " * 40
+    assert len(long_answer) > EXCERPT_LIMIT
+
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        score=1.0,
+        response=long_answer,
+        clock=polish_workspace.clock,
+    )
+
+    *_head, stored, digest = _result_row(polish_workspace, run.run_id, served.content_id)
+    assert stored == long_answer[:EXCERPT_LIMIT]
+    assert digest == hashlib.sha256(long_answer.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("what", ["missing", "a directory", "undecodable"])
+def test_a_response_file_that_cannot_be_read_is_an_answer_not_a_crash(
+    polish_workspace: PolishWorkspace, capsys: pytest.CaptureFixture[str], tmp_path, what: str
+) -> None:
+    """Reading a file can fail, and "cannot be read" is usually an answer to report.
+
+    Letting `FileNotFoundError` and `UnicodeDecodeError` reach the envelope turned a
+    mistyped path and a latin-1 answer file into `internal_error`, which tells a skill
+    nothing it can act on.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    if what == "missing":
+        target = tmp_path / "nowhere.txt"
+    elif what == "a directory":
+        target = tmp_path / "adirectory"
+        target.mkdir()
+    else:
+        target = tmp_path / "latin1.txt"
+        target.write_bytes("w środę".encode("latin-1", errors="replace"))
+        target.write_bytes(b"\xff\xfe not utf-8")
+    capsys.readouterr()
+
+    assert (
+        _cli(
+            polish_workspace,
+            "assessment",
+            "record",
+            "--run",
+            run.run_id,
+            "--content",
+            served.content_id,
+            "--response-file",
+            str(target),
+        )
+        != 0
+    )
+
+    error = _cli_error(capsys)
+    assert error["code"] == "response_unreadable", error
+    assert str(target) in str(error["message"])

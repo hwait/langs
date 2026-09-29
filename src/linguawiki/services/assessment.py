@@ -26,7 +26,7 @@ from typing import Any
 from pydantic import Field
 
 from linguawiki.clock import Clock, SystemClock, aware_utc
-from linguawiki.contracts import PackMaturity, parse_answer_key
+from linguawiki.contracts import PackMaturity, parse_answer_key, reads_as_json_object
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.connection import Database, open_reader, open_writer
 from linguawiki.errors import ErrorDetail, LinguaWikiError
@@ -893,17 +893,28 @@ def _scorable_key(
     """
 
     expected_json, prompt_snapshot, rubric_json = snapshot
-    # Present means non-null *and* non-empty: a prompt of `''` is not a prompt anybody was
-    # shown, and reading it as absent would send this row to the bank. `db check` defines
-    # presence the same way, so the two cannot disagree about which rows are damaged.
-    present = [
-        column
-        for column in (expected_json, prompt_snapshot, rubric_json)
-        if column not in (None, "")
-    ]
-    if len(present) == 3:
-        return _ScorableKey(parse_answer_key(str(expected_json)).answers, "run-snapshot")
-    if present:
+    columns = (expected_json, prompt_snapshot, rubric_json)
+    # Whole or wholly absent, and nothing between. Absent is NULL specifically: a genuine
+    # pre-0030 row has never held anything else, so three empty strings are damage a
+    # restore or a hand-edit left behind -- and reading them as absent sent the row down
+    # the legacy branch to be scored off the live, mutable bank the snapshot exists to
+    # replace. `served_answer_key_complete` draws the line in the same place, so the
+    # writer and the diagnostic cannot describe one row two ways.
+    if all(column is None for column in columns):
+        pass
+    elif all(column is not None and str(column).strip() for column in columns):
+        key = parse_answer_key(str(expected_json))
+        # The rubric body travels with the key and is part of the same record. A record
+        # `db check` calls unreadable must not quietly produce a credited score.
+        if not reads_as_json_object(str(rubric_json)):
+            raise LinguaWikiError(
+                "assessment_answer_key_malformed",
+                f"the record of serving {content_id} cannot be read: its rubric body is "
+                "not a JSON object",
+                details=(ErrorDetail(field="rubric_json", reason="not a JSON object"),),
+            )
+        return _ScorableKey(key.answers, "run-snapshot")
+    else:
         raise LinguaWikiError(
             "assessment_snapshot_partial",
             f"the run holds a partial record of serving {content_id}: it can establish "
@@ -913,7 +924,17 @@ def _scorable_key(
                 ErrorDetail(
                     field="content_id",
                     reason="partial served snapshot",
-                    context={"present": str(len(present))},
+                    context={
+                        "present": ", ".join(
+                            name
+                            for name, column in zip(
+                                ("expected_json", "prompt_snapshot", "rubric_json"),
+                                columns,
+                                strict=True,
+                            )
+                            if column is not None
+                        )
+                    },
                 ),
             ),
         )
@@ -932,7 +953,73 @@ def _scorable_key(
     bank = database.scalar(
         "SELECT expected_json FROM assessment_tasks WHERE content_id = ?", [content_id]
     )
-    return _ScorableKey(parse_answer_key(None if bank is None else str(bank)).answers, "bank")
+    if bank is None:
+        # The foreign key from `assessment_run_tasks.content_id` should make this
+        # unreachable, which is exactly why it is spelled out rather than left to
+        # `parse_answer_key(None)`: were the relation ever dropped or restored without
+        # it, "your answer key is broken" would be the wrong account of "the pack no
+        # longer holds this task", and a caller acts on the code.
+        raise LinguaWikiError(
+            "assessment_score_required",
+            f"{content_id} was served before its answer key was recorded, and the pack no "
+            "longer holds the task, so nothing here can say what the learner was asked; "
+            "supply a score",
+            details=(ErrorDetail(field="score", reason="the bank no longer holds the task"),),
+        )
+    return _ScorableKey(parse_answer_key(str(bank)).answers, "bank")
+
+
+def _assert_repeat(
+    database: Database,
+    *,
+    run_id: str,
+    content_id: str,
+    score: float,
+    response_hash: str | None,
+) -> None:
+    """Accept a retry of a recorded result, and refuse a second, different one.
+
+    Retrying is safe; overwriting is not, and neither is answering a different request
+    with the first one's outcome. The observation is the score and the answer it rests on,
+    so both are compared and the recorded value is named in the refusal -- silently
+    keeping the first would leave the caller believing its correction was applied.
+
+    A recorded row that kept no hash is not evidence of a different answer, so a retry
+    that supplies one while agreeing on the score is still a repeat: the first call simply
+    had nothing to hash.
+    """
+
+    recorded = database.one(
+        "SELECT raw_score, response_hash FROM assessment_results "
+        "WHERE run_id = ? AND content_id = ?",
+        [run_id, content_id],
+    )
+    if recorded is None:
+        return
+    conflicts: list[ErrorDetail] = []
+    if abs(float(recorded[0]) - score) > 1e-9:
+        conflicts.append(
+            ErrorDetail(
+                field="score",
+                reason="a different score is already recorded for this task",
+                context={"recorded": str(float(recorded[0])), "offered": str(score)},
+            )
+        )
+    if recorded[1] is not None and response_hash is not None and str(recorded[1]) != response_hash:
+        conflicts.append(
+            ErrorDetail(
+                field="response",
+                reason="a different answer is already recorded for this task",
+                context={"recorded": str(recorded[1]), "offered": response_hash},
+            )
+        )
+    if conflicts:
+        raise LinguaWikiError(
+            "assessment_result_conflict",
+            f"{content_id} was already answered in this run with a different result; a "
+            "retry repeats an observation, it does not replace one",
+            details=tuple(conflicts),
+        )
 
 
 def record(
@@ -1005,10 +1092,6 @@ def record(
                 "that task was not served in this run; ask for the next task first",
                 details=(ErrorDetail(field="content_id", reason="task was not served"),),
             )
-        if str(served[2]) == "answered":
-            # A repeat is an idempotent no-op: a retried record must not fold the same
-            # evidence into the posterior twice.
-            return _run_report(database, run_id)
         conditions = json.loads(str(row[6]))
         kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
         record_track = learner_service.track_context(database, str(row[1]))
@@ -1064,11 +1147,33 @@ def record(
         # discarding the result would make the stored score unexplainable, and a
         # caller-supplied excerpt reaches the column by the same route so that the consent
         # rule covers both and not only the one this stage added.
-        visibility, excerpt, response_hash = evidence_service.retain_response(
+        visibility, excerpt, digest = evidence_service.retain_response(
             response if response is not None else response_excerpt,
             requested=response_visibility,
             preferences=record_track.preferences,
         )
+        # `response_hash` promises the hash of the *response*, so that a withheld answer
+        # can be checked against one offered later. A caller-supplied excerpt is the
+        # caller's own truncation of an answer this command never saw: hashing it under
+        # that name would answer "no" for the learner's real answer, which is the opposite
+        # of what the column exists to do. No whole answer, no attestation.
+        response_hash = digest if response is not None else None
+        if str(served[2]) == "answered":
+            # Deliberately *here*, below every refusal above rather than above them. A
+            # repeat must not fold the same evidence into the posterior twice, but a
+            # second call carrying a different answer is not a repeat, and returning the
+            # run report for one told the caller a correction had landed when nothing had
+            # been written. A guard placed before the path it guards also disables it:
+            # with this above, asking to keep more than consent allows on an answered task
+            # returned success and the caller believed the transcript was retained.
+            _assert_repeat(
+                database,
+                run_id=run_id,
+                content_id=content_id,
+                score=resolved_score,
+                response_hash=response_hash,
+            )
+            return _run_report(database, run_id)
         states = {state.dimension: state for state in _dimension_states(database, run_id, kinds)}
         state = states[dimension]
         levels = _pinned_levels(conditions, fallback=record_track.framework_levels)

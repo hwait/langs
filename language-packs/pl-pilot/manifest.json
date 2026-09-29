@@ -4,7 +4,7 @@
   "data_format_version": 1,
   "pack_key": "pl-pilot",
   "name": "Polish A2 Pilot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "language": "pl",
   "scripts": [
     "Latn"
@@ -219,5 +219,5 @@
     "source-policy.json": "f8301f5b92063b22432c9dd6724c172829b40b3868d9df803855e47b490bb51c",
     "tests/expectations.json": "2ae012d7ebb35cec8b4a8da880f63937526f08fd8bbdd84abe2b3d9641e4a667"
   },
-  "content_address": "086976f69d83cdef2af184ebe9f296f62f25e0f18338dbce8184e0b73874eb4d"
+  "content_address": "5927f339a3f99260ecaa0e1f2e2916fc6eb77ec6e59fb954510f471f7b82e571"
 }

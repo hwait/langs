@@ -6,7 +6,7 @@ import json
 
 from pydantic import Field
 
-from linguawiki.contracts import LockManifest, parse_answer_key
+from linguawiki.contracts import LockManifest, parse_answer_key, reads_as_json_object
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.backup import table_row_counts
 from linguawiki.db.connection import Database, quote_identifier
@@ -709,19 +709,6 @@ def _served_target_checks(database: Database) -> list[CheckResult]:
     return checks
 
 
-def _reads_as_object(raw: str) -> bool:
-    """Whether stored text is a JSON object, answered rather than raised.
-
-    Added columns cannot carry `json_valid`, so `db check` is the only thing standing
-    between a hand-edited or half-restored value and a reader that will crash on it.
-    """
-
-    try:
-        return isinstance(json.loads(raw), dict)
-    except ValueError:
-        return False
-
-
 def _reads_as_answer_key(raw: str) -> bool:
     """Whether a stored answer key is one the scorer could actually use.
 
@@ -753,18 +740,21 @@ def _served_answer_key_checks(database: Database) -> list[CheckResult]:
     """
 
     checks: list[CheckResult] = []
-    # "Present" here means what it means to the writer: a non-null, non-empty value.
-    # Reading it as `IS NOT NULL` alone passed a row holding `''` that `record` refuses as
-    # a partial snapshot -- a check that mirrors half the writer's predicate calls damage
-    # healthy, which is the reading an operator then trusts.
+    # Whole or wholly absent, drawn exactly where `_scorable_key` draws it. Absent is all
+    # three NULL -- what a genuine pre-0030 row holds and the only thing it has ever held.
+    # A row carrying an empty or whitespace-only value is damage, not history: reading it
+    # as absent sent the writer to the mutable bank while a check that asked only
+    # `IS NOT NULL` called the same row healthy. A check that mirrors half the writer's
+    # predicate calls damage clean, and that is the reading an operator trusts.
     partial = [
         f"{run_id}/{content_id}"
         for run_id, content_id in database.query(
-            "SELECT run_id, content_id FROM assessment_run_tasks WHERE ("
-            "  coalesce(expected_json, '') = '' OR coalesce(prompt_snapshot, '') = '' "
-            "  OR coalesce(rubric_json, '') = '') AND ("
-            "  coalesce(expected_json, '') <> '' OR coalesce(prompt_snapshot, '') <> '' "
-            "  OR coalesce(rubric_json, '') <> '') "
+            "SELECT run_id, content_id FROM assessment_run_tasks "
+            "WHERE NOT (expected_json IS NULL AND prompt_snapshot IS NULL "
+            "           AND rubric_json IS NULL) "
+            "  AND NOT (coalesce(trim(expected_json), '') <> '' "
+            "           AND coalesce(trim(prompt_snapshot), '') <> '' "
+            "           AND coalesce(trim(rubric_json), '') <> '') "
             "ORDER BY run_id, content_id"
         )
     ]
@@ -793,7 +783,7 @@ def _served_answer_key_checks(database: Database) -> list[CheckResult]:
     ):
         if expected_json is not None and not _reads_as_answer_key(str(expected_json)):
             malformed.append(f"{run_id}/{content_id}: the answer key cannot be read")
-        if rubric_json is not None and not _reads_as_object(str(rubric_json)):
+        if rubric_json is not None and not reads_as_json_object(str(rubric_json)):
             malformed.append(f"{run_id}/{content_id}: the rubric body is not a JSON object")
     if malformed:
         checks.append(

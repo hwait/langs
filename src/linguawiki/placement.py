@@ -389,6 +389,15 @@ def scoring_form(value: str) -> str:
     wrong tool here because it also drops punctuation and separators, which would score
     "nie wiem" and "nie, wiem" the same. Any form a pack wants accepted belongs in
     `answers`, where a reviewer can see it.
+
+    Two consequences an author should know, because both follow from NFKC and neither is
+    obvious from "no folding": compatibility mappings make `m2` match `m²`, `1/2` match
+    `½`, and `IV` match `Ⅳ`; and case folding is language-blind, so a Turkish pack must
+    list dotted and dotless forms separately rather than expect `İ` to fold to `i`.
+    Invisible characters -- zero-width space, soft hyphen -- are *not* removed: they are
+    neither whitespace nor a mark NFKC composes, so an answer pasted out of a PDF that
+    carries one does not match. Widening any of this is a change to the rule, which means
+    a new `SCORING_POLICY_VERSION`, not an edit here.
     """
 
     return " ".join(fold(value).split())

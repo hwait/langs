@@ -33,6 +33,8 @@ from tests.conftest import (
     SyntheticWorkspace,
 )
 
+SNAPSHOTS = Path(__file__).resolve().parent / "snapshots"
+
 
 def _republish(root: Path) -> None:
     from linguawiki.contracts import PackManifest
@@ -183,9 +185,9 @@ def test_a_different_version_requires_the_update_command(
         dry_run=True,
     )
     assert preview.dry_run is True
-    assert preview.updated_from == "0.1.0"
+    assert preview.updated_from == "0.1.1"
     with open_reader(synthetic_workspace.paths, clock=synthetic_workspace.clock) as database:
-        assert database.scalar("SELECT version FROM pack_installations") == "0.1.0"
+        assert database.scalar("SELECT version FROM pack_installations") == "0.1.1"
 
 
 def _bump_version_and_change_an_item(root: Path, *, remove_key: str) -> tuple[str, str]:
@@ -522,3 +524,32 @@ def test_a_reinstall_from_a_different_directory_still_records_the_new_source(
     with open_reader(synthetic_workspace.paths, clock=synthetic_workspace.clock) as database:
         recorded = database.scalar("SELECT source_path FROM pack_installations")
     assert str(recorded) == str(moved)
+
+
+def test_a_shipped_pack_never_republishes_a_version_it_has_already_released() -> None:
+    """A released pack version is content-addressed and immutable, like a migration file.
+
+    Re-stamping a shipped pack without bumping its version leaves every existing install
+    with no way forward: `install` refuses `pack_version_conflict` before the update gate,
+    so `pack update` refuses identically, and both tell the operator to publish a new
+    version of a pack they do not own. The refusal is correct; shipping the state that
+    provokes it is not, and no other test can see it because every test installs into a
+    fresh workspace where the conflict branch is unreachable.
+
+    `snapshots/released-packs.json` is the record, exactly as
+    `tests/migrations/snapshots/released-migrations.json` is for migrations: an entry is
+    added when a version ships and is never removed or edited. Changing a shipped pack's
+    contents means adding a version, not rewriting one.
+    """
+
+    recorded = json.loads((SNAPSHOTS / "released-packs.json").read_text(encoding="utf-8"))
+
+    for shipped in (PILOT_PACK, FIXTURE_PACKS / "inflected", FIXTURE_PACKS / "tonal"):
+        manifest = json.loads((shipped / "manifest.json").read_text(encoding="utf-8"))
+        released = recorded.get(manifest["pack_key"], {})
+        previous = released.get(manifest["version"])
+        assert previous is None or previous == manifest["content_address"], (
+            f"{manifest['pack_key']} {manifest['version']} was released with content "
+            f"address {previous} and now declares {manifest['content_address']}; "
+            "a published version is immutable, so bump the version instead"
+        )

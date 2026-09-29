@@ -4,7 +4,7 @@
   "data_format_version": 1,
   "pack_key": "fixture-tonal",
   "name": "Synthetic Tonal Non-Whitespace Fixture",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "language": "ztx-Zzzz",
   "scripts": [
     "Zzzz"
@@ -140,5 +140,5 @@
     "source-policy.json": "e9cf69a3196ab449ef34c5702da549ab5a2e5fc2057b317f9626bd072e8cf524",
     "tests/expectations.json": "49713e144060f714af180707ef63b880e225db4e1a45df5cc9b47a35e70ba50d"
   },
-  "content_address": "fc5371a927a4d64f8a1425c378ccf54b83d2babf472e4f4bf613f4a5cb8a9f40"
+  "content_address": "bb39211d4ad9c0eb17d843d23961bf9108be25b053c88c3e29961dde1ff5a76a"
 }

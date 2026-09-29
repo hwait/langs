@@ -1090,6 +1090,24 @@ class AnswerKey(ContractModel):
     answers: tuple[NonBlankStr, ...] = Field(min_length=1)
 
 
+def reads_as_json_object(raw: str) -> bool:
+    """Whether stored text is a JSON object, answered rather than raised.
+
+    Lives beside `parse_answer_key` because the two answer the same kind of question about
+    the same kind of column: an added column cannot carry `json_valid`, so every reader of
+    one parses defensively. `db check` needs the answer without raising, and the scorer
+    needs the same definition of readable, so there is one.
+    """
+
+    try:
+        return isinstance(json.loads(raw), dict)
+    except (ValueError, RecursionError):
+        # `RecursionError` is not a `ValueError`: deeply nested but otherwise valid JSON
+        # exhausts the decoder's stack, and catching only the malformed case let it escape
+        # a helper whose whole contract is to answer rather than raise.
+        return False
+
+
 def parse_answer_key(raw: str | None) -> AnswerKey:
     """Read a stored answer key, refusing by name whichever rule it breaks.
 
@@ -1115,6 +1133,11 @@ def parse_answer_key(raw: str | None) -> AnswerKey:
         document = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise refuse(f"not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        # Not a `ValueError`, so it escaped as an unhandled crash rather than a refusal:
+        # out of `db check`, whose contract is never to raise, and out of the scorer, where
+        # it surfaced as `internal_error` instead of naming the damaged key.
+        raise refuse("nested too deeply for any parser to read") from exc
     if not isinstance(document, dict):
         raise refuse(f"not a JSON object but {type(document).__name__}")
     try:

@@ -4,7 +4,7 @@
   "data_format_version": 1,
   "pack_key": "fixture-inflected",
   "name": "Synthetic Inflected Fixture",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "language": "qix-Latn",
   "scripts": [
     "Latn"
@@ -140,5 +140,5 @@
     "source-policy.json": "e9cf69a3196ab449ef34c5702da549ab5a2e5fc2057b317f9626bd072e8cf524",
     "tests/expectations.json": "49713e144060f714af180707ef63b880e225db4e1a45df5cc9b47a35e70ba50d"
   },
-  "content_address": "4dbfe8937b4de6ba7ac0d0993071d54b4b8af0a2413bf562b387c7b7386c2d8a"
+  "content_address": "b1b43022738fd72d5c0b75bfbd4b931a31d42844683053f294e6ccd4a949e769"
 }

@@ -2162,6 +2162,56 @@ def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
     return "\n".join(lines)
 
 
+#: Bound on a response file, generous for any written answer and small enough that a
+#: mistyped path is refused rather than read into memory.
+RESPONSE_FILE_LIMIT = 1_000_000
+
+
+def _read_response_file(reference: str) -> str:
+    """Read the learner's answer from a file, reporting what went wrong rather than raising.
+
+    Reading a file can fail, and "cannot be read" is an answer a caller can act on: a
+    mistyped path, a directory, a permission, and a file that is not UTF-8 are all things
+    the operator fixes, and every one of them reached the envelope as `internal_error`,
+    which names nothing. The size bound is part of the same refusal: without it a mistyped
+    path to a large file is an out-of-memory crash instead.
+    """
+
+    if reference == "-":
+        try:
+            return sys.stdin.read()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise LinguaWikiError(
+                "response_unreadable",
+                f"the response could not be read from stdin: {exc}",
+                details=(ErrorDetail(field="response_file", reason=type(exc).__name__),),
+            ) from exc
+    path = Path(reference).expanduser()
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise LinguaWikiError(
+            "response_unreadable",
+            f"the response file {path} could not be read: {exc.strerror or exc}",
+            details=(ErrorDetail(field="response_file", reason=type(exc).__name__),),
+        ) from exc
+    if size > RESPONSE_FILE_LIMIT:
+        raise LinguaWikiError(
+            "response_unreadable",
+            f"the response file {path} is {size} bytes, past the {RESPONSE_FILE_LIMIT} "
+            "a single answer may be; check the path is the one you meant",
+            details=(ErrorDetail(field="response_file", reason="too large"),),
+        )
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LinguaWikiError(
+            "response_unreadable",
+            f"the response file {path} could not be read: {exc}",
+            details=(ErrorDetail(field="response_file", reason=type(exc).__name__),),
+        ) from exc
+
+
 def _assessment_response(args: argparse.Namespace) -> str | None:
     """The learner's answer, from argv or from a file, with one refusal for both.
 
@@ -2181,11 +2231,7 @@ def _assessment_response(args: argparse.Namespace) -> str | None:
     if args.response is not None:
         response = str(args.response)
     elif args.response_file is not None:
-        response = (
-            sys.stdin.read()
-            if args.response_file == "-"
-            else Path(args.response_file).expanduser().read_text(encoding="utf-8")
-        )
+        response = _read_response_file(args.response_file)
     else:
         return None
     if not response.strip():

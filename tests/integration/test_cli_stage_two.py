@@ -819,7 +819,7 @@ def test_pack_update_previews_by_default_and_applies_with_a_flag(
     after = _json(capsys)
 
     assert preview["data"]["dry_run"] is True
-    assert preview["data"]["updated_from"] == "0.1.0"
-    assert before["data"]["packs"][0]["version"] == "0.1.0"
+    assert preview["data"]["updated_from"] == "0.1.1"
+    assert before["data"]["packs"][0]["version"] == "0.1.1"
     assert applied["data"]["dry_run"] is False
     assert after["data"]["packs"][0]["version"] == "0.2.0"
