@@ -17,6 +17,7 @@ The operational MVP survives four weeks of real Polish learning, and the Polish 
 - Stage 7 exit gate passes.
 - `PolishLinguaWiki` is private, backed up externally, and already in regular use.
 - The team has chosen `onboarding-ready` or `placement-ready` as the target pack gate for this stage.
+- **The learner client (C1–C7) has landed.** See the [Learner Client Delivery Plan](learner-client-plan.md). Four weeks of learning conducted through chat would spend most of its budget on work a string comparison can do, and would measure the interface as much as the learner. The requirements for that client came out of an hour of real study, so the evidence for building it first already exists.
 
 ## Work packages
 

@@ -1,6 +1,6 @@
 # ADR 0008: A loopback client that transports, and an OpenAPI contract that is generated
 
-Status: accepted for the learner client; stage number unassigned
+Status: accepted for the learner client (C1-C7), sequenced before Stage 8
 
 ## Decision
 

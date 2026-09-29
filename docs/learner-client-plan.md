@@ -417,19 +417,26 @@ Worth a proposal of its own once C1–C7 are in use.
 
 ---
 
-## Sequencing — open decision
+## Sequencing — decided
 
-This work is proposed **before Stage 8** (four weeks of real Polish learning). Doing Stage 8
-through chat would spend a large token budget on string comparison and would measure the
-interface as much as the learner.
+**C1–C7 land before Stage 8.** Stage 8 is four weeks of real Polish learning; running it
+through chat would spend a large budget on string comparison and would measure the interface
+as much as the learner.
 
-The cheapest useful split, if the whole thing is too much to take before Stage 8:
+The decision rests on where the requirements came from. Every observation behind this plan —
+the token cost of recording an answer, the clip that could not be replayed, the countdown
+nobody controlled — surfaced within **an hour** of actual learning, not from speculation about
+what a client might need. That is the kind of evidence Stage 8 exists to produce, and it
+arrived early enough to act on. Building the interface first means Stage 8 measures the
+learner rather than the tooling.
 
-- **C1 alone** removes most of the token cost and needs no client at all.
-- **C1 + C2 + C3 + C4** (both halves of C2) gives a usable text-only assessment client.
-- **C5–C7** can follow Stage 8, using it to decide what the client actually needs.
+Stage 8 resumes once C7 is done.
 
-Not decided here.
+### Overlap to exploit rather than sequence twice
+
+C2a (pack authoring: typed choices, clip references) and Stage 8's own pack growth toward an
+A1–B1 maturity gate touch the same files and the same bank. Doing C2a as the first slice of
+that growth, rather than as a separate pass, avoids authoring the bank twice.
 
 ## Risks
 
