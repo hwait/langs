@@ -46,6 +46,29 @@ LinguaWiki becomes an operational MVP: its human-readable history is determinist
 - [ ] Provide repair suggestions; require reviewed commands for mutations.
 - [ ] Add a recovery guide covering staged sessions, corrupted projections, and restore-to-new-path.
 
+### 7.4a Retention the assessment path cannot yet honour
+
+Two gaps found while reviewing C1 and deferred to here, because both are about withdrawing
+or bounding learner text rather than about scoring it. Neither is a C1 regression: the first
+is a control that was never built, the second predates C1 and was not widened by it.
+
+- [ ] **Withdrawing a stored response.** `assessment record` refuses a retry whose retention
+      request differs from the recorded one (`assessment_result_conflict`), which is honest
+      but dead-ends: nothing withdraws an excerpt already in `assessment_results`, and
+      `linguawiki privacy` offers only `audit`. A refusal has to leave a way forward, so give
+      it one -- a reviewed command that clears the excerpt and leaves the hash, the score, and
+      the claim standing, since what the learner *answered* was established by the comparison
+      and only the words are being withdrawn.
+- [ ] **`--input` rubric payloads bypass retention.** The rubric a caller passes to
+      `assessment record` is stored in `assessment_results.rubric_json` unfiltered, and the
+      assess skill instructs a model to put per-dimension detail there. A rubric that quotes
+      the learner therefore reaches the database without passing `retain_response`, on a track
+      that may have declined transcript retention. Apply the rule where the text arrives:
+      constrain what a rubric may carry, and run learner text in it through retention at
+      ingestion rather than trusting the caller to have excerpted it. Assert the result in
+      `db check`, because a boundary crossed inside a learner's database cannot be found by
+      reading the code.
+
 ### 7.5 Workspace snapshot
 
 - [ ] Rebuild projections and reports before snapshot.

@@ -24,7 +24,7 @@ write, and a definition of done. Take them in dependency order.
 
 | Stage | Document | Depends on |
 |---|---|---|
-| C1 | [Answer-key snapshot](client/C1-answer-key-snapshot.md) | — |
+| C1 | [Answer-key snapshot](client/C1-answer-key-snapshot.md) ✅ shipped | — |
 | C2a | [Presentation contract and pack authoring](client/C2a-presentation-contract.md) | — |
 | C2b | [Served-presentation snapshot](client/C2b-served-presentation-snapshot.md) | C1, C2a |
 | C3 | [Server and generated contract](client/C3-server-and-contract.md) | C1, C2a, C2b |

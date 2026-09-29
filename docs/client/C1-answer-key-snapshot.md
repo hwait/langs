@@ -1,7 +1,7 @@
 ---
 title: "C1 — Deterministic scoring with a serve-time snapshot"
 stage: C1
-status: ready
+status: shipped
 depends_on: []
 ---
 

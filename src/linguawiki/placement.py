@@ -396,8 +396,11 @@ def scoring_form(value: str) -> str:
     list dotted and dotless forms separately rather than expect `İ` to fold to `i`.
     Invisible characters -- zero-width space, soft hyphen -- are *not* removed: they are
     neither whitespace nor a mark NFKC composes, so an answer pasted out of a PDF that
-    carries one does not match. Widening any of this is a change to the rule, which means
-    a new `SCORING_POLICY_VERSION`, not an edit here.
+    carries one does not match. That was reviewed and kept deliberately: what a pack
+    accepts is the reviewer's decision, and quietly widening it here would change scores
+    nobody re-reviewed. The remedy is to *explain* the mismatch to the learner, which
+    needs no policy change; widening the comparison does, and means a new
+    `SCORING_POLICY_VERSION` rather than an edit here.
     """
 
     return normalize_response(value)
