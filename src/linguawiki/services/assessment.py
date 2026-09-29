@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 from pydantic import Field
 
 from linguawiki.clock import Clock, SystemClock, aware_utc
-from linguawiki.contracts import PackMaturity
+from linguawiki.contracts import PackMaturity, parse_answer_key
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.connection import Database, open_reader, open_writer
 from linguawiki.errors import ErrorDetail, LinguaWikiError
@@ -37,8 +38,10 @@ from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import (
     ALGORITHM_VERSION,
     REUSE_WINDOW_MONTHS,
+    SCORING_POLICY_VERSION,
     Candidate,
     DimensionState,
+    assert_machine_scorable,
     budget_for,
     close_dimension,
     confidence_label,
@@ -48,11 +51,13 @@ from linguawiki.placement import (
     posterior_mean,
     posterior_sd,
     record_score,
+    score_response,
     select_task,
     unavailable_reason,
 )
 from linguawiki.provenance import PROMOTED_LIFECYCLES
 from linguawiki.services import estimates as estimate_service
+from linguawiki.services import evidence as evidence_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import packs as pack_service
 
@@ -761,9 +766,14 @@ def next_task(
                     )
                 warnings.append(f"{state.dimension} stopped early: no unseen task is available")
                 continue
+            # The answer key is read here, from the bank row, and never from the selected
+            # `Candidate`. `Candidate` carries everything item selection is allowed to
+            # consider, and the key is not among it: putting it there would let the
+            # staircase see the answers it is choosing between.
             task = database.one(
                 "SELECT record.stable_key, task.prompt, task.rubric_json, task.rubric_version, "
-                "task.permitted_help, record.content_hash, task.target_refs_json "
+                "task.permitted_help, record.content_hash, task.target_refs_json, "
+                "task.expected_json "
                 "FROM assessment_tasks task "
                 "JOIN content_records record ON record.content_id = task.content_id "
                 "WHERE task.content_id = ?",
@@ -787,11 +797,19 @@ def next_task(
                 # learner actually saw, and an observation attributed to this task must be
                 # about the items it targeted when it was served -- not the ones a later
                 # pack edit says it targets now.
+                #
+                # The same reasoning is why the answer key, the prompt, and the rubric
+                # body are copied: they are what a scorer needs to reach a verdict, and
+                # scoring against the live bank would let an edit made after the sitting
+                # decide whether the learner was right. The three are written together,
+                # always: a row carrying some of them and not the others can establish
+                # neither what the learner faced nor that it predates the snapshot.
                 transaction.execute(
                     "INSERT INTO assessment_run_tasks (run_id, sequence, content_id, dimension, "
                     "status, served_at, task_type, level_code, difficulty, content_family, "
-                    "modality, is_anchor, rubric_version, content_hash, target_refs_json) "
-                    "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "modality, is_anchor, rubric_version, content_hash, target_refs_json, "
+                    "expected_json, prompt_snapshot, rubric_json) "
+                    "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         run_id,
                         sequence,
@@ -807,6 +825,9 @@ def next_task(
                         int(task[3]),
                         str(task[5]),
                         str(task[6]),
+                        str(task[7]),
+                        str(task[1]),
+                        str(task[2]),
                     ],
                 )
                 # The learner has now seen it, whether or not they answer. Recording the
@@ -845,11 +866,75 @@ def next_task(
     return result.model_copy(update={"warnings": (*result.warnings, *warnings)})
 
 
+@dataclass(frozen=True, slots=True)
+class _ScorableKey:
+    """The answer key a deterministic score may rest on, and where it was read from."""
+
+    answers: tuple[str, ...]
+    #: `run-snapshot` when the run recorded the key it served, `bank` when the row
+    #: predates the snapshot and the pack's content still hashes to what was served.
+    source: str
+
+
+def _scorable_key(
+    database: Database, *, content_id: str, snapshot: Sequence[Any], content_hash: str | None
+) -> _ScorableKey:
+    """Read the key the learner was actually scored against, refusing every other case.
+
+    The three snapshot columns are one group. All three present is a whole record; all
+    three absent means the row predates migration 0030, and only then may the bank answer
+    -- and only when it can prove it has not changed, which is exactly what the
+    snapshotted `content_hash` is for. Anything in between is damage: it cannot establish
+    what the learner faced and it is not a legacy row either, so falling back would let
+    the mutable pack answer for a fact the record actually held.
+
+    There is no backfill from the pack here, ever. A key written into an old row from a
+    pack edited since would be an account of a sitting that nobody can check.
+    """
+
+    expected_json, prompt_snapshot, rubric_json = snapshot
+    present = [column for column in (expected_json, prompt_snapshot, rubric_json) if column]
+    if len(present) == 3:
+        return _ScorableKey(parse_answer_key(str(expected_json)).answers, "run-snapshot")
+    if present:
+        raise LinguaWikiError(
+            "assessment_snapshot_partial",
+            f"the run holds a partial record of serving {content_id}: it can establish "
+            "neither what the learner was asked nor that it predates the snapshot, so it "
+            "cannot be scored without a judge",
+            details=(
+                ErrorDetail(
+                    field="content_id",
+                    reason="partial served snapshot",
+                    context={"present": str(len(present))},
+                ),
+            ),
+        )
+    current = database.scalar(
+        "SELECT record.content_hash FROM content_records record WHERE record.content_id = ?",
+        [content_id],
+    )
+    if content_hash is None or current is None or str(current) != content_hash:
+        raise LinguaWikiError(
+            "assessment_score_required",
+            f"{content_id} was served before its answer key was recorded, and the pack's "
+            "content has changed since, so nothing here can say what the learner was "
+            "asked; supply a score",
+            details=(ErrorDetail(field="score", reason="no usable answer key"),),
+        )
+    bank = database.scalar(
+        "SELECT expected_json FROM assessment_tasks WHERE content_id = ?", [content_id]
+    )
+    return _ScorableKey(parse_answer_key(None if bank is None else str(bank)).answers, "bank")
+
+
 def record(
     paths: WorkspacePaths,
     *,
     content_id: str,
-    score: float,
+    score: float | None = None,
+    response: str | None = None,
+    response_visibility: str | None = None,
     run: str | None = None,
     track: str | None = None,
     rubric: Mapping[str, object] | None = None,
@@ -861,14 +946,39 @@ def record(
     clock: Clock | None = None,
     command: str = "assessment.record",
 ) -> AssessmentRunReport:
-    """Score one served task and fold it into its dimension's posterior."""
+    """Score one served task and fold it into its dimension's posterior.
+
+    The score is either *computed* here from the key the run snapshotted, or *supplied* by
+    a caller who reached its own verdict; `score_source` records which, because
+    `assessor_kind` has only ever *labelled* a score and a compatibility call must not
+    read afterwards as the scoring policy having run.
+
+    The learner's `response` is an input, not an artifact. Scoring uses it in memory, and
+    it reaches the database only through `retain_response`, which is where consent is
+    honoured -- so automatic scoring never requires keeping text a track has declined.
+    """
 
     active_clock = clock or SystemClock()
-    if not 0.0 <= score <= 1.0:
+    if score is not None and not 0.0 <= score <= 1.0:
         raise LinguaWikiError("invalid_arguments", "score must lie between 0.0 and 1.0")
     if assessor_kind not in ("deterministic", "ai", "learner", "human"):
         raise LinguaWikiError(
             "invalid_arguments", "assessor_kind must be deterministic, ai, learner, or human"
+        )
+    if response is not None and response_excerpt is not None:
+        # Two different texts for one answer: whichever were stored, the other would be
+        # silently discarded, and the excerpt is the learner's words either way.
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "pass either the learner's response or an excerpt of it, not both; the "
+            "excerpt is derived from the response by the retention rule",
+            details=(ErrorDetail(field="response", reason="an excerpt was also supplied"),),
+        )
+    if response is not None and not response.strip():
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "an empty response is a skip, not a wrong answer; skip the task instead",
+            details=(ErrorDetail(field="response", reason="blank"),),
         )
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
@@ -877,7 +987,8 @@ def record(
         _assert_running(run_id, status=str(row[4]), action="take further results")
         served = database.one(
             "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
-            "content_family, modality, is_anchor, content_hash FROM assessment_run_tasks "
+            "content_family, modality, is_anchor, content_hash, expected_json, "
+            "prompt_snapshot, rubric_json FROM assessment_run_tasks "
             "WHERE run_id = ? AND content_id = ?",
             [run_id, content_id],
         )
@@ -899,27 +1010,80 @@ def record(
         # whenever the pack changed mid-run.
         candidate = _served_candidate(run_id, content_id=content_id, served=served)
         dimension = str(served[1])
+        # Every refusal below runs before the transaction opens, so a refused call leaves
+        # the task still `served` and answerable rather than half-recorded.
+        warnings: list[str] = []
+        if score is None:
+            if response is None:
+                raise LinguaWikiError(
+                    "assessment_score_required",
+                    f"scoring {content_id} needs either a score or the learner's response",
+                    details=(ErrorDetail(field="score", reason="neither score nor response"),),
+                )
+            if assessor_kind != "deterministic":
+                raise LinguaWikiError(
+                    "assessment_score_required",
+                    f"a {assessor_kind} assessor reaches its own verdict, so it must "
+                    "supply the score it reached",
+                    details=(ErrorDetail(field="score", reason=f"{assessor_kind} assessor"),),
+                )
+            # Before the key: a rubric-scored task has no key by design, so reading one
+            # first refuses with "your answer key is broken" where the truth is "this
+            # needs a judge". The code is what a skill acts on.
+            assert_machine_scorable(candidate.task_type)
+            key = _scorable_key(
+                database,
+                content_id=content_id,
+                snapshot=served[10:13],
+                content_hash=None if served[9] is None else str(served[9]),
+            )
+            resolved_score = score_response(
+                task_type=candidate.task_type, answers=key.answers, response=response
+            )
+            score_source, policy_version = "computed", SCORING_POLICY_VERSION
+            if key.source == "bank":
+                warnings.append(
+                    f"{content_id} was served before its answer key was recorded; the "
+                    "pack's content still hashes to what was served, so the key was read "
+                    "from the bank"
+                )
+        else:
+            # A supplied score wins, and is labelled as supplied with no policy version:
+            # `assessor_kind` has only ever *labelled* a score, and recording a version
+            # against one would be a claim that work nobody did had been done.
+            resolved_score = score
+            score_source, policy_version = "supplied", None
+        # The response goes through retention either way. Scoring in the background and
+        # discarding the result would make the stored score unexplainable, and a
+        # caller-supplied excerpt reaches the column by the same route so that the consent
+        # rule covers both and not only the one this stage added.
+        visibility, excerpt, response_hash = evidence_service.retain_response(
+            response if response is not None else response_excerpt,
+            requested=response_visibility,
+            preferences=record_track.preferences,
+        )
         states = {state.dimension: state for state in _dimension_states(database, run_id, kinds)}
         state = states[dimension]
         levels = _pinned_levels(conditions, fallback=record_track.framework_levels)
         prior_snapshot = list(state.posterior)
-        updated = record_score(state, candidate, score=score, level_count=len(levels))
+        updated = record_score(state, candidate, score=resolved_score, level_count=len(levels))
         result_id = AssessmentId.new()
         with database.transaction() as transaction:
             now = transaction.now()
             transaction.execute(
                 "INSERT INTO assessment_results (result_id, run_id, content_id, dimension, "
                 "raw_score, rubric_json, response_excerpt, assessor_kind, assessor, confidence, "
-                "prior_json, posterior_json, difficulty, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "prior_json, posterior_json, difficulty, recorded_at, scoring_policy_version, "
+                "score_source, response_visibility, response_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     str(result_id),
                     run_id,
                     content_id,
                     dimension,
-                    score,
+                    resolved_score,
                     json.dumps(dict(rubric or {}), ensure_ascii=False, sort_keys=True),
-                    response_excerpt,
+                    excerpt,
                     assessor_kind,
                     assessor,
                     confidence,
@@ -927,6 +1091,10 @@ def record(
                     json.dumps(list(updated.posterior)),
                     candidate.difficulty,
                     now,
+                    policy_version,
+                    score_source,
+                    visibility,
+                    response_hash,
                 ],
             )
             transaction.execute(
@@ -957,11 +1125,12 @@ def record(
                     aggregate_id=run_id,
                     correlation_id=EventId.new(),
                     payload_json=json.dumps(
-                        {"content_id": content_id, "score": score}, sort_keys=True
+                        {"content_id": content_id, "score": resolved_score}, sort_keys=True
                     ),
                     idempotency_key=idempotency_key,
                 )
-    return report(paths, run=run_id, clock=active_clock)
+    result = report(paths, run=run_id, clock=active_clock)
+    return result.model_copy(update={"warnings": (*result.warnings, *warnings)})
 
 
 def set_status(

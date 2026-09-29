@@ -26,7 +26,16 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from linguawiki.errors import ErrorDetail, LinguaWikiError
+from linguawiki.text import fold
+
 ALGORITHM_VERSION = "placement.v1"
+#: Version of the deterministic scoring rules in `score_response`. Stored on every
+#: result they compute, so a stage is recomputable from raw evidence and a rule change
+#: can be replayed rather than migrated. Bump it whenever those rules change.
+SCORING_POLICY_VERSION = "scoring.v1"
+#: The task types `score_response` can decide. The other three need a judge.
+MACHINE_SCORABLE_TASK_TYPES: tuple[str, ...] = ("objective", "short-response")
 #: Logistic slope of the v1 response curve. Fixed by design.
 DISCRIMINATION = 1.7
 #: Grid resolution in bands. Half a band is the finest reviewed item difficulty.
@@ -370,6 +379,68 @@ def _level_index(point: float, level_count: int) -> int:
     return min(max(round(point), 0), level_count - 1)
 
 
+def scoring_form(value: str) -> str:
+    """The form two answers must agree on to be the same answer.
+
+    `fold` -- NFKC composition, then case folding -- with surrounding whitespace stripped
+    and internal runs collapsed to one space. That is the whole rule, deliberately: no
+    transliteration, no punctuation stripping, no diacritic folding. In an inflected or
+    tonal language a dropped mark is a different word, and `normalize_identity` is the
+    wrong tool here because it also drops punctuation and separators, which would score
+    "nie wiem" and "nie, wiem" the same. Any form a pack wants accepted belongs in
+    `answers`, where a reviewer can see it.
+    """
+
+    return " ".join(fold(value).split())
+
+
+def assert_machine_scorable(task_type: str) -> None:
+    """Refuse a task type no comparison can decide, by the name its callers know.
+
+    Lives here, beside the rule it guards, and is called *before* the answer key is read:
+    a rubric-scored task's key is legitimately empty, so resolving it first refused with
+    `assessment_answer_key_malformed` -- which tells a caller its pack is broken when what
+    is actually true is that the task needs a judge.
+    """
+
+    if task_type not in MACHINE_SCORABLE_TASK_TYPES:
+        raise LinguaWikiError(
+            "assessment_not_machine_scorable",
+            f"a {task_type} task is scored against a rubric by a judge, not by comparison; "
+            "supply a score",
+            details=(ErrorDetail(field="task_type", reason=task_type),),
+        )
+
+
+def score_response(*, task_type: str, answers: Sequence[str], response: str) -> float:
+    """Decide one machine-scorable task from the answer key as served.
+
+    Pure: no database, no pack, no model. The caller supplies the key it read out of the
+    run's own snapshot, which is what keeps a pack edit made after the sitting from
+    deciding whether somebody was right.
+
+    A blank response is refused rather than scored 0.0. A non-answer is a skip, and the
+    run task already has a `skipped` status that says so without crediting the learner
+    with a wrong answer they never gave.
+    """
+
+    assert_machine_scorable(task_type)
+    if not response.strip():
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "an empty response is a skip, not a wrong answer; skip the task instead",
+            details=(ErrorDetail(field="response", reason="blank"),),
+        )
+    if not answers:
+        raise LinguaWikiError(
+            "assessment_answer_key_malformed",
+            "the answer key cannot be used to score: it accepts nothing",
+            details=(ErrorDetail(field="expected", reason="no answers"),),
+        )
+    given = scoring_form(response)
+    return 1.0 if any(given == scoring_form(answer) for answer in answers) else 0.0
+
+
 def select_task(
     state: DimensionState,
     candidates: Sequence[Candidate],
@@ -535,15 +606,18 @@ __all__ = [
     "ALGORITHM_VERSION",
     "BUDGETS",
     "CONNECTED_SPEECH_BUDGET",
+    "MACHINE_SCORABLE_TASK_TYPES",
     "MINIMUM_FAMILIES",
     "PRECISION_MASS",
     "PRECISION_WIDTH",
     "REUSE_WINDOW_MONTHS",
+    "SCORING_POLICY_VERSION",
     "TASK_TYPES",
     "Candidate",
     "DimensionState",
     "Selection",
     "ability_grid",
+    "assert_machine_scorable",
     "broad_prior",
     "budget_for",
     "close_dimension",
@@ -557,6 +631,8 @@ __all__ = [
     "posterior_median",
     "posterior_sd",
     "record_score",
+    "score_response",
+    "scoring_form",
     "select_task",
     "stop_decision",
     "success_probability",
