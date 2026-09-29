@@ -28,9 +28,9 @@ at the cost of sequential adaptivity.
       attributable.
 - [ ] **Retention is applied before the submission is persisted, not after.** Session staging
       already resolves this through `evidence_service.retain_response(response, requested=…,
-      preferences=…) -> (visibility, excerpt, digest)`. Assessment recording does **not**
-      inherit that boundary — it writes `response_excerpt` straight to the row. Queue records
-      **and every retry record** store the retained form only.
+      preferences=…) -> (visibility, excerpt, digest)`. Assessment recording inherits that
+      boundary in C1, which routes both the answer and a caller-supplied excerpt through it.
+      Queue records **and every retry record** store the retained form only.
 - [ ] **When the retained form cannot be judged**, pick one and implement it explicitly: judge
       synchronously within the request and persist only the verdict, or refuse asynchronous
       judging for that track. Silently queueing text the track forbids storing is not an

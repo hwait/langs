@@ -91,14 +91,25 @@ model calls.
 
 **Work.**
 - Migration adding **only what is missing** from the existing served-task snapshot:
-  `expected_json` (the answer key), `prompt_snapshot`, `rubric_json` (the body; only
-  `rubric_version` is kept today), and `scoring_policy_version`. Everything else listed in
-  constraint 2 is already there and must not be duplicated.
+  `expected_json` (the answer key), `prompt_snapshot` and `rubric_json` (the body; only
+  `rubric_version` is kept today). Everything else listed in constraint 2 is already there
+  and must not be duplicated. The three are one group: a row has all of them or none, and a
+  partial row is damage rather than a legacy row.
+- **Type the answer key before scoring against it.** `expected` is `dict[str, Any]` today,
+  so `{"answers": []}`, `{"answers": "yes"}` and `{"unrecognized": true}` all validate. A
+  malformed key must be a named refusal, not a learner's zero.
 - Score `objective` and `short-response` against the snapshot. The existing
   `--assessor-kind deterministic` only *labels* a caller-supplied score; this makes the core
   compute one.
-- Record `scoring_policy_version` on the result so a later policy change cannot reinterpret a
-  historical score.
+- **The answer is an input, not a stored artifact.** `record`'s only response input today is
+  `--excerpt`, which it persists unchanged, so scoring off that field would make automatic
+  scoring require retaining text a track may have declined. The answer arrives on its own
+  argument, is scored in memory, and reaches the row only through
+  `evidence_service.retain_response`.
+- Record `scoring_policy_version` **on the result**, beside a `score_source` that separates a
+  computed score from a caller-supplied one, so a later policy change cannot reinterpret a
+  historical score and a compatibility call cannot read as the policy having run. The result
+  is where the score is; the serve-time snapshot has no business carrying a second version.
 - **Tasks served before this migration carry no answer key.** They are never backfilled from
   the pack, because the pack may have changed. Instead: if the live row's `content_hash` still
   equals the snapshotted one, the content is provably identical and may be read; if it
@@ -114,6 +125,9 @@ model calls.
 - A full calibration of the machine-scorable dimensions completes with no model call, proven
   by the recorded assessor kinds.
 - Refusals for the three rubric-scored task types are asserted by code.
+- A track that declines transcript retention still scores, and stores no text.
+- Malformed answer keys, and partial or unparseable snapshots, are refused by name and
+  found by `db check`.
 
 **Exit gate.** A calibration's objective and short-response tasks can be answered and scored
 entirely from the CLI, the recorded provenance shows no model was involved, and no score rests
@@ -328,9 +342,9 @@ both without breaking sequential adaptivity.
 - **Retention is applied before the submission is persisted, not after.** A recoverable
   writing submission needs the learner's text, and a track may forbid retaining it. Session
   staging already resolves this through `evidence_service.retain_response`, which returns
-  `(visibility, excerpt, digest)`; assessment recording does **not** inherit that boundary and
-  writes `response_excerpt` straight to the row. Queue records, and every retry record, store
-  the retained form only.
+  `(visibility, excerpt, digest)`; assessment recording did **not** inherit that boundary
+  until C1, which routes both the answer and a caller-supplied excerpt through it. Queue
+  records, and every retry record, store the retained form only.
 - **Specify the supported path when the retained form cannot be judged.** If a track's policy
   withholds the text, the choice is explicit: judge synchronously within the request and
   persist only the verdict, or refuse asynchronous judging for that track. Silently queueing
