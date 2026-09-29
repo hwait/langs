@@ -466,8 +466,27 @@ This repository owns the generic Python package, schemas, migrations, Codex skil
 
 ## Verification
 
-Before handing off a change, run the relevant subset and normally the full gate:
+Two tiers. Run the **stage gate** before handing off any change: every static check plus
+the whole test suite, in about five minutes.
+
+```bash
+uv run python scripts/verify.py --fast
+```
+
+The whole suite, not a subset you chose. The tests that catch a change are routinely far
+from it -- a migration moves the schema version inside a CLI snapshot, a contract change
+moves a pack's content hashes -- and picking the subset is the judgement most likely to be
+wrong exactly when it matters. It is cheap on purpose: the pilot workspace is built once
+per session and copied, and the suite runs across every core.
+
+Run the **release gate** before merging to `main`, before cutting a release, and after
+changing a migration, a published schema, or a pack version:
 
 ```bash
 uv run python scripts/verify.py
 ```
+
+It adds branch coverage against its floor, the wheel build, and the distribution check --
+properties of a release rather than of a change. It costs roughly nine times the stage
+gate, almost entirely in coverage instrumentation, so running it after every stage of a
+multi-stage plan buys nothing that running it once before the merge does not.
