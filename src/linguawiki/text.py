@@ -17,6 +17,7 @@ tone is the word, and folding it away would merge two different errors into one.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 #: Unicode general-category prefixes dropped by `normalize_identity`: marks that did not
@@ -28,6 +29,23 @@ def fold(value: str) -> str:
     """Compose and case-fold, the one normalization every comparison starts from."""
 
     return unicodedata.normalize("NFKC", value).casefold()
+
+
+#: Runs of Unicode whitespace, for collapsing rather than for splitting.
+WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def normalize_response(value: str) -> str:
+    """The form two *answers* must agree on: `fold`, with whitespace runs collapsed.
+
+    Looser than identity -- a learner who typed two spaces did not give a different
+    answer -- and no looser: no marks dropped, no punctuation stripped. This *collapses*
+    whitespace rather than tokenizing on it, which is why it belongs in the learner model
+    at all: a language that writes without spaces has no run to collapse and gets its
+    input back unchanged.
+    """
+
+    return WHITESPACE_RUN.sub(" ", fold(value)).strip()
 
 
 def normalize_alias(value: str) -> str:
@@ -56,4 +74,11 @@ def normalize_identity(value: str) -> str:
     )
 
 
-__all__ = ["NON_IDENTITY_CATEGORIES", "fold", "normalize_alias", "normalize_identity"]
+__all__ = [
+    "NON_IDENTITY_CATEGORIES",
+    "WHITESPACE_RUN",
+    "fold",
+    "normalize_alias",
+    "normalize_identity",
+    "normalize_response",
+]

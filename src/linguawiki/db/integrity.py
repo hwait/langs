@@ -18,6 +18,7 @@ from linguawiki.db.schema import (
 from linguawiki.errors import LinguaWikiError
 from linguawiki.ids import IdPrefix, validate_id
 from linguawiki.models import ContractModel
+from linguawiki.placement import MACHINE_SCORABLE_TASK_TYPES
 from linguawiki.versions import core_pin, skill_bundle_pin
 
 ORPHAN_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
@@ -775,14 +776,25 @@ def _served_answer_key_checks(database: Database) -> list[CheckResult]:
                 "every served answer key, prompt, and rubric is whole or wholly absent",
             )
         )
+    # What "well formed" means depends on what the task is scored by, and asking the
+    # stronger question of every row made this fire on healthy data: a rubric-scored task
+    # has no answer key by design and snapshots `{}`, so demanding a usable key reported
+    # every real calibration as damaged. A check that fires on correct data is worse than
+    # no check, because it teaches an operator to ignore it. The task type is on the same
+    # row (migration 0016), so the check asks what the row itself says it needs.
     malformed: list[str] = []
-    for run_id, content_id, expected_json, rubric_json in database.query(
-        "SELECT run_id, content_id, expected_json, rubric_json FROM assessment_run_tasks "
+    for run_id, content_id, task_type, expected_json, rubric_json in database.query(
+        "SELECT run_id, content_id, task_type, expected_json, rubric_json "
+        "FROM assessment_run_tasks "
         "WHERE expected_json IS NOT NULL OR rubric_json IS NOT NULL "
         "ORDER BY run_id, content_id"
     ):
-        if expected_json is not None and not _reads_as_answer_key(str(expected_json)):
-            malformed.append(f"{run_id}/{content_id}: the answer key cannot be read")
+        scorable = task_type is not None and str(task_type) in MACHINE_SCORABLE_TASK_TYPES
+        if expected_json is not None:
+            if scorable and not _reads_as_answer_key(str(expected_json)):
+                malformed.append(f"{run_id}/{content_id}: the answer key cannot be read")
+            elif not scorable and not reads_as_json_object(str(expected_json)):
+                malformed.append(f"{run_id}/{content_id}: the answer key is not a JSON object")
         if rubric_json is not None and not reads_as_json_object(str(rubric_json)):
             malformed.append(f"{run_id}/{content_id}: the rubric body is not a JSON object")
     if malformed:

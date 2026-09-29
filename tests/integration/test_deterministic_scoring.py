@@ -1122,3 +1122,37 @@ def test_a_response_file_that_cannot_be_read_is_an_answer_not_a_crash(
     error = _cli_error(capsys)
     assert error["code"] == "response_unreadable", error
     assert str(target) in str(error["message"])
+
+
+def test_a_workspace_that_served_a_rubric_scored_task_is_still_healthy(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A rubric-scored task has no answer key by design, and `{}` is what it snapshots.
+
+    Requiring every `expected_json` to parse as a usable key made `db check` report a
+    perfectly healthy workspace as damaged the moment an extended-productive,
+    pronunciation-target or connected-speech task had been served -- which is every real
+    calibration. A check that fires on correct data teaches an operator to ignore it.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    rubric_scored = 0
+    while rubric_scored == 0:
+        served = assessment_service.next_task(
+            polish_workspace.paths, run=run.run_id, clock=polish_workspace.clock
+        )
+        assert isinstance(served, assessment_service.NextTaskReport)
+        if served.task_type not in ("objective", "short-response"):
+            rubric_scored += 1
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            score=1.0,
+            assessor_kind="ai",
+            clock=polish_workspace.clock,
+        )
+
+    checks = _checks(polish_workspace)
+    for name in ("served_answer_key_complete", "served_answer_key_wellformed"):
+        assert checks[name].status == "ok", checks[name].context  # type: ignore[attr-defined]

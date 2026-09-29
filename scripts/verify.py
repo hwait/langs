@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Canonical Stage 0 verification gate used locally and in CI."""
+"""Canonical verification gate used locally and in CI.
+
+Two tiers, because they answer different questions and cost an order of magnitude apart.
+
+`--fast` is the **stage** gate: every static check plus the whole test suite, with no
+coverage instrumentation, no wheel, and no distribution check. It answers "is this change
+correct and does it break anything anywhere?", which is what a stage handoff needs.
+
+The default is the **release** gate: the same, plus branch coverage against its floor, the
+wheel build, and the distribution check. Those are properties of a release rather than of
+a change -- checking the coverage floor once before a merge proves exactly what checking it
+after every stage of a seven-stage plan proves, for a fraction of the time.
+
+Coverage is what separates them: branch tracking runs the suite roughly nine times slower
+here, and `COVERAGE_CORE=sysmon` cannot help, because `sys.monitoring` gained branch events
+in Python 3.14 and this project is pinned to 3.12.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +42,17 @@ def main() -> int:
 def _verify(scratch: str) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--external-skill-validator", type=Path)
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="stage gate: every static check and the whole suite, without coverage, "
+        "the wheel, or the distribution check",
+    )
+    parser.add_argument(
+        "--jobs",
+        default="auto",
+        help="pytest-xdist workers ('auto', a number, or '0' to run in this process)",
+    )
     parser.add_argument(
         "--clean-environment",
         action="store_true",
@@ -58,18 +85,25 @@ def _verify(scratch: str) -> int:
     environment = dict(os.environ)
     if args.no_repository_writes:
         environment["COVERAGE_FILE"] = str(Path(scratch) / "coverage")
-    run(
-        [
-            python,
-            "-m",
-            "pytest",
-            "--cov=linguawiki",
-            "--cov-branch",
-            "--cov-report=term-missing",
-            "--cov-fail-under=90",
-        ],
-        env=environment,
-    )
+    pytest_command = [python, "-m", "pytest"]
+    # Workers are per-test-process, and every test builds its own workspace under its own
+    # `tmp_path`, so there is no shared state for them to race over. `0` keeps the suite in
+    # this process for the cases where a worker pool hides a traceback.
+    if args.jobs != "0":
+        pytest_command.extend(["-n", args.jobs, "--dist", "loadfile"])
+    if not args.fast:
+        pytest_command.extend(
+            [
+                "--cov=linguawiki",
+                "--cov-branch",
+                "--cov-report=term-missing",
+                "--cov-fail-under=90",
+            ]
+        )
+    run(pytest_command, env=environment)
+    if args.fast:
+        run(["git", "diff", "--check"])
+        return 0
     with tempfile.TemporaryDirectory(prefix="linguawiki-dist-") as distribution_directory:
         run([python, "-m", "hatchling", "build", "-d", distribution_directory])
         run([python, "scripts/check_distribution.py", "--dist", distribution_directory])

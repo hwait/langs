@@ -208,7 +208,7 @@ def test_recording_the_same_task_twice_is_an_idempotent_no_op(
         polish_workspace.paths,
         run=report.run_id,
         content_id=served.content_id,
-        score=0.0,
+        score=1.0,
         clock=polish_workspace.clock,
     )
 
@@ -217,6 +217,23 @@ def test_recording_the_same_task_twice_is_an_idempotent_no_op(
     first_state = next(e for e in first.dimensions if e.dimension == served.dimension)
     second_state = next(e for e in second.dimensions if e.dimension == served.dimension)
     assert first_state.posterior_mean == second_state.posterior_mean
+
+    # A retry repeats an observation; it does not replace one. Offering a *different*
+    # verdict for the same task is refused rather than silently ignored, because
+    # returning the run report unchanged told the caller a correction had landed.
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=report.run_id,
+            content_id=served.content_id,
+            score=0.0,
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "assessment_result_conflict"
+    after = assessment_service.report(polish_workspace.paths, run=report.run_id)
+    refused_state = next(e for e in after.dimensions if e.dimension == served.dimension)
+    assert refused_state.posterior_mean == first_state.posterior_mean
 
 
 @pytest.mark.parametrize("score", [-0.5, 1.5])

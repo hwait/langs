@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from linguawiki.errors import ErrorDetail, LinguaWikiError
-from linguawiki.text import fold
+from linguawiki.text import normalize_response
 
 ALGORITHM_VERSION = "placement.v1"
 #: Version of the deterministic scoring rules in `score_response`. Stored on every
@@ -400,7 +400,7 @@ def scoring_form(value: str) -> str:
     a new `SCORING_POLICY_VERSION`, not an edit here.
     """
 
-    return " ".join(fold(value).split())
+    return normalize_response(value)
 
 
 def assert_machine_scorable(task_type: str) -> None:
