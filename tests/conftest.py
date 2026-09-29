@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from linguawiki.db import migrations as migration_module
 from linguawiki.db import schema as schema_module
-from linguawiki.paths import WorkspacePaths, workspace_paths
+from linguawiki.paths import WORKSPACE_CONFIG_NAME, WorkspacePaths, workspace_paths
 from linguawiki.services import workspace as workspace_service
 from tests.support.clocks import AdvancingClock
 
@@ -84,6 +86,81 @@ class PolishWorkspace:
         return self.paths.root
 
 
+class _CountingClock:
+    """An `AdvancingClock` that remembers how many times it was read.
+
+    The count is what makes the template honest: a per-test clock fast-forwarded by the
+    same number of reads is left exactly where a real build would have left it, so rows
+    written after the copy are dated after the pack, not before it.
+    """
+
+    def __init__(self) -> None:
+        self._inner = AdvancingClock()
+        self.reads = 0
+
+    def now(self) -> datetime:
+        self.reads += 1
+        return self._inner.now()
+
+
+@dataclass(frozen=True, slots=True)
+class PilotTemplate:
+    """One pilot workspace, built once, for every test that needs one to be copied."""
+
+    root: Path
+    backup_root: Path
+    report: workspace_service.WorkspaceInitReport
+    clock_reads: int
+
+
+def materialize_pilot(
+    template: PilotTemplate, *, target: Path, backup_root: Path, clock: AdvancingClock
+) -> None:
+    """Put a copy of the template where a real install would have put a workspace.
+
+    Installing the pilot pack is 2.25 seconds of DuckDB writes and nearly three hundred
+    tests need it, so it is done once and copied. `tests/workspaces/test_template_fixture.py`
+    holds this to what a real install produces -- table by table, through `db check`, and
+    on both the things a copy gets wrong: the manifest's absolute backup root, and the
+    clock, which must be advanced past the timestamps the copied rows already carry.
+    """
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(template.root, target)
+    if template.backup_root.exists():
+        shutil.copytree(template.backup_root, backup_root, dirs_exist_ok=True)
+    configuration = target / WORKSPACE_CONFIG_NAME
+    configuration.write_text(
+        configuration.read_text(encoding="utf-8").replace(
+            f'backup_root = "{template.backup_root}"', f'backup_root = "{backup_root}"'
+        ),
+        encoding="utf-8",
+    )
+    for _ in range(template.clock_reads):
+        clock.now()
+
+
+@pytest.fixture(scope="session")
+def pilot_template(tmp_path_factory: pytest.TempPathFactory) -> PilotTemplate:
+    base = tmp_path_factory.mktemp("pilot-template")
+    root = base / "repositories" / "PolishLinguaWiki"
+    backup_root = base / "backups"
+    clock = _CountingClock()
+    report = workspace_service.initialize(
+        workspace_service.InitOptions(
+            path=root,
+            backup_root=backup_root,
+            name="Polish LinguaWiki",
+            timezone="Europe/Warsaw",
+        ),
+        clock=clock,  # type: ignore[arg-type]
+    )
+    from linguawiki.services import packs as pack_service
+
+    pack_service.install(workspace_paths(root), PILOT_PACK, clock=clock)  # type: ignore[arg-type]
+    return PilotTemplate(root=root, backup_root=backup_root, report=report, clock_reads=clock.reads)
+
+
 @pytest.fixture
 def synthetic_workspace(
     workspace_target: Path, backup_root: Path, clock: AdvancingClock
@@ -106,13 +183,26 @@ def synthetic_workspace(
 
 
 @pytest.fixture
-def installed_pilot(synthetic_workspace: SyntheticWorkspace) -> SyntheticWorkspace:
-    """The Polish pilot pack installed into an otherwise empty workspace."""
+def installed_pilot(
+    pilot_template: PilotTemplate,
+    workspace_target: Path,
+    backup_root: Path,
+    clock: AdvancingClock,
+) -> SyntheticWorkspace:
+    """The Polish pilot pack installed into an otherwise empty workspace.
 
-    from linguawiki.services import packs as pack_service
+    Copied from the session template rather than installed again. The report is the
+    template's, which is the one thing here that is not this test's own -- nothing reads
+    it, and `report.workspace_id` is the identity of the database that was copied.
+    """
 
-    pack_service.install(synthetic_workspace.paths, PILOT_PACK, clock=synthetic_workspace.clock)
-    return synthetic_workspace
+    materialize_pilot(pilot_template, target=workspace_target, backup_root=backup_root, clock=clock)
+    return SyntheticWorkspace(
+        paths=workspace_paths(workspace_target),
+        backup_root=backup_root,
+        clock=clock,
+        report=pilot_template.report,
+    )
 
 
 @pytest.fixture
