@@ -523,3 +523,226 @@ def test_withholding_is_honoured_even_where_consent_was_given(
     )
     assert (score, visibility, excerpt) == (1.0, "withheld", None)
     assert digest
+
+
+def _cli(workspace: PolishWorkspace, *arguments: str) -> int:
+    from linguawiki.cli import run
+
+    return run(
+        [*arguments, "--workspace", str(workspace.root), "--format", "json"],
+        clock=workspace.clock,
+    )
+
+
+def _cli_error(capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
+    payload = json.loads(capsys.readouterr().err)
+    error: dict[str, object] = payload["error"]
+    return error
+
+
+def test_the_cli_scores_an_answer_with_no_score_supplied(
+    polish_workspace: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    capsys.readouterr()
+
+    assert (
+        _cli(
+            polish_workspace,
+            "assessment",
+            "record",
+            "--run",
+            run.run_id,
+            "--content",
+            served.content_id,
+            "--response",
+            correct,
+        )
+        == 0
+    )
+
+    capsys.readouterr()
+    score, source, policy, *_ = _result_row(polish_workspace, run.run_id, served.content_id)
+    assert (score, source, policy) == (1.0, "computed", SCORING_POLICY_VERSION)
+
+
+def test_the_cli_reads_a_long_answer_from_a_file_and_refuses_a_blank_one_either_way(
+    polish_workspace: PolishWorkspace, capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    """argv is bounded text, so the file is the route for a long answer -- same refusals."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    correct = _answers(polish_workspace, run.run_id, served.content_id)[0]
+    answer_file = tmp_path / "answer.txt"
+    blank_file = tmp_path / "blank.txt"
+    blank_file.write_text("   \n", encoding="utf-8")
+    answer_file.write_text(correct, encoding="utf-8")
+    capsys.readouterr()
+
+    arguments = ("assessment", "record", "--run", run.run_id, "--content", served.content_id)
+    assert _cli(polish_workspace, *arguments, "--response", "   ") != 0
+    assert _cli_error(capsys)["code"] == "invalid_arguments"
+    assert _cli(polish_workspace, *arguments, "--response-file", str(blank_file)) != 0
+    assert _cli_error(capsys)["code"] == "invalid_arguments"
+    assert (
+        _cli(
+            polish_workspace, *arguments, "--response", correct, "--response-file", str(answer_file)
+        )
+        != 0
+    )
+    assert _cli_error(capsys)["code"] == "invalid_arguments"
+
+    assert _cli(polish_workspace, *arguments, "--response-file", str(answer_file)) == 0
+    capsys.readouterr()
+    assert _result_row(polish_workspace, run.run_id, served.content_id)[0] == 1.0
+
+
+def test_the_cli_refuses_a_record_that_can_neither_be_computed_nor_supplied(
+    polish_workspace: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    capsys.readouterr()
+
+    assert (
+        _cli(
+            polish_workspace,
+            "assessment",
+            "record",
+            "--run",
+            run.run_id,
+            "--content",
+            served.content_id,
+        )
+        != 0
+    )
+
+    assert _cli_error(capsys)["code"] == "assessment_score_required"
+
+
+def _checks(workspace: PolishWorkspace) -> dict[str, object]:
+    from linguawiki.db.integrity import check_database
+
+    with open_reader(workspace.paths) as database:
+        report = check_database(database)
+    return {check.name: check for check in report.checks}
+
+
+def _scored_run(polish_workspace: PolishWorkspace) -> tuple[str, str]:
+    """One run with one machine-scored result, for `db check` to be shown damage about."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_scorable(polish_workspace, run.run_id)
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        response=_answers(polish_workspace, run.run_id, served.content_id)[0],
+        clock=polish_workspace.clock,
+    )
+    return run.run_id, served.content_id
+
+
+def test_a_healthy_workspace_passes_every_new_check(polish_workspace: PolishWorkspace) -> None:
+    run_id, _content_id = _scored_run(polish_workspace)
+    assert run_id
+
+    checks = _checks(polish_workspace)
+
+    for name in (
+        "served_answer_key_complete",
+        "served_answer_key_wellformed",
+        "result_score_provenance",
+        "result_response_retention",
+    ):
+        assert name in checks, f"{name} did not run"
+        assert checks[name].status == "ok", checks[name].message  # type: ignore[attr-defined]
+
+
+def test_db_check_finds_a_partial_served_snapshot_and_names_the_row(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run_id, content_id = _scored_run(polish_workspace)
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET prompt_snapshot = NULL "
+        "WHERE run_id = ? AND content_id = ?",
+        [run_id, content_id],
+    )
+
+    check = _checks(polish_workspace)["served_answer_key_complete"]
+
+    assert check.status == "failed"  # type: ignore[attr-defined]
+    assert content_id in "".join(check.context.values())  # type: ignore[attr-defined]
+
+
+def test_db_check_reports_an_unreadable_key_rather_than_raising(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A diagnostic that aborts on damaged input tells an operator less than one that lies."""
+
+    run_id, content_id = _scored_run(polish_workspace)
+    _rewrite(
+        polish_workspace,
+        "UPDATE assessment_run_tasks SET expected_json = ?, rubric_json = ? "
+        "WHERE run_id = ? AND content_id = ?",
+        ["{not json at all", "[]", run_id, content_id],
+    )
+
+    check = _checks(polish_workspace)["served_answer_key_wellformed"]
+
+    assert check.status == "failed"  # type: ignore[attr-defined]
+    reported = "".join(check.context.values())  # type: ignore[attr-defined]
+    assert "answer key cannot be read" in reported
+    assert "rubric body is not a JSON object" in reported
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "score_source = 'invented'",
+        "score_source = NULL",
+        "scoring_policy_version = NULL",
+        "score_source = 'supplied'",
+    ],
+)
+def test_db_check_finds_a_score_whose_provenance_does_not_add_up(
+    polish_workspace: PolishWorkspace, damage: str
+) -> None:
+    run_id, content_id = _scored_run(polish_workspace)
+    _rewrite(
+        polish_workspace,
+        f"UPDATE assessment_results SET {damage} WHERE run_id = ? AND content_id = ?",
+        [run_id, content_id],
+    )
+
+    check = _checks(polish_workspace)["result_score_provenance"]
+
+    assert check.status == "failed", damage  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "response_visibility = 'kept-a-bit'",
+        "response_visibility = NULL",
+        "response_excerpt = NULL",
+        "response_visibility = 'withheld'",
+    ],
+)
+def test_db_check_finds_a_result_that_kept_other_than_what_it_says(
+    polish_workspace: PolishWorkspace, damage: str
+) -> None:
+    run_id, content_id = _scored_run(polish_workspace)
+    _rewrite(
+        polish_workspace,
+        f"UPDATE assessment_results SET {damage} WHERE run_id = ? AND content_id = ?",
+        [run_id, content_id],
+    )
+
+    check = _checks(polish_workspace)["result_response_retention"]
+
+    assert check.status == "failed", damage  # type: ignore[attr-defined]

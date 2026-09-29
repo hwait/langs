@@ -530,8 +530,22 @@ def _assessment_parser(subcommands: Any) -> None:
     record.add_argument("--run")
     _add_track_selector(record)
     record.add_argument("--content", required=True)
-    record.add_argument("--score", type=float, required=True)
+    # Optional now: a machine-scorable task is scored from the key the run snapshotted,
+    # and a supplied score is the compatibility path rather than the default one.
+    record.add_argument("--score", type=float)
     _add_input(record, required=False)
+    # The learner's whole answer, scored in memory. It reaches the database only through
+    # the retention rule, which is why it is separate from --excerpt: an excerpt is a
+    # caller's own choice of what to keep, and passing both would be two accounts of one
+    # answer. Long answers go in --response-file, because argv is bounded text.
+    record.add_argument("--response")
+    record.add_argument(
+        "--response-file",
+        help="file holding the learner's response, or - to read stdin",
+    )
+    record.add_argument(
+        "--response-visibility", choices=("withheld", "excerpt", "full"), default=None
+    )
     record.add_argument("--excerpt")
     record.add_argument(
         "--assessor-kind",
@@ -2148,6 +2162,41 @@ def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
     return "\n".join(lines)
 
 
+def _assessment_response(args: argparse.Namespace) -> str | None:
+    """The learner's answer, from argv or from a file, with one refusal for both.
+
+    `--response` is argv and therefore bounded text; a long written answer goes through
+    `--response-file`. Two routes to one value means one place decides what is acceptable,
+    so blank text is refused the same way whichever route it arrived by -- a rule enforced
+    on the flag a stage happened to add, and not on the other, is not a rule.
+    """
+
+    if args.response is not None and args.response_file is not None:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "pass the learner's response either inline or in a file, not both",
+            details=(ErrorDetail(field="response", reason="two responses supplied"),),
+        )
+    response: str
+    if args.response is not None:
+        response = str(args.response)
+    elif args.response_file is not None:
+        response = (
+            sys.stdin.read()
+            if args.response_file == "-"
+            else Path(args.response_file).expanduser().read_text(encoding="utf-8")
+        )
+    else:
+        return None
+    if not response.strip():
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "an empty response is a skip, not a wrong answer; skip the task instead",
+            details=(ErrorDetail(field="response", reason="blank"),),
+        )
+    return response
+
+
 def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int:
     paths = _pack_workspace(args)
     if args.action == "next":
@@ -2186,6 +2235,8 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             paths,
             content_id=args.content,
             score=args.score,
+            response=_assessment_response(args),
+            response_visibility=args.response_visibility,
             run=args.run,
             track=args.track,
             rubric=None if args.input_path is None else _read_input(args.input_path),

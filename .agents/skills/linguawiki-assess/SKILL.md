@@ -14,8 +14,9 @@ estimate yourself or to round a range into a level.
 linguawiki assessment start    --workspace <path> [--run-type pilot-calibration|placement] \
   [--dimension <name> ...] [--modality <name> ...] [--idempotency-key <key>] --format json
 linguawiki assessment next     --workspace <path> [--run <id>] --format json
-linguawiki assessment record   --workspace <path> --content <id> --score <0..1> \
-  [--input rubric.json] [--excerpt "<learner response>"] \
+linguawiki assessment record   --workspace <path> --content <id> \
+  [--response "<what the learner answered>" | --response-file <path>] [--score <0..1>] \
+  [--response-visibility withheld|excerpt|full] [--input rubric.json] \
   [--assessor-kind deterministic|ai|learner|human] [--assessor <who>] \
   [--confidence low|medium|high] --format json
 linguawiki assessment pause    --workspace <path> [--run <id>] --format json
@@ -34,7 +35,8 @@ linguawiki assessment report   --workspace <path> [--run <id>] --format json
    instead of a task — that is the signal to finalize.
 3. Present the task exactly as `prompt` gives it. Respect `permitted_help`. Do not rephrase an
    objective item, add examples, or hint.
-4. `record` scores the served task. Then loop back to `next`.
+4. `record` scores the served task: the learner's answer for a machine-scorable one, your
+   rubric verdict for a judged one. Then loop back to `next`.
 5. `finalize` closes the run and writes one estimate per dimension.
 
 `next` and `record` are the only way tasks enter a run: recording a task that was not served
@@ -42,10 +44,12 @@ is refused, and re-recording an answered task is an idempotent no-op, so a retry
 
 ## Scoring
 
-`--score` is a fraction from `0.0` to `1.0`.
-
-- Objective and short-response tasks: compare against the task's expected answers. Use `1.0`
-  or `0.0`; use `0.5` only when the task's own rubric defines a partial credit.
+- **Objective and short-response tasks: do not score these yourself.** Pass the learner's
+  answer verbatim through `--response` and leave `--score` off. The CLI compares it against
+  the answer key the run recorded when it served the task, which is the only account of what
+  the learner was actually asked — a pack edited since cannot change the verdict, and neither
+  can you. Pass the answer *as given*: do not correct, tidy, or excerpt it. Use
+  `--response-file` when the answer is long enough that argv is awkward.
 - Extended productive tasks: score each rubric dimension, pass the whole rubric result through
   `--input`, and set `--score` to the weighted total. Store the rubric detail, not only the
   total.
@@ -53,9 +57,23 @@ is refused, and re-recording an answered task is an idempotent no-op, so a retry
   pronunciation. If you have no linked audio, do not score the task — leave the dimension to
   stop as under-evidenced, or pause the run until audio is available.
 
+`--score` stays available for the judged types and for a verdict you reached yourself. A
+supplied score is recorded as `supplied` and wins over any comparison; only a computed one
+carries the scoring policy version, because `--assessor-kind` has only ever *labelled* a
+score rather than saying who reached it.
+
 Set `--assessor-kind` truthfully. `ai` means you scored it; `human` means a person did.
-`--confidence low` on an AI-scored productive task is the honest default. Include
-`--excerpt` only within the learner's retention consent.
+`--confidence low` on an AI-scored productive task is the honest default.
+
+**The response is an input, not something you decide to store.** It is compared in memory
+and reaches the database only through the track's retention rule: no consent keeps a hash
+and no text, and the score still stands. Ask for `--response-visibility full` only where the
+track has granted transcript consent — it is refused otherwise, before anything is written,
+and the task stays answerable. Refusals worth knowing by name:
+`assessment_not_machine_scorable` (this type needs a judge),
+`assessment_score_required` (nothing here can compute it — supply a score),
+`assessment_snapshot_partial` and `assessment_answer_key_malformed` (the record is damaged;
+report it rather than working around it).
 
 ## Reading a result
 

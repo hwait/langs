@@ -6,7 +6,7 @@ import json
 
 from pydantic import Field
 
-from linguawiki.contracts import LockManifest
+from linguawiki.contracts import LockManifest, parse_answer_key
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.backup import table_row_counts
 from linguawiki.db.connection import Database, quote_identifier
@@ -705,6 +705,172 @@ def _served_target_checks(database: Database) -> list[CheckResult]:
     else:
         checks.append(
             _ok("attempt_served_targets", "every targeted attempt is inside its task's targets")
+        )
+    return checks
+
+
+def _reads_as_object(raw: str) -> bool:
+    """Whether stored text is a JSON object, answered rather than raised.
+
+    Added columns cannot carry `json_valid`, so `db check` is the only thing standing
+    between a hand-edited or half-restored value and a reader that will crash on it.
+    """
+
+    try:
+        return isinstance(json.loads(raw), dict)
+    except ValueError:
+        return False
+
+
+def _reads_as_answer_key(raw: str) -> bool:
+    """Whether a stored answer key is one the scorer could actually use.
+
+    Asks `parse_answer_key`, so the check and the scorer cannot drift into disagreeing
+    about what a usable key is -- and catches its refusal, because a diagnostic never
+    raises.
+    """
+
+    try:
+        parse_answer_key(raw)
+    except LinguaWikiError:
+        return False
+    return True
+
+
+def _served_answer_key_checks(database: Database) -> list[CheckResult]:
+    """Migration 0030's snapshot group, and the provenance of every score that followed.
+
+    None of it can be a constraint. DuckDB refuses `ALTER TABLE ... ADD COLUMN` with one,
+    so `expected_json` and `rubric_json` carry no `json_valid` and `score_source` and
+    `response_visibility` carry no vocabulary check. The rules therefore live here, and
+    each one parses defensively: a diagnostic that aborts on damaged input tells an
+    operator less than one that names the rows that will not parse.
+
+    0016's snapshot group and this one are independent. A row may legitimately be whole in
+    one and absent in the other -- a task served between the two migrations is exactly
+    that -- which is why this is a second named check rather than a widening of
+    `served_snapshot_complete`.
+    """
+
+    checks: list[CheckResult] = []
+    partial = [
+        f"{run_id}/{content_id}"
+        for run_id, content_id in database.query(
+            "SELECT run_id, content_id FROM assessment_run_tasks WHERE ("
+            "  expected_json IS NULL OR prompt_snapshot IS NULL OR rubric_json IS NULL) AND ("
+            "  expected_json IS NOT NULL OR prompt_snapshot IS NOT NULL "
+            "  OR rubric_json IS NOT NULL) "
+            "ORDER BY run_id, content_id"
+        )
+    ]
+    if partial:
+        checks.append(
+            _failed(
+                "served_answer_key_complete",
+                "a run holds part of the material it served -- the answer key, the prompt, "
+                "or the rubric body but not all three -- which can establish neither what "
+                "the learner was asked nor that the record predates the snapshot",
+                served="; ".join(partial),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "served_answer_key_complete",
+                "every served answer key, prompt, and rubric is whole or wholly absent",
+            )
+        )
+    malformed: list[str] = []
+    for run_id, content_id, expected_json, rubric_json in database.query(
+        "SELECT run_id, content_id, expected_json, rubric_json FROM assessment_run_tasks "
+        "WHERE expected_json IS NOT NULL OR rubric_json IS NOT NULL "
+        "ORDER BY run_id, content_id"
+    ):
+        if expected_json is not None and not _reads_as_answer_key(str(expected_json)):
+            malformed.append(f"{run_id}/{content_id}: the answer key cannot be read")
+        if rubric_json is not None and not _reads_as_object(str(rubric_json)):
+            malformed.append(f"{run_id}/{content_id}: the rubric body is not a JSON object")
+    if malformed:
+        checks.append(
+            _failed(
+                "served_answer_key_wellformed",
+                "a served record's answer key or rubric body cannot be read, so the task "
+                "it describes cannot be scored from the account the run actually kept",
+                served="; ".join(malformed),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "served_answer_key_wellformed",
+                "every served answer key parses and every served rubric body is an object",
+            )
+        )
+    # Both directions. A version recorded beside a supplied score is a claim that work
+    # nobody did had been done, and is exactly as wrong as a computed score with none.
+    provenance = [
+        f"{result_id}: {reason}"
+        for result_id, reason in database.query(
+            "SELECT result_id, 'score_source ' || coalesce(score_source, 'is missing') "
+            "FROM assessment_results WHERE score_source IS NULL "
+            "  OR score_source NOT IN ('computed', 'supplied') "
+            "UNION ALL "
+            "SELECT result_id, 'a computed score records no scoring policy version' "
+            "FROM assessment_results "
+            "WHERE score_source = 'computed' AND scoring_policy_version IS NULL "
+            "UNION ALL "
+            "SELECT result_id, 'a supplied score records a scoring policy version' "
+            "FROM assessment_results "
+            "WHERE score_source = 'supplied' AND scoring_policy_version IS NOT NULL "
+            "ORDER BY 1, 2"
+        )
+    ]
+    if provenance:
+        checks.append(
+            _failed(
+                "result_score_provenance",
+                "a result does not say who reached its score, or claims a scoring policy "
+                "ran where a caller supplied the verdict instead",
+                results="; ".join(provenance),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "result_score_provenance",
+                "every score says whether a policy or a caller reached it",
+            )
+        )
+    retention = [
+        f"{result_id}: {reason}"
+        for result_id, reason in database.query(
+            "SELECT result_id, 'response_visibility ' "
+            "  || coalesce(response_visibility, 'is missing') "
+            "FROM assessment_results WHERE response_visibility IS NULL "
+            "  OR response_visibility NOT IN ('withheld', 'excerpt', 'full') "
+            "UNION ALL "
+            "SELECT result_id, response_visibility || ' keeps no text' "
+            "FROM assessment_results "
+            "WHERE response_visibility IN ('excerpt', 'full') AND response_excerpt IS NULL "
+            "UNION ALL "
+            "SELECT result_id, 'a withheld response kept its text anyway' "
+            "FROM assessment_results "
+            "WHERE response_visibility = 'withheld' AND response_excerpt IS NOT NULL "
+            "ORDER BY 1, 2"
+        )
+    ]
+    if retention:
+        checks.append(
+            _failed(
+                "result_response_retention",
+                "a result's stored response disagrees with what it says it kept, so a "
+                "learner's retention decision cannot be read off the row it governs",
+                results="; ".join(retention),
+            )
+        )
+    else:
+        checks.append(
+            _ok("result_response_retention", "every result keeps exactly what it says it kept")
         )
     return checks
 
@@ -2266,6 +2432,7 @@ CHECK_REQUIREMENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "assessment_provenance",
         ("attempts", "assessment_runs", "assessment_run_tasks"),
     ),
+    ("served_answer_key", ("assessment_run_tasks", "assessment_results")),
     ("mastery", ("track_item_state", "evidence")),
     ("error_model", ("error_patterns", "error_evidence", "evidence")),
     ("estimates", ("skill_estimates", "estimate_history", "estimate_evidence", "evidence")),
@@ -2352,6 +2519,11 @@ def check_database(
                 for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
             ):
                 checks.extend(_served_target_checks(database))
+        if available["served_answer_key"] and any(
+            name == "expected_json"
+            for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
+        ):
+            checks.extend(_served_answer_key_checks(database))
         if available["mastery"] and any(
             name == "evidence_ceiling"
             for name, _ in expected_schema(applied).get("track_item_state", ())
