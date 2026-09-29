@@ -466,8 +466,16 @@ This repository owns the generic Python package, schemas, migrations, Codex skil
 
 ## Verification
 
-Two tiers. Run the **stage gate** before handing off any change: every static check plus
-the whole test suite, in about five minutes.
+Three loops, and the commonest mistake is running an outer one on an inner loop's change.
+
+While you are working -- each edit, each review round, each fix pass -- run **only the
+tests that cover what you touched**. A stage takes several rounds to converge and none of
+them is a handoff, so a full run per round buys nothing a single run at the end does not.
+Being wrong about the selection here is cheap, because the stage gate is still to come.
+
+Run the **stage gate** once, when you are ready to call the stage done and have it
+reviewed or approved -- not after every round inside it. Every static check plus the whole
+test suite, in about five minutes.
 
 ```bash
 uv run python scripts/verify.py --fast
@@ -479,14 +487,17 @@ moves a pack's content hashes -- and picking the subset is the judgement most li
 wrong exactly when it matters. It is cheap on purpose: the pilot workspace is built once
 per session and copied, and the suite runs across every core.
 
-Run the **release gate** before merging to `main`, before cutting a release, and after
-changing a migration, a published schema, or a pack version:
+Run the **release gate** before merging to `main`, before cutting a release, and whenever
+the change touched a migration, a published schema, or a pack version:
 
 ```bash
 uv run python scripts/verify.py
 ```
 
 It adds branch coverage against its floor, the wheel build, and the distribution check --
-properties of a release rather than of a change. It costs roughly nine times the stage
-gate, almost entirely in coverage instrumentation, so running it after every stage of a
-multi-stage plan buys nothing that running it once before the merge does not.
+properties of a release rather than of a change, which is why it is not what a stage hands
+off against. Its cost is now close to the stage gate's: branch tracking used to dominate
+the run, and stopped mattering once the suite no longer repeated eleven minutes of
+identical DuckDB writes. `COVERAGE_CORE=sysmon` would not have helped either way --
+`sys.monitoring` gains the branch events coverage needs in Python 3.14, and this project
+is pinned to 3.12.
