@@ -48,7 +48,62 @@ def _edit_pack(root: Path, mutate: Any) -> None:
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _publish_next(workspace: PolishWorkspace, tmp_path: Path, mutate: Any) -> Path:
+LISTENING = "pl.task.listening.01"
+CLIP = b"RIFF....WAVEfmt not really a wav, but bytes with a digest\n"
+ASSET_KEY = "pl.audio.listening-01"
+
+
+def _add_recording(root: Path, clip: bytes = CLIP) -> None:
+    """Give the pilot one recording and make its first listening task play it."""
+
+    (root / "media").mkdir(exist_ok=True)
+    (root / "media" / "listening-01.wav").write_bytes(clip)
+    (root / "assets").mkdir(exist_ok=True)
+    (root / "assets" / "pl-a2-audio.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "lingua.pack.assets.v1",
+                "schema_version": 1,
+                "catalog_key": "pl-a2-audio",
+                "assets": [
+                    {
+                        "asset_key": ASSET_KEY,
+                        "path": "media/listening-01.wav",
+                        "media_type": "audio/wav",
+                        "duration_ms": 3200,
+                        "transcript": "Poproszę herbatę i wodę.",
+                        "provenance": {
+                            "origin_profile": "authored-original",
+                            "review_profile": "authored-verified",
+                            "lifecycle": "verified",
+                            "risk_tier": 2,
+                            "content_hash": "a" * 64,
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    path = root / FORM
+    document = json.loads(path.read_text(encoding="utf-8"))
+    _task(document, LISTENING)["presentation"] = {
+        "kind": "free-text",
+        "audio": {"asset_key": ASSET_KEY, "replay_allowance": 3},
+    }
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _publish_next(
+    workspace: PolishWorkspace,
+    tmp_path: Path,
+    mutate: Any,
+    *,
+    prepare: Any = None,
+    version: str = NEXT_PILOT_VERSION,
+) -> Path:
     """A next pilot version with one edit to its assessment form."""
 
     from linguawiki.packs.stamp import stamp_pack
@@ -57,8 +112,10 @@ def _publish_next(workspace: PolishWorkspace, tmp_path: Path, mutate: Any) -> Pa
     shutil.copytree(PILOT_PACK, root)
     manifest_path = root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["version"] = NEXT_PILOT_VERSION
+    manifest["version"] = version
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    if prepare is not None:
+        prepare(root)
     _edit_pack(root, mutate)
     stamp_pack(root)
     republish(root)
@@ -492,3 +549,170 @@ def test_db_check_finds_an_asset_identity_missing_its_digest(
 
     assert check.status == "failed"
     assert content_id in "".join(check.context.values())
+
+
+def _with_recording(
+    workspace: PolishWorkspace,
+    tmp_path: Path,
+    clip: bytes = CLIP,
+    version: str = NEXT_PILOT_VERSION,
+) -> Path:
+    """Update the installed pilot to a version that ships one recording."""
+
+    return _publish_next(
+        workspace,
+        tmp_path,
+        lambda _document: None,
+        prepare=lambda root: _add_recording(root, clip),
+        version=version,
+    )
+
+
+def test_serving_a_listening_task_records_which_bytes_were_played(
+    polish_workspace: PolishWorkspace, tmp_path: Path
+) -> None:
+    """Otherwise the serve writes the exact half-state its own `db check` reports.
+
+    The presentation says a recording was played and nothing says which, so the task is
+    unreadable by every reader and the workspace fails `served_presentation_complete` --
+    with no way forward, because the identity can only be recorded at serve time.
+    """
+
+    import hashlib
+
+    _with_recording(polish_workspace, tmp_path)
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, LISTENING)
+
+    played = assessment_service.served_task(
+        polish_workspace.paths, run=run.run_id, content_id=content_id
+    )
+    assert played.presentation is not None and played.presentation.audio is not None
+    assert played.asset is not None
+    assert played.asset.sha256 == hashlib.sha256(CLIP).hexdigest()
+
+    checks = _checks(polish_workspace)
+    for name in PRESENTATION_CHECKS:
+        assert checks[name].status == "ok", checks[name].message
+
+
+def test_a_recording_replaced_under_the_same_key_is_refused_as_changed(
+    polish_workspace: PolishWorkspace, tmp_path: Path
+) -> None:
+    """`assessment_asset_unavailable` would send somebody to look for a missing file."""
+
+    _with_recording(polish_workspace, tmp_path)
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, LISTENING)
+
+    _with_recording(
+        polish_workspace, tmp_path / "again", clip=CLIP + b" re-recorded", version="0.4.0"
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.served_task(
+            polish_workspace.paths, run=run.run_id, content_id=content_id
+        )
+    assert failure.value.payload.code == "assessment_asset_changed"
+
+
+def test_a_pack_that_will_not_load_is_reported_as_itself(
+    polish_workspace: PolishWorkspace, tmp_path: Path
+) -> None:
+    """A checksum mismatch is not "nobody has this recording"; it names its own problem."""
+
+    root = _with_recording(polish_workspace, tmp_path)
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, LISTENING)
+    (root / "media" / "listening-01.wav").write_bytes(CLIP + b" tampered")
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.served_task(
+            polish_workspace.paths, run=run.run_id, content_id=content_id
+        )
+    assert failure.value.payload.code == "pack_checksum_mismatch"
+
+
+def test_db_check_finds_a_bank_whose_buttons_no_key_accepts(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """The rule the model exists for, asserted over the data as well as at the door.
+
+    A bank that was hand-repaired, partially restored, or written by a future installer
+    bug can hold buttons none of which the key accepts. Nothing re-derives it: the task
+    serves, the learner presses one, and they score 0.0 with no diagnostic anywhere.
+    """
+
+    content_id = _content_id(polish_workspace, CHOOSER)
+    with (
+        open_writer(polish_workspace.paths, command="test.damage") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE assessment_tasks SET expected_json = ? WHERE content_id = ?",
+            [json.dumps({"answers": ["something no button says"]}), content_id],
+        )
+
+    check = _checks(polish_workspace)["bank_presentation_wellformed"]
+
+    assert check.status == "failed"
+    reported = "".join(check.context.values())
+    assert content_id in reported
+    assert "0 of its choices" in reported
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        '{"content_id": "cnt_x", "sha256": "a", "extra": 1}',
+        '{"content_id": "cnt_x", "sha256": 5}',
+        '{"content_id": "cnt_x"}',
+        '{"content_id": "", "sha256": "' + "a" * 64 + '"}',
+    ],
+)
+def test_db_check_and_the_reader_agree_about_a_damaged_asset_identity(
+    polish_workspace: PolishWorkspace, identity: str
+) -> None:
+    """One parser, or an operator is told the workspace is clean and the read refuses."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, CHOOSER)
+    _damage(
+        polish_workspace,
+        run.run_id,
+        content_id,
+        presentation_json=json.dumps({"kind": "free-text", "audio": {"asset_key": "pl.audio.x"}}),
+        asset_identity_json=identity,
+    )
+
+    assert _checks(polish_workspace)["served_presentation_wellformed"].status == "failed"
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.served_task(
+            polish_workspace.paths, run=run.run_id, content_id=content_id
+        )
+    assert failure.value.payload.code == "assessment_presentation_malformed"
+
+
+def test_an_empty_string_snapshot_is_absent_to_the_check_and_to_the_reader(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """ "Present" is "parses to something", not "the column is not NULL"."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, CHOOSER)
+    _damage(
+        polish_workspace,
+        run.run_id,
+        content_id,
+        presentation_json="",
+        asset_identity_json="",
+        content_hash=None,
+    )
+
+    checks = _checks(polish_workspace)
+    assert checks["served_presentation_complete"].status == "ok"
+    assert checks["served_presentation_wellformed"].status == "ok"
+    read = assessment_service.served_task(
+        polish_workspace.paths, run=run.run_id, content_id=content_id
+    )
+    assert read.presentation is None and read.asset is None

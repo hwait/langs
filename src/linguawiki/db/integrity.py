@@ -10,6 +10,7 @@ from linguawiki.contracts import (
     SNAPSHOT_PARTIAL,
     LockManifest,
     parse_answer_key,
+    parse_asset_identity,
     parse_task_presentation,
     reads_as_json_object,
     served_snapshot_state,
@@ -26,6 +27,7 @@ from linguawiki.errors import LinguaWikiError
 from linguawiki.ids import IdPrefix, validate_id
 from linguawiki.models import ContractModel
 from linguawiki.placement import MACHINE_SCORABLE_TASK_TYPES
+from linguawiki.presentation import choices_answering_key
 from linguawiki.versions import core_pin, skill_bundle_pin
 
 ORPHAN_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
@@ -732,21 +734,6 @@ def _reads_as_answer_key(raw: str) -> bool:
     return True
 
 
-def _readable_json_object(raw: str) -> dict[str, object] | None:
-    """A stored JSON object, or `None` when nothing will read it.
-
-    `RecursionError` is not a `ValueError`: deeply nested but otherwise valid JSON
-    exhausts the decoder's stack, and catching only the malformed case let it escape a
-    diagnostic whose whole contract is never to raise.
-    """
-
-    try:
-        document = json.loads(raw)
-    except (ValueError, RecursionError):
-        return None
-    return document if isinstance(document, dict) else None
-
-
 def _reads_as_presentation(raw: str) -> bool:
     """Asks `parse_task_presentation`, so the check and the reader cannot disagree."""
 
@@ -774,9 +761,9 @@ def _presentation_checks(database: Database) -> list[CheckResult]:
     # The bank. `task_type` and `modality` sit on the same row, so the check asks what
     # the row itself says it needs rather than the stronger question of every row.
     bank: list[str] = []
-    for content_id, task_type, modality, raw in database.query(
-        "SELECT content_id, task_type, modality, presentation_json FROM assessment_tasks "
-        "WHERE presentation_json IS NOT NULL ORDER BY content_id"
+    for content_id, task_type, modality, raw, expected_json in database.query(
+        "SELECT content_id, task_type, modality, presentation_json, expected_json "
+        "FROM assessment_tasks WHERE presentation_json IS NOT NULL ORDER BY content_id"
     ):
         try:
             shown = parse_task_presentation(str(raw))
@@ -789,6 +776,23 @@ def _presentation_checks(database: Database) -> list[CheckResult]:
             bank.append(f"{content_id}: a {task_type} task carries choices")
         if shown.audio is not None and str(modality) != "audio":
             bank.append(f"{content_id}: a {modality} task carries a recording")
+        if not shown.choices:
+            continue
+        # The consequence, not the derivation. A bank that was hand-repaired, partially
+        # restored, or written by a future installer bug can hold buttons none of which
+        # the key accepts -- and then every learner who presses one scores 0.0 with
+        # nothing anywhere saying why. Checking only that the record *parses* passes
+        # exactly the state the model's other half forbids.
+        try:
+            key = parse_answer_key(str(expected_json))
+        except LinguaWikiError:
+            bank.append(f"{content_id}: a task with choices has no usable answer key")
+            continue
+        answering = choices_answering_key([choice.value for choice in shown.choices], key.answers)
+        if len(answering) != 1:
+            bank.append(
+                f"{content_id}: {len(answering)} of its choices are answers the key accepts"
+            )
     if bank:
         checks.append(
             _failed(
@@ -817,26 +821,35 @@ def _presentation_checks(database: Database) -> list[CheckResult]:
         "ORDER BY run_id, content_id"
     ):
         where = f"{run_id}/{content_id}"
+        # Through the same two parsers the reader uses. `db check` and the read path
+        # asking this question two different ways is how an operator is told a workspace
+        # is clean and then refused -- told the opposite of the truth, in this file's own
+        # words -- and "present" is *parses to something*, not "the column is not NULL":
+        # an empty string is absent to one and present to the other.
         shown = None
+        readable_shown = True
         if raw_shown is not None:
             try:
                 shown = parse_task_presentation(str(raw_shown))
             except LinguaWikiError:
+                readable_shown = False
                 malformed.append(f"{where}: the presentation cannot be read")
         identity = None
+        readable_identity = True
         if raw_identity is not None:
-            identity = _readable_json_object(str(raw_identity))
-            if identity is None:
+            try:
+                # A key with no digest is refused here by the same rule the reader
+                # applies: it answers "which recording was meant" and not "is this the
+                # recording they heard", which is the only question the snapshot settles.
+                identity = parse_asset_identity(str(raw_identity))
+            except LinguaWikiError:
+                readable_identity = False
                 malformed.append(f"{where}: the asset identity cannot be read")
-            elif not (identity.get("content_id") and identity.get("sha256")):
-                # A key alone answers "which recording was meant" and not "is this the
-                # recording they heard", which is the only question the snapshot exists
-                # to settle.
-                malformed.append(f"{where}: the asset identity carries no digest")
-        if raw_identity is not None and raw_shown is None:
-            partial.append(f"{where}: a recording with nothing saying how it was shown")
-        if shown is not None and shown.audio is not None and raw_identity is None:
-            partial.append(f"{where}: an audio task with nothing saying which bytes")
+        if readable_shown and readable_identity:
+            if identity is not None and shown is None:
+                partial.append(f"{where}: a recording with nothing saying how it was shown")
+            if shown is not None and shown.audio is not None and identity is None:
+                partial.append(f"{where}: an audio task with nothing saying which bytes")
     if partial:
         checks.append(
             _failed(
@@ -2673,10 +2686,17 @@ def check_database(
             for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
         ):
             checks.extend(_served_answer_key_checks(database))
-        if available["served_answer_key"] and any(
-            name == "presentation_json"
-            for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
+        if (
+            available["served_answer_key"]
+            and "assessment_tasks" in expected
+            and any(
+                name == "presentation_json"
+                for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
+            )
         ):
+            # `assessment_tasks` is in the gate because the bank half of this check reads
+            # it, and a diagnostic that raises a `CatalogException` on a workspace missing
+            # a table is the one thing `db check` must never do.
             checks.extend(_presentation_checks(database))
         if available["mastery"] and any(
             name == "evidence_ceiling"

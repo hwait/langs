@@ -24,15 +24,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from pydantic import Field, ValidationError
+from pydantic import Field
 
 from linguawiki.clock import Clock, SystemClock, aware_utc
 from linguawiki.contracts import (
     SNAPSHOT_ABSENT,
     SNAPSHOT_WHOLE,
     PackMaturity,
+    ServedAsset,
     TaskPresentation,
     parse_answer_key,
+    parse_asset_identity,
     parse_task_presentation,
     reads_as_json_object,
     served_snapshot_state,
@@ -43,7 +45,7 @@ from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.ids import AssessmentId, EventId
 from linguawiki.models import ContractModel
 from linguawiki.packs import coverage as coverage_module
-from linguawiki.packs.format import load_pack, resolve_pack_path
+from linguawiki.packs.format import ResolvedAsset, load_pack, resolve_pack_path
 from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import (
     ALGORITHM_VERSION,
@@ -94,13 +96,6 @@ class DimensionReport(ContractModel):
     posterior_mean: float | None = None
     uncertainty: float | None = None
     unavailable_reason: str | None = None
-
-
-class ServedAsset(ContractModel):
-    """A recording as served: which one was meant, and which bytes were played."""
-
-    content_id: str
-    sha256: str
 
 
 class NextTaskReport(ContractModel):
@@ -834,6 +829,12 @@ def next_task(
                 run_id=run_id,
                 content_id=selection.candidate.content_id,
             )
+            # Resolved here too, and before the transaction: a task that says it plays a
+            # recording the installed pack cannot produce is refused while it is still
+            # unserved, rather than written as a row nothing can read afterwards.
+            played = _serve_asset_identity(
+                _pack_assets(database, record.pack_key) if _plays_audio(shown) else (), shown
+            )
             sequence = (
                 int(
                     database.scalar(
@@ -888,12 +889,11 @@ def next_task(
                         else json.dumps(
                             shown.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
                         ),
-                        # Nothing resolves a pack recording yet -- no pack ships one --
-                        # so this is null in every row a serve writes today. The column
-                        # exists now because the snapshot is the only place the identity
-                        # could ever be recorded, and a run served before it existed
-                        # could not be given one afterwards.
-                        None,
+                        None
+                        if played is None
+                        else json.dumps(
+                            played.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+                        ),
                     ],
                 )
                 # The learner has now seen it, whether or not they answer. Recording the
@@ -920,6 +920,7 @@ def next_task(
                 content_family=selection.candidate.content_family,
                 prompt=str(task[1]),
                 presentation=shown,
+                asset=played,
                 rubric=json.loads(str(task[2])),
                 rubric_version=int(task[3]),
                 permitted_help=str(task[4]),
@@ -1517,38 +1518,88 @@ def _refuse_presentation(code: str, message: str, reason: str) -> LinguaWikiErro
     )
 
 
-def _resolve_served_asset(database: Database, identity: ServedAsset) -> ServedAsset:
+def _pack_assets(database: Database, pack_key: str | None) -> tuple[ResolvedAsset, ...]:
+    """Every recording the pack this run is taught from ships.
+
+    Scoped to that pack rather than to "the installed pack": a workspace may hold two,
+    and `installed_pack` with no key refuses with `pack_selection_required` -- a refusal
+    about pack selection surfacing out of a read of one learner's history. A track names
+    the pack it is taught from, and a reference is resolved inside that pack's content.
+
+    A pack that will not load reports *itself*. Collapsing a checksum mismatch or an
+    unreadable file into "the recording is not available" sends an operator to look for
+    a missing file that is sitting right there.
+    """
+
+    source = str(pack_service.installed_pack(database, pack_key)["source_path"] or "")
+    if not source:
+        return ()
+    # Loading the whole pack to read one digest is wasteful and deliberate for now; C5
+    # replaces it with an installed-asset table when audio actually arrives.
+    return load_pack(resolve_pack_path(source)).assets
+
+
+def _run_pack_key(database: Database, run_id: str) -> str | None:
+    """The pack the run's track is taught from. `None` leaves pack selection as it was."""
+
+    row = _run_row(database, run_id)
+    return learner_service.track_context(database, str(row[1])).pack_key
+
+
+def _plays_audio(shown: TaskPresentation | None) -> bool:
+    return shown is not None and shown.audio is not None
+
+
+def _serve_asset_identity(
+    assets: Sequence[ResolvedAsset], shown: TaskPresentation | None
+) -> ServedAsset | None:
+    """The recording this serving actually played, recorded when it is played.
+
+    There is no second chance at this. The identity can only be established while the
+    task is being served, so a serve that writes the presentation and not the identity
+    manufactures exactly the half-state `served_presentation_complete` exists to report,
+    with no way forward for anybody who finds it afterwards.
+    """
+
+    if shown is None or shown.audio is None:
+        return None
+    for asset in assets:
+        if asset.asset_key == shown.audio.asset_key:
+            return ServedAsset(content_id=str(asset.content_id), sha256=asset.sha256)
+    raise LinguaWikiError(
+        "assessment_asset_unavailable",
+        f"this task plays {shown.audio.asset_key}, which the installed pack does not hold",
+        details=(ErrorDetail(field="asset", reason="no installed pack holds it"),),
+    )
+
+
+def _resolve_served_asset(
+    database: Database, identity: ServedAsset, *, pack_key: str | None
+) -> ServedAsset:
     """Prove the recording the snapshot names is still the recording it named.
 
     The identity is `(content id, sha256)` and only the digest can answer the question:
     a key resolves to whatever currently answers to it, which is precisely the
-    substitution this refuses. The bytes are not in the database, so they are read from
-    the pack the installation records -- safely, because what comes back is checked
-    against the digest rather than trusted for being in the right place.
+    substitution this refuses.
 
     The two refusals are separate codes on purpose. "Nobody has this recording" and
     "somebody has a different one" send an operator to different places, and matching
     error prose to tell them apart is how that distinction gets lost.
     """
 
-    source = str(pack_service.installed_pack(database)["source_path"] or "")
-    resolved = None
-    if source:
-        try:
-            # Loading the whole pack to read one digest is wasteful and deliberate for
-            # now: no pack ships a recording, so this runs only against a hand-made row.
-            # When audio arrives in C5 it wants an installed asset table, not a cache.
-            for candidate in load_pack(resolve_pack_path(source)).assets:
-                if str(candidate.content_id) == identity.content_id:
-                    resolved = candidate
-                    break
-        except LinguaWikiError:
-            resolved = None
+    resolved = next(
+        (
+            candidate
+            for candidate in _pack_assets(database, pack_key)
+            if str(candidate.content_id) == identity.content_id
+        ),
+        None,
+    )
     if resolved is None:
         raise LinguaWikiError(
             "assessment_asset_unavailable",
             f"the recording {identity.content_id} this task played is not available",
-            details=(ErrorDetail(field="asset", reason="no pack holds it"),),
+            details=(ErrorDetail(field="asset", reason="the pack no longer holds it"),),
         )
     if resolved.sha256 != identity.sha256:
         raise LinguaWikiError(
@@ -1572,9 +1623,8 @@ def served_task(
 
     with open_reader(paths, clock=clock or SystemClock()) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
-        return served_task_report(
-            database, _resolve_run(database, run, track_id=track_id), content_id=content_id
-        )
+        resolved_run = _resolve_run(database, run, track_id=track_id)
+        return served_task_report(database, resolved_run, content_id=content_id)
 
 
 def served_task_report(database: Database, run_id: str, *, content_id: str) -> ServedTaskReport:
@@ -1594,7 +1644,7 @@ def served_task_report(database: Database, run_id: str, *, content_id: str) -> S
             details=(ErrorDetail(field="content_id", reason="task was not served"),),
         )
     shown = parse_task_presentation(None if row[10] is None else str(row[10]))
-    identity = _parse_asset_identity(None if row[11] is None else str(row[11]))
+    identity = parse_asset_identity(None if row[11] is None else str(row[11]))
     # The two columns are one group. An identity with no presentation, and an audio
     # presentation with no identity, are each damage rather than a legacy row: neither
     # can say what the learner heard, and reading past either sends the reader back to
@@ -1627,39 +1677,10 @@ def served_task_report(database: Database, run_id: str, *, content_id: str) -> S
         rubric_version=int(row[8]),
         prompt=None if row[9] is None else str(row[9]),
         presentation=shown,
-        asset=None if identity is None else _resolve_served_asset(database, identity),
+        asset=None
+        if identity is None
+        else _resolve_served_asset(database, identity, pack_key=_run_pack_key(database, run_id)),
     )
-
-
-def _parse_asset_identity(raw: str | None) -> ServedAsset | None:
-    """Read a stored asset identity, defensively: the column has no `json_valid`."""
-
-    if raw is None or not raw.strip():
-        return None
-    try:
-        document = json.loads(raw)
-    except (ValueError, RecursionError) as exc:
-        raise _refuse_presentation(
-            "assessment_presentation_malformed",
-            f"the recorded asset identity cannot be read: {exc}",
-            "asset identity is not readable JSON",
-        ) from exc
-    if not isinstance(document, dict):
-        raise _refuse_presentation(
-            "assessment_presentation_malformed",
-            "the recorded asset identity is not a JSON object",
-            f"asset identity is a {type(document).__name__}",
-        )
-    try:
-        return ServedAsset.model_validate(document)
-    except ValidationError as exc:
-        first = exc.errors()[0]
-        field = ".".join(str(part) for part in first["loc"]) or "asset"
-        raise _refuse_presentation(
-            "assessment_presentation_malformed",
-            f"the recorded asset identity is unusable: {field} {first['msg'].lower()}",
-            f"asset identity {field}",
-        ) from exc
 
 
 def _assert_no_presentation_was_lost(

@@ -53,6 +53,7 @@ from linguawiki.contracts import (
     PackRelation,
     PackSourcePolicy,
     PackSourceRecommendation,
+    TaskPresentation,
     canonical_content_hash,
 )
 from linguawiki.errors import ErrorDetail, LinguaWikiError
@@ -187,6 +188,26 @@ class LoadedPack:
 
     @property
     def items(self) -> tuple[ResolvedItem, ...]:
+        """Every item the pack declares, for hashing, identity, and the promotion gate."""
+
+        return (*self.installable_items, *(asset.item for asset in self.assets))
+
+    @property
+    def installable_items(self) -> tuple[ResolvedItem, ...]:
+        """The items that become `content_records` rows.
+
+        An asset is deliberately not among them. `content_records.content_kind` is a
+        closed vocabulary on a table DuckDB cannot re-constrain -- every content row is
+        referenced, so widening the CHECK means rebuilding the most-referenced table in
+        the schema -- and nothing in a learner's database references a recording yet. The
+        pack layer still hashes, gate-checks and refuses an asset like any other item;
+        what is deferred is only whether it becomes learner-facing content, which is
+        C5's question to answer when audio actually arrives.
+
+        The split is stated here, once, rather than left as an exclusion the installer
+        and `_diff` each have to remember.
+        """
+
         return (
             *self.knowledge,
             *self.examples,
@@ -195,7 +216,6 @@ class LoadedPack:
             *self.activities,
             *self.recommendations,
             *self.bundles,
-            *(asset.item for asset in self.assets),
         )
 
     def item_index(self) -> dict[tuple[str, str], ResolvedItem]:
@@ -250,7 +270,17 @@ def directory_digests(root: Path) -> dict[str, str]:
         relative = path.relative_to(root).as_posix()
         if relative == MANIFEST_NAME or "__pycache__" in path.parts:
             continue
-        digests[relative] = file_sha256(path)
+        try:
+            digests[relative] = file_sha256(path)
+        except OSError as exc:
+            # "Cannot be read" is an answer, not an error to propagate: this ran inside
+            # `pack validate`, whose whole job is to report on a pack, and an unreadable
+            # file came out as a bare `PermissionError`.
+            raise _fail(
+                "pack_file_unreadable",
+                f"{relative} cannot be read, so the pack cannot be checked against it",
+                [f"{relative}: {exc}"],
+            ) from exc
     return digests
 
 
@@ -705,6 +735,28 @@ def _load_descriptors(root: Path, manifest: PackManifest) -> tuple[ResolvedItem,
     return tuple(items)
 
 
+def task_context(
+    file_header: Mapping[str, Any],
+    presentation: TaskPresentation | None,
+    digests: Mapping[str, str],
+) -> dict[str, Any]:
+    """A task's hash context: its form's header, plus the recording it plays.
+
+    The recording *is* the question a listening task asks, so a pack author swapping the
+    voice has to re-stamp the task -- otherwise the task keeps its hash and its review,
+    and somebody is credited with having approved a question nobody heard. Covering the
+    digest in the asset's own hash detaches the asset's reviews, which is right and is
+    not enough.
+
+    A task that plays nothing gets its form header unchanged, so adding this moved no
+    hash in any pack that ships no audio.
+    """
+
+    if presentation is None or presentation.audio is None:
+        return dict(file_header)
+    return {**file_header, "audio_sha256": digests.get(presentation.audio.asset_key, "")}
+
+
 def asset_context(file_header: Mapping[str, Any], sha256: str) -> dict[str, Any]:
     """The hash context of one asset: its catalog's header, plus the bytes it names.
 
@@ -722,7 +774,7 @@ def asset_context(file_header: Mapping[str, Any], sha256: str) -> dict[str, Any]
     return {**file_header, "sha256": sha256}
 
 
-def _contained_media(root: Path, relative: str, *, where: str) -> Path:
+def contained_media(root: Path, relative: str, *, where: str) -> Path:
     """The file an asset names, proven to be one this pack actually holds.
 
     Containment is resolved rather than lexical. The paths here hold no `..` at all --
@@ -732,6 +784,15 @@ def _contained_media(root: Path, relative: str, *, where: str) -> Path:
     outside everything the pack's rights and privacy classes cover.
     """
 
+    if not relative.startswith(MEDIA_PREFIX):
+        # Checked here rather than at each caller, because the reason is the same one:
+        # `Path.__truediv__` with an absolute string discards the root entirely, so
+        # "under media/" is what keeps a join from reaching anywhere on the filesystem.
+        raise _fail(
+            "pack_asset_misplaced",
+            f"{where} keeps its recording outside {MEDIA_PREFIX}",
+            [relative],
+        )
     candidate = root / relative
     try:
         resolved = candidate.resolve()
@@ -760,28 +821,50 @@ def _contained_media(root: Path, relative: str, *, where: str) -> Path:
     return resolved
 
 
-def _load_assets(
-    root: Path, manifest: PackManifest, digests: Mapping[str, str]
-) -> tuple[ResolvedAsset, ...]:
-    assets: list[ResolvedAsset] = []
+def _catalog_files(root: Path, manifest: PackManifest) -> tuple[str, ...]:
+    """The asset catalogs, from the directory as well as from the manifest.
+
+    Every other kind is discovered through `manifest.files` alone, and that is safe for
+    them because nothing outside the file itself enters their hash. A task's hash now
+    covers the recording it plays, so the *set* of catalogs has to be the same in
+    `pack stamp` and in `load_pack` -- and an author who adds a recording and stamps
+    before publishing has a manifest that does not list it yet. Discovering the
+    directory makes the two agree in either order; `_assert_checksum_coverage` still
+    runs first at load, so an undeclared file is refused before anything here reads it.
+    """
+
+    catalogs = {name for name in manifest.files if name.startswith(ASSETS_PREFIX)}
+    directory = root / ASSETS_PREFIX.rstrip("/")
+    if directory.is_dir():
+        catalogs.update(
+            path.relative_to(root).as_posix() for path in directory.glob("*.json") if path.is_file()
+        )
+    return tuple(sorted(catalogs))
+
+
+def declared_assets(
+    root: Path, manifest: PackManifest
+) -> tuple[tuple[str, PackAssetFile, PackAsset, str], ...]:
+    """Every recording the pack declares: where it is declared, and the digest it has.
+
+    One derivation, used by `load_pack` and by `pack stamp`. The digest is read from the
+    file in both, so stamping before republishing and republishing before stamping give
+    the same answer, and the containment and uniqueness rules cannot hold in one command
+    and not the other.
+    """
+
+    declared: list[tuple[str, PackAssetFile, PackAsset, str]] = []
     by_key: dict[str, str] = {}
     by_path: dict[str, str] = {}
-    for relative in _declared(manifest, ASSETS_PREFIX):
+    for relative in _catalog_files(root, manifest):
         document = _validate_model(
             PackAssetFile, _read_json(root / relative, relative=relative), where=relative
         )
-        file_header = file_context(document, "assets")
         for asset in document.assets:
             where = f"{relative}#{asset.asset_key}"
-            if not asset.path.startswith(MEDIA_PREFIX):
-                raise _fail(
-                    "pack_asset_misplaced",
-                    f"{where} keeps its recording outside {MEDIA_PREFIX}",
-                    [asset.path],
-                )
             # Two identities, so two uniqueness rules. Registration would refuse one
-            # recording answering to two keys, and a preflight that compared only keys
-            # would approve the pack and fail on its second asset.
+            # recording answering to two keys, and a check that compared only keys would
+            # approve the pack and fail on its second asset.
             if asset.asset_key in by_key:
                 raise _fail(
                     "pack_asset_duplicate",
@@ -796,35 +879,46 @@ def _load_assets(
                 )
             by_key[asset.asset_key] = where
             by_path[asset.path] = where
-            _contained_media(root, asset.path, where=where)
-            # The observed digest, not the declared one. Checksum coverage has already
-            # proven the two agree; taking the observed one means the asset's version is
-            # the bytes rather than a claim about them.
-            digest = digests.get(asset.path)
-            if digest is None:
+            path = contained_media(root, asset.path, where=where)
+            try:
+                digest = file_sha256(path)
+            except OSError as exc:
                 raise _fail(
-                    "pack_asset_missing",
-                    f"{where} names a file the pack does not hold",
-                    [asset.path],
-                )
-            assets.append(
-                ResolvedAsset(
-                    item=_resolve_item(
-                        manifest,
-                        content_kind=ASSET_KIND,
-                        stable_key=asset.asset_key,
-                        title=asset.asset_key,
-                        body=asset.transcript,
-                        provenance=asset.provenance,
-                        payload=asset,
-                        where=where,
-                        context=asset_context(file_header, digest),
-                    ),
-                    asset=asset,
-                    sha256=digest,
-                )
-            )
-    return tuple(assets)
+                    "pack_file_unreadable",
+                    f"{where} names a recording that cannot be read",
+                    [f"{asset.path}: {exc}"],
+                ) from exc
+            declared.append((where, document, asset, digest))
+    return tuple(declared)
+
+
+def audio_digests(root: Path, manifest: PackManifest) -> dict[str, str]:
+    """`asset_key` to the digest of its bytes, for hashing the tasks that play them."""
+
+    return {
+        asset.asset_key: digest for _where, _file, asset, digest in declared_assets(root, manifest)
+    }
+
+
+def _load_assets(root: Path, manifest: PackManifest) -> tuple[ResolvedAsset, ...]:
+    return tuple(
+        ResolvedAsset(
+            item=_resolve_item(
+                manifest,
+                content_kind=ASSET_KIND,
+                stable_key=asset.asset_key,
+                title=asset.asset_key,
+                body=asset.transcript,
+                provenance=asset.provenance,
+                payload=asset,
+                where=where,
+                context=asset_context(file_context(document, "assets"), digest),
+            ),
+            asset=asset,
+            sha256=digest,
+        )
+        for where, document, asset, digest in declared_assets(root, manifest)
+    )
 
 
 def _assert_played_assets_exist(
@@ -854,7 +948,7 @@ def _assert_played_assets_exist(
 
 
 def _load_assessments(
-    root: Path, manifest: PackManifest
+    root: Path, manifest: PackManifest, digests: Mapping[str, str]
 ) -> tuple[tuple[ResolvedItem, ...], tuple[PackAssessmentFile, ...]]:
     items: list[ResolvedItem] = []
     forms: list[PackAssessmentFile] = []
@@ -874,7 +968,9 @@ def _load_assessments(
                     provenance=task.provenance,
                     payload=task,
                     where=f"{relative}#{task.stable_key}",
-                    context=file_context(document, "tasks"),
+                    context=task_context(
+                        file_context(document, "tasks"), task.presentation, digests
+                    ),
                 )
             )
     return tuple(items), tuple(forms)
@@ -1150,8 +1246,9 @@ def load_pack(root: str | Path) -> LoadedPack:
         if EXPECTATIONS_NAME in manifest.files
         else None
     )
-    tasks, forms = _load_assessments(directory, manifest)
-    assets = _load_assets(directory, manifest, digests)
+    audio = audio_digests(directory, manifest)
+    tasks, forms = _load_assessments(directory, manifest, audio)
+    assets = _load_assets(directory, manifest)
     _assert_played_assets_exist(forms, assets)
     bundles, bundle_files = _load_bundles(directory, manifest)
     pack = LoadedPack(

@@ -1256,6 +1256,51 @@ class TaskPresentation(ContractModel):
         return self
 
 
+class ServedAsset(ContractModel):
+    """A recording as served: which one was meant, and which bytes were played.
+
+    Both halves, always. The content ID answers *which recording was meant*; only the
+    digest answers *is this the recording they heard*, which is the one question the
+    snapshot exists to settle.
+    """
+
+    content_id: NonBlankStr
+    sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+def parse_asset_identity(raw: str | None) -> ServedAsset | None:
+    """Read a stored asset identity, refusing by name whichever rule it breaks.
+
+    The one place a stored identity is parsed, for the same reason as
+    `parse_task_presentation`: `db check` and the read path asked this question two
+    different ways, so an operator was told a workspace was clean and the read then
+    refused. A half-answer here -- a key with no digest -- passes the check that looks
+    for JSON and fails the reader that needs to compare bytes.
+    """
+
+    def refuse(reason: str) -> LinguaWikiError:
+        return LinguaWikiError(
+            "assessment_presentation_malformed",
+            f"the recorded asset identity cannot be used: {reason}",
+            details=(ErrorDetail(field="asset", reason=reason),),
+        )
+
+    if raw is None or not raw.strip():
+        return None
+    try:
+        document = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise refuse(f"not readable JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise refuse(f"not a JSON object but {type(document).__name__}")
+    try:
+        return ServedAsset.model_validate(document)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        field = ".".join(str(part) for part in first["loc"]) or "asset"
+        raise refuse(f"{field} {first['msg'].lower()}") from exc
+
+
 def parse_task_presentation(raw: str | None) -> TaskPresentation | None:
     """Read a stored presentation record, refusing by name whichever rule it breaks.
 

@@ -193,11 +193,18 @@ def _asset_digest(root: Path, relative: str, *, where: str) -> str:
     to report on a pack.
     """
 
+    # The loader's own containment check, called rather than re-derived. Two answers to
+    # "is this a file this pack holds" is how stamping came to hash bytes outside the
+    # pack while `load_pack` refused them -- and `Path.__truediv__` with an absolute
+    # string discards the root, so this reached any file the process could read.
+    path = pack_format.contained_media(root, relative, where=where)
     try:
-        return file_sha256(root / relative)
+        return file_sha256(path)
     except OSError as exc:
+        # Absent, escaping and unreadable stay three answers: `contained_media` has
+        # already ruled out the first two, so this one is exactly "we cannot read it".
         raise LinguaWikiError(
-            "pack_asset_missing",
+            "pack_file_unreadable",
             f"{where} names a recording that cannot be read",
             details=(ErrorDetail(field=relative, reason=str(exc)),),
         ) from exc
@@ -226,15 +233,24 @@ def _stamp_json(root: Path, manifest: PackManifest, relative: str) -> tuple[list
         )
         file_header = pack_format.file_context(parsed, collection)
         items = getattr(parsed, collection)
-        # An asset's hash covers the bytes it names, so its context is per item rather
-        # than per file. Both the digest and its shape come from `pack_format`, because
-        # a second derivation here is a pack that is stale the moment it is stamped.
-        contexts = [
-            pack_format.asset_context(file_header, _asset_digest(root, item.path, where=relative))
-            if content_kind == pack_format.ASSET_KIND
-            else file_header
-            for item in items
-        ]
+        # An asset's hash covers the bytes it names, and so does the hash of any task
+        # that plays it, so both contexts are per item rather than per file. Every part
+        # of them comes from `pack_format` -- a second derivation here is a pack that is
+        # stale the moment it is stamped.
+        if content_kind == pack_format.ASSET_KIND:
+            contexts = [
+                pack_format.asset_context(
+                    file_header, _asset_digest(root, item.path, where=relative)
+                )
+                for item in items
+            ]
+        elif content_kind == pack_format.TASK_KIND:
+            digests = pack_format.audio_digests(root, manifest)
+            contexts = [
+                pack_format.task_context(file_header, item.presentation, digests) for item in items
+            ]
+        else:
+            contexts = [file_header for _item in items]
         stamped = [
             _stamp_one(
                 manifest,

@@ -23,7 +23,7 @@ import pytest
 from linguawiki.errors import LinguaWikiError
 from linguawiki.packs.format import PackError, load_pack
 from linguawiki.packs.stamp import stamp_pack
-from tests.conftest import PILOT_PACK
+from tests.conftest import PILOT_PACK, SyntheticWorkspace
 from tests.language_packs.support import republish
 
 CLIP = b"RIFF....WAVEfmt not really a wav, but bytes with a digest\n"
@@ -151,11 +151,15 @@ def test_a_recording_must_live_under_the_media_root(pack: Path) -> None:
     """
 
     shutil.move(pack / "media" / "listening-01.wav", pack / "listening-01.wav")
-    _rewrite_catalog(pack, _catalog(path="listening-01.wav"))
+    _rewrite_catalog_only(pack, _catalog(path="listening-01.wav"))
+    republish(pack)
 
-    with pytest.raises(PackError) as failure:
+    with pytest.raises(LinguaWikiError) as stamping:
+        stamp_pack(pack)
+    assert stamping.value.payload.code == "pack_asset_misplaced"
+    with pytest.raises(PackError) as loading:
         load_pack(pack)
-    assert failure.value.payload.code == "pack_asset_misplaced"
+    assert loading.value.payload.code == "pack_asset_misplaced"
 
 
 def test_a_recording_that_is_a_symlink_out_of_the_pack_is_refused(
@@ -184,19 +188,19 @@ def test_one_recording_answers_to_one_key_and_one_key_to_one_recording(pack: Pat
     """Uniqueness has as many forms as the thing has identities."""
 
     (pack / "media" / "listening-02.wav").write_bytes(CLIP + b"different")
-    document = _catalog()
-    document["assets"].append({**document["assets"][0], "path": "media/listening-02.wav"})
-    _rewrite_catalog(pack, document)
-    with pytest.raises(PackError) as failure:
-        load_pack(pack)
-    assert failure.value.payload.code == "pack_asset_duplicate"
-
-    document = _catalog()
-    document["assets"].append({**document["assets"][0], "asset_key": "pl.audio.listening-01b"})
-    _rewrite_catalog(pack, document)
-    with pytest.raises(PackError) as failure:
-        load_pack(pack)
-    assert failure.value.payload.code == "pack_asset_duplicate"
+    for duplicate in ({"path": "media/listening-02.wav"}, {"asset_key": "pl.audio.listening-01b"}):
+        document = _catalog()
+        document["assets"].append({**document["assets"][0], **duplicate})
+        _rewrite_catalog_only(pack, document)
+        republish(pack)
+        # Both commands, by the same name: a reviewer told "valid" by one and refused by
+        # the other has been told the opposite of the truth.
+        with pytest.raises(LinguaWikiError) as stamping:
+            stamp_pack(pack)
+        assert stamping.value.payload.code == "pack_asset_duplicate"
+        with pytest.raises(PackError) as loading:
+            load_pack(pack)
+        assert loading.value.payload.code == "pack_asset_duplicate"
 
 
 def test_a_pack_with_no_assets_directory_is_unaffected(tmp_path: Path) -> None:
@@ -205,3 +209,124 @@ def test_a_pack_with_no_assets_directory_is_unaffected(tmp_path: Path) -> None:
     root = tmp_path / "pl-pilot"
     shutil.copytree(PILOT_PACK, root)
     assert load_pack(root).assets == ()
+
+
+def test_a_pack_that_ships_a_recording_installs(
+    pack: Path, synthetic_workspace: SyntheticWorkspace
+) -> None:
+    """`pack validate` and `pack install` have to agree about what a pack is.
+
+    An asset is a pack item: it is hashed, gate-checked and refused like any other. It is
+    not learner content, and `content_records` has a closed vocabulary that does not hold
+    it -- so installing one raised a raw `ConstraintException` out of DuckDB, with no
+    code, after `validate` and `install --dry-run` had both called the pack good.
+    """
+
+    from linguawiki.db.connection import open_reader
+    from linguawiki.services import packs as pack_service
+
+    paths = synthetic_workspace.paths
+    clock = synthetic_workspace.clock
+
+    preview = pack_service.install(paths, pack, clock=clock, dry_run=True)
+    installed = pack_service.install(paths, pack, clock=clock)
+
+    assert installed.pack_key == "pl-pilot"
+    # Neither the preview nor the install may claim a recording became learner content.
+    assert "asset" not in installed.item_counts
+    assert preview.diff is not None
+    assert not [change for change in preview.diff.added if change.content_kind == "asset"]
+    with open_reader(paths, clock=clock) as database:
+        assert (
+            int(
+                database.scalar("SELECT count(*) FROM content_records WHERE content_kind = 'asset'")
+            )
+            == 0
+        )
+        assert int(database.scalar("SELECT count(*) FROM assessment_tasks")) == 39
+
+
+def test_stamping_refuses_a_path_that_escapes_the_pack(pack: Path, tmp_path: Path) -> None:
+    """`pack stamp` resolves a path exactly as `load_pack` does, or it is the way in.
+
+    The loader refuses a symlink out of the pack; stamping hashed straight through it,
+    so the digest of a file outside the pack -- any file the process can read, since
+    `Path.__truediv__` with an absolute string discards the root -- was written into the
+    pack's own item hash.
+    """
+
+    outside = tmp_path / "somewhere-else.wav"
+    outside.write_bytes(CLIP + b"outside")
+    target = pack / "media" / "listening-01.wav"
+    target.unlink()
+    target.symlink_to(outside)
+
+    with pytest.raises(LinguaWikiError) as failure:
+        stamp_pack(pack)
+    assert failure.value.payload.code == "pack_asset_not_contained"
+
+
+def test_stamping_refuses_an_absolute_path(pack: Path, tmp_path: Path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("not this pack's", encoding="utf-8")
+    _rewrite_catalog_only(pack, _catalog(path=str(secret)))
+
+    with pytest.raises(LinguaWikiError) as failure:
+        stamp_pack(pack)
+    assert failure.value.payload.code in {"pack_asset_misplaced", "pack_asset_not_contained"}
+
+
+def _rewrite_catalog_only(root: Path, document: dict[str, Any]) -> None:
+    (root / "assets" / "pl-a2-audio.json").write_text(
+        json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def test_an_unreadable_recording_is_reported_by_both_commands(pack: Path) -> None:
+    """Cannot-be-read is an answer, and it is the same answer from both commands.
+
+    The loader hashes every file in the directory, so an unreadable one surfaced as a
+    bare `PermissionError` out of `pack validate` -- a command whose whole job is to
+    report on a pack. `pack stamp` already reported it; the rule went in one of the two
+    places that needed it.
+    """
+
+    target = pack / "media" / "listening-01.wav"
+    target.chmod(0o000)
+    try:
+        with pytest.raises(LinguaWikiError) as loading:
+            load_pack(pack)
+        with pytest.raises(LinguaWikiError) as stamping:
+            stamp_pack(pack)
+    finally:
+        target.chmod(0o644)
+
+    assert loading.value.payload.code == "pack_file_unreadable"
+    assert stamping.value.payload.code == "pack_file_unreadable"
+
+
+def test_replacing_a_recording_restamps_the_task_that_plays_it(pack: Path) -> None:
+    """The recording *is* the question a listening task asks.
+
+    Covering the digest in the asset's own hash detaches the asset's reviews, which is
+    right and is not enough: a pack author could swap the voice, and the task keeping its
+    hash kept its `authored-verified` review on a question nobody had heard.
+    """
+
+    def hashes() -> dict[tuple[str, str], str]:
+        return {
+            (item.content_kind, item.stable_key): item.content_hash
+            for item in load_pack(pack).items
+        }
+
+    before = hashes()
+    (pack / "media" / "listening-01.wav").write_bytes(CLIP + b" a different voice")
+    stamp_pack(pack)
+    republish(pack)
+    after = hashes()
+
+    assert before[("asset", "pl.audio.listening-01")] != after[("asset", "pl.audio.listening-01")]
+    assert before[("assessment_task", LISTENING_TASK)] != after[("assessment_task", LISTENING_TASK)]
+    # And only those two: nothing else in the pack depends on this recording.
+    moved = {key for key in before if before[key] != after[key]}
+    assert moved == {("asset", "pl.audio.listening-01"), ("assessment_task", LISTENING_TASK)}

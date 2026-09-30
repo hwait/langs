@@ -33,6 +33,13 @@ C2 built the pack side of audio and left two things here, deliberately.
       media_type, duration_ms)` at install time and resolve from there, keeping the
       digest comparison: the point was never where the file is, it is whether the bytes
       are the ones the learner heard.
+- [ ] **Decide whether an asset becomes learner content.** C2 deliberately keeps a
+      recording out of `content_records`: its `content_kind` is a closed CHECK on the
+      most-referenced table in the schema, DuckDB cannot re-constrain it, and rebuilding
+      it for zero rows was not worth doing while nothing in a learner database referenced
+      a recording. `LoadedPack.installable_items` is where that split is stated. If C5
+      wants `db check`, a rights audit, or a purge to reason about pack audio from the
+      database, that is the migration to weigh.
 - [ ] **The pilot's six listening recordings.** `pl-pilot` 0.2.0 ships none, so its six
       audio tasks still carry the spoken sentence in the prompt and declare no asset --
       what they measure today is reading a sentence somebody transcribed. The contract,

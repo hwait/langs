@@ -860,7 +860,7 @@ def _task_is_referenced(database: Database, content_id: str) -> bool:
 
 def _diff(database: Database, pack: LoadedPack) -> PackDiffReport:
     installed = _installed_pack(database, pack.pack_key)
-    incoming = {(item.content_kind, item.stable_key): item for item in pack.items}
+    incoming = {(item.content_kind, item.stable_key): item for item in pack.installable_items}
     if installed is None:
         return PackDiffReport(
             pack_key=pack.pack_key,
@@ -1913,7 +1913,7 @@ def install(
             # After the registry row exists: these rows reference it.
             _register_pack_framework_levels(transaction, pack, pack_id=pack_id)
             existing_items = _installed_items(transaction, pack_id)
-            for item in pack.items:
+            for item in pack.installable_items:
                 _write_content_record(
                     transaction,
                     item,
