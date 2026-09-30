@@ -1,13 +1,35 @@
 ---
 title: "C2a — Presentation contract and pack authoring"
 stage: C2a
-status: ready
+status: shipped
 depends_on: []
 ---
 
 # C2a — Presentation contract and pack authoring
 
 Parent: [Learner Client Delivery Plan](../learner-client-plan.md)
+
+## Shipped — 2026-09-30
+
+Implemented on `c2-presentation-contract`. Stage gate `scripts/verify.py --fast`: **2191
+passed, 1 skipped**, and `generate_schemas.py --check` clean. Checklists below record the
+work as built; three things went differently and are recorded where they happened:
+
+- **The asset catalog declares no `sha256`** (§3). The manifest already names every file
+  at its exact digest and `load_pack` hashes all of them before anything else, so a
+  second declaration would be the one that can disagree with the bytes. Identity is still
+  `(content id, sha256)`; the digest is the observed one, and `pack_format.asset_context`
+  is shared by the loader and `pack stamp` so the two cannot drift.
+- **Recordings live under `media/`, catalogs under `assets/`** (§3). A recording under
+  `assets/` is read as a catalog and refused as unparseable JSON.
+- **The six recordings do not exist** (§3, "The recordings themselves"). The named
+  fallback was taken: the listening tasks keep their prompts and declare no asset, and
+  `test_the_listening_tasks_declare_no_recording_the_pack_does_not_hold` pins that so it
+  stays visible. Their `modality` stays `audio`.
+
+One consequence reached beyond this stage: publishing the pilot as 0.2.0 made every test
+that hard-coded `version="0.2.0"` for a republish collide with it, so they now derive the
+target from `tests.conftest.NEXT_PILOT_VERSION`.
 
 **Goal.** A task carries enough structure for a UI to render it without parsing prose, and
 the pack files carry it. Nothing is installed or served in this stage — that is

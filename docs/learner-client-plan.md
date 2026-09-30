@@ -25,15 +25,15 @@ write, and a definition of done. Take them in dependency order.
 | Stage | Document | Depends on |
 |---|---|---|
 | C1 | [Answer-key snapshot](client/C1-answer-key-snapshot.md) ✅ shipped | — |
-| C2a | [Presentation contract and pack authoring](client/C2a-presentation-contract.md) | — |
-| C2b | [Presentation persistence and the served snapshot](client/C2b-served-presentation-snapshot.md) | C1, C2a |
+| C2a | [Presentation contract and pack authoring](client/C2a-presentation-contract.md) ✅ shipped | — |
+| C2b | [Presentation persistence and the served snapshot](client/C2b-served-presentation-snapshot.md) ✅ shipped | C1, C2a |
 | C3 | [Server and generated contract](client/C3-server-and-contract.md) | C1, C2a, C2b |
 | C4 | [Assessment screen](client/C4-assessment-screen.md) | C3 |
 | C5 | [Audio, and the claims that rest on it](client/C5-audio-and-evidence.md) | C4 |
 | C6 | [Submission lifecycle and batching](client/C6-async-judging-and-batching.md) | C4, C5 |
 | C7 | [Session management](client/C7-session-management.md) | C4 |
 
-**C1 and C2a can start today, in parallel, and need no client code.**
+**C1, C2a and C2b are shipped. C3 is next and is unblocked.**
 
 ## Stage numbering
 

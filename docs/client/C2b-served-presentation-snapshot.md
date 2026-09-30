@@ -1,13 +1,29 @@
 ---
 title: "C2b — Presentation persistence and the served snapshot"
 stage: C2b
-status: blocked
+status: shipped
 depends_on: [C1, C2a]
 ---
 
 # C2b — Presentation persistence and the served snapshot
 
 Parent: [Learner Client Delivery Plan](../learner-client-plan.md)
+
+## Shipped — 2026-09-30
+
+Implemented on `c2-presentation-contract`. Stage gate `scripts/verify.py --fast`: **2223
+passed, 1 skipped**. Two things went differently:
+
+- **`assessment_service.served_task` was added** (§4). The stage requires "every reader
+  of a served task returns the snapshot" and "a vanished asset produces a refusal", and
+  there was no reader to do either: `next_task` never re-serves an outstanding task, and
+  that guard belongs to C3. The reader is minimal and is what C3's read model builds on.
+- **Pack assets are not installed into a table** (§2). No pack ships a recording, so the
+  table would have no rows and no consumer. A served identity resolves against the pack
+  directory `pack_installations.source_path` already records, and what comes back is
+  checked against the snapshotted digest rather than trusted for being in the right
+  place. **C5 should replace this with an installed-asset table**: it loads the whole
+  pack to read one digest, which is correct but wasteful once audio exists.
 
 **Goal.** The presentation C2a put in the pack files reaches the bank, and what the learner was
 *shown* is preserved beside the answer key, so a pack update mid-run cannot show new choices
