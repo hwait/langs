@@ -23,9 +23,24 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "peron drugi"
+          },
+          {
+            "value": "peron trzeci"
+          },
+          {
+            "value": "peron czwarty"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Read: 'Pociąg do Gdańska odjeżdża z peronu trzeciego o 14:20.' From which platform does the train leave?",
       "provenance": {
-        "content_hash": "96caeee24bf51fda49b421d7f0b757c718dd06ea89484235290575fd6b0a94e0",
+        "content_hash": "75fe9e01af17db74bf9566ca66554acaa3c83eb7d7e0a98935f5cf2a342d90c5",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -50,9 +65,24 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "pomidorowa"
+          },
+          {
+            "value": "ogórkowa"
+          },
+          {
+            "value": "grzybowa"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Read the menu line 'Zupa dnia: pomidorowa -- 12 zł'. What is today's soup?",
       "provenance": {
-        "content_hash": "572137040e53e4b16d88c262d901882acc4c77317369f16ae1507ce45b026f41",
+        "content_hash": "ec3fd93d51f5eaed87cddb10427ea5f5e9f7b48deab35c93e61d54d8912d35b2",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -76,9 +106,21 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "tak"
+          },
+          {
+            "value": "nie"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Read: 'Apteka otwarta w dni powszednie od 8:00 do 20:00, w sobotę do 14:00.' Is the pharmacy open on Saturday at 16:00?",
       "provenance": {
-        "content_hash": "cd3b4afbbba277bb820a8829a83965c2868febf41048cf3a81b1ef43850b3b36",
+        "content_hash": "1dca352bdecb73a2e59012bf85f80fd43dd6b554ff5035b57b86ec6a3ad80326",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -103,9 +145,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "the day, in Polish"
+      },
       "prompt": "Read: 'Spotkanie zostało przeniesione z poniedziałku na środę.' Write in Polish which day the meeting is on now.",
       "provenance": {
-        "content_hash": "94e7f267e384beecf80a6467e40fde1df3dfc46aaaa37d8db5b23c0099eb35eb",
+        "content_hash": "35de1124d86fa38e23b90574a64e45f1accb93acb86b6207eda00cedf3e58b4c",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -131,9 +177,24 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "w czwartek"
+          },
+          {
+            "value": "w środę"
+          },
+          {
+            "value": "w sobotę"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Read the notice 'Śmieci wystawiamy w czwartek wieczorem.' When should rubbish be put out?",
       "provenance": {
-        "content_hash": "925c5debaf9fc676ee3a1146e9d1908b8862cabc2e2ff978768203c77b0bf50a",
+        "content_hash": "d51cfcb1a07e4482ecede9e98363019c786f799d70b722a36f8efe6bcd843fe7",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -159,9 +220,24 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "studenci do 26 lat"
+          },
+          {
+            "value": "wszyscy uczniowie"
+          },
+          {
+            "value": "emeryci"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Read: 'Bilet ulgowy przysługuje studentom do 26 roku życia.' Who may buy the reduced ticket?",
       "provenance": {
-        "content_hash": "7f28f4ec309bbd5c271371a94f1998aa443ac22becfc2e59255a5e104f1a5e84",
+        "content_hash": "dcaeb95bd424de0e5344b13dc23d270e6c298d8f2eeddc0f0f4eb2caf81bc833",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -186,9 +262,13 @@
       "level": "A2",
       "modality": "audio",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "what the speaker orders, in Polish"
+      },
       "prompt": "Listen and write what the speaker orders: 'Poproszę herbatę i wodę.'",
       "provenance": {
-        "content_hash": "38fa17bda9ae0d07021176243e3b1480b08fccdd5ca5eb47dbe2ba079a80c611",
+        "content_hash": "6a33da896669f13637c46962e933dbd40bd7eae6e4a3722986b4e0c7b441fd0a",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -214,9 +294,24 @@
       "level": "A2",
       "modality": "audio",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "dziesięć minut"
+          },
+          {
+            "value": "piętnaście minut"
+          },
+          {
+            "value": "dwadzieścia minut"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Listen: 'Pociąg ma dziesięć minut opóźnienia.' How late is the train?",
       "provenance": {
-        "content_hash": "d4f96f7a8c54d923226ff435309aa58ca7f94136fd4210a15161218be21d1cc5",
+        "content_hash": "97d0ab67c50fd54ea0e958eda4174af4c83b3e0b87cb603d123e5b00407dbf59",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -242,9 +337,24 @@
       "level": "A2",
       "modality": "audio",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "jedną"
+          },
+          {
+            "value": "dwie"
+          },
+          {
+            "value": "trzy"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Listen: 'Proszę wziąć jedną tabletkę dwa razy dziennie.' How many tablets per day?",
       "provenance": {
-        "content_hash": "bb1bf2fea797c7c2ea7c2dbabe3597f176f69db64a7fe6c7238d838afb514517",
+        "content_hash": "fa4a8966d66a73b5c38e7e416d2590090fdbff2686f8b623143eaf899a001b74",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -269,9 +379,24 @@
       "level": "A2",
       "modality": "audio",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "przesunąć spotkanie"
+          },
+          {
+            "value": "odwołać spotkanie"
+          },
+          {
+            "value": "przedłużyć spotkanie"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Listen: 'Szef prosił, żeby przesunąć spotkanie na piątek.' What does the boss want?",
       "provenance": {
-        "content_hash": "906832fc757bd6b182d0bcb12b102777427409f77405f7c08bf212a17e7beec3",
+        "content_hash": "e946fb702e435a60fdeb5b8380b85fe095c8a6352fbd1dfcdd2b9f143530644a",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -295,9 +420,24 @@
       "level": "A2",
       "modality": "audio",
       "permitted_help": "none",
+      "presentation": {
+        "choices": [
+          {
+            "value": "pralka"
+          },
+          {
+            "value": "lodówka"
+          },
+          {
+            "value": "zmywarka"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
       "prompt": "Listen: 'Sąsiad mówi, że pralka znowu nie działa.' What is broken?",
       "provenance": {
-        "content_hash": "3ad91e83309c6a96e9ba248c5c557c1adec55a9166b92d2151657c3e556bab39",
+        "content_hash": "e81cc3c313aa2001cf7af2b191ccf32160a5bbc09db6ac99e4c91ca1ed16bba5",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -322,9 +462,13 @@
       "level": "A2",
       "modality": "audio",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "the place where the speaker changes trains, in Polish"
+      },
       "prompt": "Listen: 'Mam przesiadkę w Poznaniu, potem jadę do Wrocławia.' Write where the speaker changes trains.",
       "provenance": {
-        "content_hash": "4bf3c26e8c3077ac474ba93eb037981a118a26eccbc9fcf86b97e6288c1b6224",
+        "content_hash": "03447ec8c49510223c4f8620d0d239538d21b9f54d51a4394390ce5c0b66967c",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -347,9 +491,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "one noun, in the accusative"
+      },
       "prompt": "Complete: 'Poproszę ___ .' (the bill, in the accusative)",
       "provenance": {
-        "content_hash": "c0f1b0be8b7c2fef73d30a2d0dae1082e076537c8c58a9428a5ea6efc584e967",
+        "content_hash": "bb1e288cf972445bf93de23adebae161861adec1da7c35e15ea2a09362c3970d",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -372,9 +520,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "one noun, in the locative"
+      },
       "prompt": "Complete: 'Czekam na ___ .' (the platform, correct case after 'na')",
       "provenance": {
-        "content_hash": "e97c46bd0a0ba5d1e465db57c86aa6e17d11d2e9e0bc7f706423f9138ac087f3",
+        "content_hash": "4a807549299deaa2f62f7f235e2d2e8db3d53c56f1d27c6a3a9061f3f6c2d301",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -398,9 +550,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "one noun"
+      },
       "prompt": "Give the Polish word for a prescription.",
       "provenance": {
-        "content_hash": "0616ee11714dced53b270e7e402e1ed439dbc11b3aee2dd64a6fdd57b0ebaea0",
+        "content_hash": "1c3ba64e36a9c3efc6f7bb2c15a972b244bc947059b9f1f148bc0eb9e6979d1b",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -423,9 +579,24 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
-      "prompt": "Which word means 'leave from work'? urlop / umowa / urząd",
+      "presentation": {
+        "choices": [
+          {
+            "value": "urlop"
+          },
+          {
+            "value": "umowa"
+          },
+          {
+            "value": "urząd"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
+      "prompt": "Which word means 'leave from work'?",
       "provenance": {
-        "content_hash": "657b5b7ece500dcac384bd444502fc64d61bf61017affb1c2e3ca25653dae826",
+        "content_hash": "af54c592584f0db0f151ea685a65b6ab6771390729be7d20f08f43a9ec5ddf4f",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -448,9 +619,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "one noun, plural accusative"
+      },
       "prompt": "Complete: 'Zgubiłem ___ do mieszkania.' (keys, plural accusative)",
       "provenance": {
-        "content_hash": "17a6e6bc96a1b4d1feb22e9dffa0d2c3b529b14c7b75a6ea140ea1e2dd5648e8",
+        "content_hash": "0e9b8a962becbc55551890bb181a89ecf6ab3e837137ff2253feff5d97c24fbf",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -473,9 +648,24 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
-      "prompt": "Which is the main course? danie główne / przepis / rachunek",
+      "presentation": {
+        "choices": [
+          {
+            "value": "danie główne"
+          },
+          {
+            "value": "przepis"
+          },
+          {
+            "value": "rachunek"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
+      "prompt": "Which is the main course?",
       "provenance": {
-        "content_hash": "f47d5fd9b33fcc02553fa79274c2c11b3c9b85199a27ef037a7e05fd354b9eb4",
+        "content_hash": "85ac0e1153f2359786ed0ef6eb5d0ffd1d4db42863e4d2a2666ee7aaabd6e82c",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -499,9 +689,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "the phrase that completes the sentence"
+      },
       "prompt": "Complete: 'Jestem ___ .' (in the flat -- 'mieszkanie' in the locative)",
       "provenance": {
-        "content_hash": "6e9032cddf0f2868ae174edb33d630cbbca7e2852d14f954e395897a751c6b6a",
+        "content_hash": "b0a13d497e3f2edf85d0ebf7ab05c701ee874314b3441d5c67f8ae902ed22b61",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -524,9 +718,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "the whole negated sentence"
+      },
       "prompt": "Negate: 'Mam bilet.' Write the negated sentence.",
       "provenance": {
-        "content_hash": "b179c1b58122d1d7caac2e77db3fbfc58bda72f2b5251fa0cc39502db8257fb6",
+        "content_hash": "7f69c5d09ded0e281d16e28a08d4e758735faed19f2655123e4fce8735e33767",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -549,9 +747,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "one noun, in the instrumental"
+      },
       "prompt": "Complete with the instrumental: 'Idę na obiad z ___ .' ('kolega')",
       "provenance": {
-        "content_hash": "c44ff7c1b503b1032e7f57ab531743da46f281ff213ab760538b0143ac2d5490",
+        "content_hash": "1b2e820bc23488aaa5f8c20e68fe7a52687492cde70f05475effd37ef94240c1",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -574,9 +776,24 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
-      "prompt": "Which is correct? 'pięć bilety' / 'pięć biletów' / 'pięć biletu'",
+      "presentation": {
+        "choices": [
+          {
+            "value": "pięć bilety"
+          },
+          {
+            "value": "pięć biletów"
+          },
+          {
+            "value": "pięć biletu"
+          }
+        ],
+        "kind": "multiple-choice",
+        "order": "shuffled"
+      },
+      "prompt": "Which is correct?",
       "provenance": {
-        "content_hash": "54bca96c51bfc17ba5cd653982063627e980065941879b6e0a924d3172f3dd05",
+        "content_hash": "011560a5206053267ba70548c8ff3e262b60da25f2fed87eb954a6b81b3f5d9a",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -599,9 +816,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "one verb form"
+      },
       "prompt": "Complete: '___ mnie głowa.' (the verb for 'hurts')",
       "provenance": {
-        "content_hash": "642ba7aff6c53d13998d4e220a7fac390c6ba37c551c30fb6d9bd84bb05d5df3",
+        "content_hash": "2cf59486cb5a5124f424dc30101da4c203383604c3405f84fad9fc6d229ddeaf",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -624,9 +845,13 @@
       "level": "A2",
       "modality": "text",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "the whole sentence, in the past tense"
+      },
       "prompt": "Put into the past tense, speaking as a woman: 'Jestem w biurze.'",
       "provenance": {
-        "content_hash": "14e0187dd42295c79f8b9f76f4f6ae265f2e0b2fbcbfee2a176aab3bf0b9ed52",
+        "content_hash": "1a4599ffd4d6855a8b6e0d7424d8209bda5f448dce1d85c399f43b43a3db40d9",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -643,9 +868,13 @@
       "level": "A2",
       "modality": "writing",
       "permitted_help": "dictionary-not-allowed",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "about 40 words, in Polish"
+      },
       "prompt": "Write a message of about 40 words to a neighbour saying that the washing machine is broken and asking when the repair is possible.",
       "provenance": {
-        "content_hash": "b0e0f96ec063202f30be0c4f89584f6eb9b5edaf7852340334a09007291426dd",
+        "content_hash": "78a061eb28bcb86396ec8511e9e403d51348d1a473c7644e7f68dd43c84d91f2",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -704,9 +933,13 @@
       "level": "A2",
       "modality": "writing",
       "permitted_help": "dictionary-not-allowed",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "about 60 words, in Polish"
+      },
       "prompt": "Write a short email of about 60 words to a hotel: you arrive tomorrow, your train is delayed, and you ask whether a late check-in is possible.",
       "provenance": {
-        "content_hash": "a86cdcb882a65f738e77275c8c86765e2caa967ecbda7c0298dcb6b7324cdf43",
+        "content_hash": "394f42c89d77d436e4afc528c4825c6ebfa81b0fa16439e31b9fec16caccbac6",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -765,9 +998,13 @@
       "level": "A2",
       "modality": "writing",
       "permitted_help": "dictionary-not-allowed",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "about 60 words, in Polish"
+      },
       "prompt": "Write about 60 words asking your manager to move a meeting from Monday to Wednesday, and give a reason.",
       "provenance": {
-        "content_hash": "d079cb123007046282b6bda59c3ae863372d3000cccb36802a24620a08666d4f",
+        "content_hash": "27527ba11616a1c60bb3b59aa9272d56fabe57108b033a9474d3022888e5ab16",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -826,9 +1063,13 @@
       "level": "A2",
       "modality": "writing",
       "permitted_help": "dictionary-not-allowed",
+      "presentation": {
+        "kind": "free-text",
+        "response_shape": "about 80 words, in Polish"
+      },
       "prompt": "Write about 80 words describing a visit to the doctor: your symptoms, what the doctor said, and what you have to do now.",
       "provenance": {
-        "content_hash": "43a812d5a0adf7ee23712baa296d3ae15abeff6be03a8be515e186408bdca1a7",
+        "content_hash": "c1d0a6dd70888394832da2993351b941ba1d316fc8f3f1338e6dea220f29a87a",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -887,9 +1128,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "dictionary-not-allowed",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Order a meal and a drink in a restaurant, ask one question about a dish, and ask for the bill. Speak for about one minute.",
       "provenance": {
-        "content_hash": "4a00e5156082faefb616734bb3da2a73bb8fd6194f8c7bb29fd0ffd21672b33e",
+        "content_hash": "c894982362607471db1ea85a36e5ca2768b0e696b3e35d45621fe77a91da4963",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -948,9 +1192,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "dictionary-not-allowed",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Explain at a ticket office that you want a return ticket, ask about the platform and about a change of train. Speak for about one minute.",
       "provenance": {
-        "content_hash": "6687089a039fa2528d9dab8624af1d0fe5a780904da15a623430d44d0a836ed6",
+        "content_hash": "5db3c724f628379dcc7d32a1df1c3cfd0d05e94c6763fca8a6133e5fdc05a756",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1009,9 +1256,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "dictionary-not-allowed",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Describe your flat and your daily routine at home in about a minute and a half.",
       "provenance": {
-        "content_hash": "127e58bdd82f918e39966fa000ac723d418dfeccfb0983c04fc1af03c54914e2",
+        "content_hash": "98da5c3cc5479fb1286575a8f01de609b9098b06b750662b62c8e2a199e01d56",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1070,9 +1320,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "dictionary-not-allowed",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Describe your work, one colleague, and a typical meeting, and say what you would change. Speak for about two minutes.",
       "provenance": {
-        "content_hash": "3e7d734ef7116c588b974273aa6d8e20af7283928b63d3c5ad1f526f22f73764",
+        "content_hash": "4c43749276472e628040980eb55845190c13668060ba30f6696fe7550777bf5b",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1131,9 +1384,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Say 'kasza' and 'Kasia' so the sz/ś contrast is audible.",
       "provenance": {
-        "content_hash": "fd5b1555d4998f421ad86d5ed75652a27db691bed7a739feb99dea51f4b3f321",
+        "content_hash": "eeb55c1854b2ea4125c81624f06d97a3351e793c77c4ed302ac2f3576949623a",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1175,9 +1431,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Say 'czy' and 'ci' so the cz/ć contrast is audible.",
       "provenance": {
-        "content_hash": "11e73fa5e64b8c945acc187d234a9762b5e664d9c166d3f1f06c6352297c36d8",
+        "content_hash": "f59382955e07cc2c604d3754ecc0a50f0b3b5a8ce113389bdd33ffbceaedc7cc",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1219,9 +1478,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Say 'wąż' and 'wąs': keep the nasal vowel and the final consonant distinct.",
       "provenance": {
-        "content_hash": "41d9d5b6fad493c034863f74e414e9be29603c380e7f703de81e13c8f01bb529",
+        "content_hash": "d0646f712e1a0c716cb6522241f60f3584ee859b5abdfa423fd2d85fb31956ca",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1263,9 +1525,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Say 'dzwon', 'dźwig' and 'dżem' in one breath group.",
       "provenance": {
-        "content_hash": "d10876f312abaf98924145b4e42ba8cc592381f4b63df3a58cb453846d8e73af",
+        "content_hash": "a93340bcb8ca0881a35029efb691468986d6bcd4c7b897a052dad0502b564701",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1307,9 +1572,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Say 'łódka' and 'udka': the ł must be a glide, not an l.",
       "provenance": {
-        "content_hash": "7293615708f9deb3b54ce5b9f613f762999a380fb57394d94339afe3479fb0f5",
+        "content_hash": "70e95676eb2fc316a3067f059486cfc884282ceeec103eddf09297f95e220ab9",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1351,9 +1619,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Read aloud: 'Mieszkanie jest niedaleko dworca, koło apteki.' Keep the penultimate stress in every word.",
       "provenance": {
-        "content_hash": "85dbdf1ab6f54b85fe90dd0f16bbbbf8aed4cbbf839ed9829fec6d400156430e",
+        "content_hash": "0649e08c129effde973a3d50bc99ecfb9c8d7a1fe30f3fa27954e1af0825814e",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",
@@ -1395,9 +1666,12 @@
       "level": "A2",
       "modality": "speech",
       "permitted_help": "none",
+      "presentation": {
+        "kind": "free-text"
+      },
       "prompt": "Read aloud: 'Kupiłem chleb i róg w piekarni obok.' Devoice the final consonants.",
       "provenance": {
-        "content_hash": "1022eff25121d0edea61fe36550d39271679156a17b8c7f6cb72249603941cd1",
+        "content_hash": "787390ce23b6d370d493e3a1c8a56d8a020aa5c554a6bd0312751eadc4fb523d",
         "lifecycle": "verified",
         "origin_profile": "authored-original",
         "review_profile": "authored-verified",

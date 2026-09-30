@@ -134,6 +134,12 @@ def test_every_semantic_knowledge_field_changes_the_hash(pack: Path, field: str)
     assert _assert_moves(pack, before, edited) == {edited}
 
 
+#: The pilot's first free-text task. The mutations below run against *it* rather than
+#: against task 0, which is multiple-choice: a task's presentation now has to agree with
+#: its type and its answer key, so changing one field of a chooser in isolation produces
+#: a task the contract refuses rather than a hash to compare.
+FREE_TEXT_TASK = 3
+
 TASK_MUTATIONS: dict[str, Mutation] = {
     "prompt": lambda record: record.update(prompt=record["prompt"] + " Now answer."),
     "expected": lambda record: record.update(expected={"answers": ["a completely other answer"]}),
@@ -142,12 +148,15 @@ TASK_MUTATIONS: dict[str, Mutation] = {
     "difficulty": lambda record: record.update(difficulty=2.5),
     "level": lambda record: record.update(level="B1"),
     "dimension": lambda record: record.update(dimension="listening"),
-    "task_type": lambda record: record.update(task_type="short-response"),
+    "task_type": lambda record: record.update(task_type="objective"),
     "modality": lambda record: record.update(modality="audio"),
     "content_family": lambda record: record.update(content_family="zdrowie"),
     "permitted_help": lambda record: record.update(permitted_help="dictionary-allowed"),
     "is_anchor": lambda record: record.update(is_anchor=True),
     "target_keys": lambda record: record.update(target_keys=["pl.lex.bilet"]),
+    "presentation": lambda record: record.update(
+        presentation={"kind": "free-text", "response_shape": "a different shape entirely"}
+    ),
 }
 
 
@@ -163,6 +172,7 @@ def test_every_semantic_assessment_field_changes_the_hash(pack: Path, field: str
         "tasks",
         "assessment_task",
         TASK_MUTATIONS[field],
+        index=FREE_TEXT_TASK,
     )
 
     assert _assert_moves(pack, before, edited) == {edited}

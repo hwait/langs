@@ -4,7 +4,7 @@
   "data_format_version": 1,
   "pack_key": "pl-pilot",
   "name": "Polish A2 Pilot",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "language": "pl",
   "scripts": [
     "Latn"
@@ -206,8 +206,9 @@
     }
   },
   "files": {
+    "CHANGELOG.md": "8d7a853fcdd9eda74bc5a3927a92fb1c79ed51b8b42af9c0d97fa48dab624106",
     "activities/pl-a2-activities.json": "58dfde870431c76fb64c83826f2e993aa87af10cf5e36505c54994abcf249fe4",
-    "assessments/pl-a2-calibration.json": "c283811eb39fe254b8b82c0b0e7dc3eaa2cd7c688ac3a9e1533ce1a9c489c746",
+    "assessments/pl-a2-calibration.json": "495be7579c1194fb26240ca54fdf3d90bebe3f86c9b5eb77c82f024334489249",
     "capabilities.json": "3c5da78aa3879401c8f9e8088c716a595070f829fdee02cabbbf3607fb523b5b",
     "proficiency/cefr.json": "92d139981ee20032ed0f69752115b3b76a3347a85b8e33fba0c0f9763e873ec2",
     "references/pl-a2-sources.json": "6407a01a9cb269432e23cc6287bd93e7844ceeaf440869ba40907ac2d34bfe15",
@@ -219,5 +220,5 @@
     "source-policy.json": "f8301f5b92063b22432c9dd6724c172829b40b3868d9df803855e47b490bb51c",
     "tests/expectations.json": "2ae012d7ebb35cec8b4a8da880f63937526f08fd8bbdd84abe2b3d9641e4a667"
   },
-  "content_address": "5927f339a3f99260ecaa0e1f2e2916fc6eb77ec6e59fb954510f471f7b82e571"
+  "content_address": "d101e3943510e5c743c1a118907a312e03530ffad4ac1ead6b1654e13a16688a"
 }

@@ -26,9 +26,9 @@ from typing import Any
 from pydantic import BaseModel
 
 from linguawiki.contracts import (
-    PackAssetFile,
     PackActivityFile,
     PackAssessmentFile,
+    PackAssetFile,
     PackBundleFile,
     PackExample,
     PackItemProvenance,
@@ -230,7 +230,7 @@ def _stamp_json(root: Path, manifest: PackManifest, relative: str) -> tuple[list
         # than per file. Both the digest and its shape come from `pack_format`, because
         # a second derivation here is a pack that is stale the moment it is stamped.
         contexts = [
-            pack_format.asset_context(parsed, _asset_digest(root, item.path, where=relative))
+            pack_format.asset_context(file_header, _asset_digest(root, item.path, where=relative))
             if content_kind == pack_format.ASSET_KIND
             else file_header
             for item in items

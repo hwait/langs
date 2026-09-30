@@ -34,9 +34,9 @@ from linguawiki.contracts import (
     ContentProvenance,
     PackActivityFile,
     PackActivityTemplate,
-    PackAsset,
     PackAssessmentFile,
     PackAssessmentTask,
+    PackAsset,
     PackAssetFile,
     PackBundleFile,
     PackCapabilities,
@@ -56,8 +56,8 @@ from linguawiki.contracts import (
     canonical_content_hash,
 )
 from linguawiki.errors import ErrorDetail, LinguaWikiError
-from linguawiki.presentation import MEDIA_PREFIX
 from linguawiki.ids import ContentId, IdPrefix, derive_id
+from linguawiki.presentation import MEDIA_PREFIX
 from linguawiki.provenance import (
     CONTENT_ORIGIN_BY_CLASS,
     content_lifecycle,
@@ -705,7 +705,7 @@ def _load_descriptors(root: Path, manifest: PackManifest) -> tuple[ResolvedItem,
     return tuple(items)
 
 
-def asset_context(document: PackAssetFile, sha256: str) -> dict[str, Any]:
+def asset_context(file_header: Mapping[str, Any], sha256: str) -> dict[str, Any]:
     """The hash context of one asset: its catalog's header, plus the bytes it names.
 
     One function, used by the loader and by `pack stamp`. Two derivations of "what does
@@ -719,7 +719,7 @@ def asset_context(document: PackAssetFile, sha256: str) -> dict[str, Any]:
     nobody approved.
     """
 
-    return {**file_context(document, "assets"), "sha256": sha256}
+    return {**file_header, "sha256": sha256}
 
 
 def _contained_media(root: Path, relative: str, *, where: str) -> Path:
@@ -770,6 +770,7 @@ def _load_assets(
         document = _validate_model(
             PackAssetFile, _read_json(root / relative, relative=relative), where=relative
         )
+        file_header = file_context(document, "assets")
         for asset in document.assets:
             where = f"{relative}#{asset.asset_key}"
             if not asset.path.startswith(MEDIA_PREFIX):
@@ -817,7 +818,7 @@ def _load_assets(
                         provenance=asset.provenance,
                         payload=asset,
                         where=where,
-                        context=asset_context(document, digest),
+                        context=asset_context(file_header, digest),
                     ),
                     asset=asset,
                     sha256=digest,

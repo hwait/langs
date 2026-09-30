@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -69,6 +70,24 @@ def workspace_target(tmp_path: Path) -> Path:
 #: The dogfood pack that ships with the core while the pack contract stabilizes.
 PILOT_PACK = Path(__file__).resolve().parents[1] / "language-packs" / "pl-pilot"
 FIXTURE_PACKS = Path(__file__).resolve().parents[1] / "language-packs" / "fixtures"
+
+#: The version `pl-pilot` currently ships, and one strictly after it.
+#:
+#: Both are derived rather than written down. A published pack version is immutable, so
+#: every test that republishes the pilot to exercise `pack update` needs a version the
+#: pack does not already have -- and each of the ~20 that hard-coded `"0.2.0"` turned
+#: into a `pack_version_conflict` the moment the pilot was actually published as 0.2.0.
+PILOT_VERSION: str = json.loads((PILOT_PACK / "manifest.json").read_text(encoding="utf-8"))[
+    "version"
+]
+
+
+def _next_minor(version: str) -> str:
+    major, minor, _patch = (int(part) for part in version.split("."))
+    return f"{major}.{minor + 1}.0"
+
+
+NEXT_PILOT_VERSION: str = _next_minor(PILOT_VERSION)
 
 
 @dataclass(frozen=True, slots=True)

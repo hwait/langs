@@ -796,6 +796,8 @@ def test_pack_update_previews_by_default_and_applies_with_a_flag(
 
     manifest_path = pack / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # The fixture pack, despite the directory name: this stage does not re-author it,
+    # so its versions stay literal and independent of the pilot's.
     manifest["version"] = "0.2.0"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     stamp_pack(pack)
