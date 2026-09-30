@@ -716,3 +716,52 @@ def test_an_empty_string_snapshot_is_absent_to_the_check_and_to_the_reader(
         polish_workspace.paths, run=run.run_id, content_id=content_id
     )
     assert read.presentation is None and read.asset is None
+
+
+def test_a_recording_edited_since_the_install_is_not_served_against_the_old_key(
+    polish_workspace: PolishWorkspace, tmp_path: Path
+) -> None:
+    """The recording and the answer key have to come from one revision of the task.
+
+    The bank is what was installed; the bytes are read from the pack directory, which
+    an author can re-record and republish without reinstalling. Serving then paired the
+    *new* audio with the *old* key and snapshotted the old task hash -- a question the
+    learner was asked that no revision of the pack ever contained.
+    """
+
+    from linguawiki.packs.stamp import stamp_pack
+
+    root = _with_recording(polish_workspace, tmp_path)
+    (root / "media" / "listening-01.wav").write_bytes(CLIP + b" re-recorded")
+    stamp_pack(root)
+    republish(root)
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    with pytest.raises(LinguaWikiError) as failure:
+        _serve_until(polish_workspace, run.run_id, LISTENING)
+    assert failure.value.payload.code == "assessment_task_revision_drifted"
+
+
+def test_db_check_finds_the_cleared_snapshot_the_reader_refuses(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """The check looked only at rows with something in them.
+
+    A snapshot cleared to NULL beside an unchanged bank row that *has* a presentation is
+    the damage `served_task` refuses -- and the query skipped it, so an operator was told
+    the workspace was clean and the read then refused. One rule, asked by both.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, CHOOSER)
+    _damage(polish_workspace, run.run_id, content_id, presentation_json=None)
+
+    check = _checks(polish_workspace)["served_presentation_complete"]
+
+    assert check.status == "failed"
+    assert content_id in "".join(check.context.values())
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.served_task(
+            polish_workspace.paths, run=run.run_id, content_id=content_id
+        )
+    assert failure.value.payload.code == "assessment_presentation_partial"

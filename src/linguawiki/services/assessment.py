@@ -38,6 +38,7 @@ from linguawiki.contracts import (
     parse_task_presentation,
     reads_as_json_object,
     served_snapshot_state,
+    snapshot_lost_its_presentation,
 )
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.connection import Database, open_reader, open_writer
@@ -45,7 +46,12 @@ from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.ids import AssessmentId, EventId
 from linguawiki.models import ContractModel
 from linguawiki.packs import coverage as coverage_module
-from linguawiki.packs.format import ResolvedAsset, load_pack, resolve_pack_path
+from linguawiki.packs.format import (
+    LoadedPack,
+    ResolvedAsset,
+    load_pack,
+    resolve_pack_path,
+)
 from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import (
     ALGORITHM_VERSION,
@@ -832,9 +838,15 @@ def next_task(
             # Resolved here too, and before the transaction: a task that says it plays a
             # recording the installed pack cannot produce is refused while it is still
             # unserved, rather than written as a row nothing can read afterwards.
-            played = _serve_asset_identity(
-                _pack_assets(database, record.pack_key) if _plays_audio(shown) else (), shown
-            )
+            played = None
+            if _plays_audio(shown):
+                on_disk = _pack_on_disk(database, record.pack_key)
+                _assert_recording_matches_the_installed_task(
+                    on_disk,
+                    content_id=selection.candidate.content_id,
+                    installed_hash=task[5],
+                )
+                played = _serve_asset_identity(() if on_disk is None else on_disk.assets, shown)
             sequence = (
                 int(
                     database.scalar(
@@ -1518,8 +1530,8 @@ def _refuse_presentation(code: str, message: str, reason: str) -> LinguaWikiErro
     )
 
 
-def _pack_assets(database: Database, pack_key: str | None) -> tuple[ResolvedAsset, ...]:
-    """Every recording the pack this run is taught from ships.
+def _pack_on_disk(database: Database, pack_key: str | None) -> LoadedPack | None:
+    """The pack directory this run's track is taught from, as it is right now.
 
     Scoped to that pack rather than to "the installed pack": a workspace may hold two,
     and `installed_pack` with no key refuses with `pack_selection_required` -- a refusal
@@ -1533,10 +1545,58 @@ def _pack_assets(database: Database, pack_key: str | None) -> tuple[ResolvedAsse
 
     source = str(pack_service.installed_pack(database, pack_key)["source_path"] or "")
     if not source:
-        return ()
+        return None
     # Loading the whole pack to read one digest is wasteful and deliberate for now; C5
     # replaces it with an installed-asset table when audio actually arrives.
-    return load_pack(resolve_pack_path(source)).assets
+    return load_pack(resolve_pack_path(source))
+
+
+def _assert_recording_matches_the_installed_task(
+    pack: LoadedPack | None, *, content_id: str, installed_hash: object
+) -> None:
+    """The recording and the answer key have to come from one revision of the task.
+
+    The bank holds what was *installed*; the bytes are read from the pack directory,
+    which an author can re-record and republish without reinstalling. Serving then
+    paired the new recording with the installed key and snapshotted the installed hash
+    -- a question the learner was asked that no revision of the pack ever contained,
+    and one the run's own record could not describe afterwards.
+
+    A task's hash covers the recording it plays, so comparing it is the whole check.
+    """
+
+    if pack is None or installed_hash is None:
+        return
+    current = next(
+        (item for item in pack.tasks if str(item.content_id) == content_id),
+        None,
+    )
+    if current is None or current.content_hash == str(installed_hash):
+        return
+    raise LinguaWikiError(
+        "assessment_task_revision_drifted",
+        f"the pack directory holds a different revision of {content_id} than the one "
+        "installed, so its recording does not belong to the answer key that would be "
+        "served with it; install the pack version you mean to serve",
+        details=(ErrorDetail(field="content_hash", reason=f"installed {installed_hash}"),),
+    )
+
+
+def _pack_assets(database: Database, pack_key: str | None) -> tuple[ResolvedAsset, ...]:
+    """Every recording the pack this run is taught from ships.
+
+    Scoped to that pack rather than to "the installed pack": a workspace may hold two,
+    and `installed_pack` with no key refuses with `pack_selection_required` -- a refusal
+    about pack selection surfacing out of a read of one learner's history. A track names
+    the pack it is taught from, and a reference is resolved inside that pack's content.
+
+    A pack that will not load reports *itself*. Collapsing a checksum mismatch or an
+    unreadable file into "the recording is not available" sends an operator to look for
+    a missing file that is sitting right there.
+    """
+
+    pack = _pack_on_disk(database, pack_key)
+    return () if pack is None else pack.assets
 
 
 def _run_pack_key(database: Database, run_id: str) -> str | None:
@@ -1703,7 +1763,9 @@ def _assert_no_presentation_was_lost(
         "WHERE task.content_id = ?",
         [content_id],
     )
-    if row is None or row[0] is None or str(row[1]) != str(served_hash):
+    if row is None or not snapshot_lost_its_presentation(
+        served_hash=served_hash, bank_hash=row[1], bank_presentation=row[0]
+    ):
         return
     raise _refuse_presentation(
         "assessment_presentation_partial",

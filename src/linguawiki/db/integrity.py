@@ -14,6 +14,7 @@ from linguawiki.contracts import (
     parse_task_presentation,
     reads_as_json_object,
     served_snapshot_state,
+    snapshot_lost_its_presentation,
 )
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.backup import table_row_counts
@@ -814,11 +815,26 @@ def _presentation_checks(database: Database) -> list[CheckResult]:
     # complete pair of columns can still hold a record nobody can render.
     partial: list[str] = []
     malformed: list[str] = []
-    for run_id, content_id, raw_shown, raw_identity in database.query(
-        "SELECT run_id, content_id, presentation_json, asset_identity_json "
-        "FROM assessment_run_tasks "
-        "WHERE presentation_json IS NOT NULL OR asset_identity_json IS NOT NULL "
-        "ORDER BY run_id, content_id"
+    # Every served row, not only the ones with something in them. A snapshot cleared to
+    # NULL beside an unchanged bank row that *has* a presentation is damage the reader
+    # refuses, and filtering it out is how an operator was told the workspace was clean
+    # and then refused. The bank row comes along on the same query, because that
+    # comparison is the whole rule.
+    for (
+        run_id,
+        content_id,
+        raw_shown,
+        raw_identity,
+        served_hash,
+        bank_shown,
+        bank_hash,
+    ) in database.query(
+        "SELECT served.run_id, served.content_id, served.presentation_json, "
+        "served.asset_identity_json, served.content_hash, task.presentation_json, "
+        "record.content_hash FROM assessment_run_tasks served "
+        "LEFT JOIN assessment_tasks task ON task.content_id = served.content_id "
+        "LEFT JOIN content_records record ON record.content_id = served.content_id "
+        "ORDER BY served.run_id, served.content_id"
     ):
         where = f"{run_id}/{content_id}"
         # Through the same two parsers the reader uses. `db check` and the read path
@@ -850,6 +866,12 @@ def _presentation_checks(database: Database) -> list[CheckResult]:
                 partial.append(f"{where}: a recording with nothing saying how it was shown")
             if shown is not None and shown.audio is not None and identity is None:
                 partial.append(f"{where}: an audio task with nothing saying which bytes")
+            if shown is None and snapshot_lost_its_presentation(
+                served_hash=served_hash, bank_hash=bank_hash, bank_presentation=bank_shown
+            ):
+                partial.append(
+                    f"{where}: no presentation, beside an unchanged bank row that has one"
+                )
     if partial:
         checks.append(
             _failed(

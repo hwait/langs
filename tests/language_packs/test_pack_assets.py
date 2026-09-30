@@ -330,3 +330,41 @@ def test_replacing_a_recording_restamps_the_task_that_plays_it(pack: Path) -> No
     # And only those two: nothing else in the pack depends on this recording.
     moved = {key for key in before if before[key] != after[key]}
     assert moved == {("asset", "pl.audio.listening-01"), ("assessment_task", LISTENING_TASK)}
+
+
+def test_a_new_recording_can_be_stamped_without_inventing_its_hash(
+    pack: Path, tmp_path: Path
+) -> None:
+    """`pack stamp` is what *produces* a content hash; it cannot require one first.
+
+    A task's hash covers the recording it plays, so stamping an assessment file reads
+    the asset catalogs -- and reading them strictly meant an author adding a recording
+    had to write a plausible sha256 into its provenance before the tool that computes
+    hashes would run. The stamper already substitutes a placeholder for the items it is
+    stamping; catalog discovery has to do the same, while `load_pack` stays strict.
+    """
+
+    catalog = _catalog()
+    del catalog["assets"][0]["provenance"]["content_hash"]
+    _rewrite_catalog_only(pack, catalog)
+    republish(pack)
+
+    stamp_pack(pack)
+    republish(pack)
+
+    loaded = load_pack(pack)
+    assert [asset.asset_key for asset in loaded.assets] == ["pl.audio.listening-01"]
+    assert all(item.hash_matches for item in loaded.items)
+
+
+def test_loading_still_refuses_a_catalog_that_declares_no_hash(pack: Path) -> None:
+    """Placeholder tolerance belongs to stamping alone."""
+
+    catalog = _catalog()
+    del catalog["assets"][0]["provenance"]["content_hash"]
+    _rewrite_catalog_only(pack, catalog)
+    republish(pack)
+
+    with pytest.raises(PackError) as failure:
+        load_pack(pack)
+    assert failure.value.payload.code == "pack_contract_invalid"

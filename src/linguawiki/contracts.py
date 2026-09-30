@@ -1181,6 +1181,30 @@ def parse_answer_key(raw: str | None) -> AnswerKey:
         raise refuse(f"{field} {first['msg'].lower()}") from exc
 
 
+class PackRuleError(ValueError):
+    """A model rule that has a name its callers know.
+
+    A validator raises a `ValueError` and pydantic keeps the instance in the error's
+    context, so the code survives the trip through `ValidationError` and `pack validate`
+    can report the rule that failed rather than "this file does not satisfy its model".
+    Codes are part of the contract: a caller that can only see `pack_contract_invalid`
+    cannot tell a bank with two right answers from a task carrying choices it should not,
+    and recovering the difference by matching error prose is how that breaks again.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _non_blank_choice(value: str) -> str:
+    """`min_length=1` accepts `"   "`, and no comparison can ever match it."""
+
+    if not value.strip():
+        raise PackRuleError("pack_choice_values_invalid", "a choice value must not be blank")
+    return value
+
+
 PresentationKind = Annotated[
     str, Vocabulary(presentation_policy.PRESENTATION_KINDS, "presentation kind")
 ]
@@ -1190,7 +1214,7 @@ ChoiceOrder = Annotated[str, Vocabulary(presentation_policy.CHOICE_ORDERS, "choi
 class PresentationChoice(ContractModel):
     """One button. `value` is submitted and scored; `display` is only drawn."""
 
-    value: NonBlankStr
+    value: Annotated[str, Field(min_length=1), AfterValidator(_non_blank_choice)]
     #: What the learner reads, when it differs from what they submit -- a gloss, a
     #: transliteration, a label. It is never compared against the answer key, so a
     #: choice may read `pięć biletów (5 tickets)` while `value` stays `pięć biletów`.
@@ -1237,21 +1261,32 @@ class TaskPresentation(ContractModel):
     def the_record_agrees_with_its_own_kind(self) -> TaskPresentation:
         if self.kind == "multiple-choice":
             if len(self.choices) < 2:
-                raise ValueError("a multiple-choice task needs at least two choices")
+                raise PackRuleError(
+                    "pack_presentation_mismatched",
+                    "a multiple-choice task needs at least two choices",
+                )
             if self.response_shape is not None:
-                raise ValueError("a multiple-choice task is clicked, not written into")
+                raise PackRuleError(
+                    "pack_presentation_mismatched",
+                    "a multiple-choice task is clicked, not written into",
+                )
         else:
             if self.choices:
-                raise ValueError(f"a {self.kind} task has no choices")
+                raise PackRuleError(
+                    "pack_presentation_mismatched", f"a {self.kind} task has no choices"
+                )
             if self.order != "fixed":
-                raise ValueError(f"a {self.kind} task has nothing to order")
+                raise PackRuleError(
+                    "pack_presentation_mismatched", f"a {self.kind} task has nothing to order"
+                )
         collisions = presentation_policy.colliding_choice_values(
             [choice.value for choice in self.choices]
         )
         if collisions:
-            raise ValueError(
+            raise PackRuleError(
+                "pack_choice_values_invalid",
                 "choice values must differ under the comparison that scores them; "
-                f"repeated: {list(collisions)}"
+                f"repeated: {list(collisions)}",
             )
         return self
 
@@ -1266,6 +1301,29 @@ class ServedAsset(ContractModel):
 
     content_id: NonBlankStr
     sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+def snapshot_lost_its_presentation(
+    *, served_hash: object, bank_hash: object, bank_presentation: object
+) -> bool:
+    """Whether a null presentation snapshot is damage rather than a row that predates it.
+
+    Null is truthful for a task served before the column existed: no bank held a
+    presentation then, so nothing could have been shown and nothing was lost. But if the
+    live bank row still hashes to what was served *and* it has a presentation, the
+    content is provably identical and cannot have been served without one.
+
+    Asked by the reader and by `db check`, from here, because a rule those two ask
+    differently is a rule that tells an operator the workspace is clean and then refuses
+    them.
+    """
+
+    return (
+        served_hash is not None
+        and bank_hash is not None
+        and bank_presentation is not None
+        and str(bank_hash) == str(served_hash)
+    )
 
 
 def parse_asset_identity(raw: str | None) -> ServedAsset | None:
@@ -1383,17 +1441,23 @@ class PackAssessmentTask(ContractModel):
         if shown is None:
             return self
         if shown.choices and self.task_type != "objective":
-            raise ValueError(f"a {self.task_type} task is not answered by choosing")
+            raise PackRuleError(
+                "pack_presentation_mismatched",
+                f"a {self.task_type} task is not answered by choosing",
+            )
         if shown.audio is not None and self.modality != "audio":
-            raise ValueError(f"a {self.modality} task plays no recording")
+            raise PackRuleError(
+                "pack_presentation_mismatched", f"a {self.modality} task plays no recording"
+            )
         if shown.choices and self.expected is not None:
             answering = presentation_policy.choices_answering_key(
                 [choice.value for choice in shown.choices], self.expected.answers
             )
             if len(answering) != 1:
-                raise ValueError(
+                raise PackRuleError(
+                    "pack_choices_do_not_answer",
                     "exactly one choice value must be an answer the key accepts; "
-                    f"{len(answering)} are: {list(answering)}"
+                    f"{len(answering)} are: {list(answering)}",
                 )
         return self
 

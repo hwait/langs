@@ -51,6 +51,7 @@ from linguawiki.contracts import (
     PackProficiencyFile,
     PackReferencesFile,
     PackRelation,
+    PackRuleError,
     PackSourcePolicy,
     PackSourceRecommendation,
     TaskPresentation,
@@ -320,17 +321,34 @@ def _read_jsonl(path: Path, *, relative: str) -> Iterator[tuple[int, Any]]:
             ) from exc
 
 
+def _named_rule(exc: ValidationError) -> PackRuleError | None:
+    """The first rule in a validation failure that carries a name of its own.
+
+    Pydantic keeps the raised exception in a `value_error`'s context, so a model rule
+    that knows what it is called survives the trip out. Everything else stays
+    `pack_contract_invalid`: the named codes are for the rules that were specified with
+    names, not a promise that every shape defect has one.
+    """
+
+    for item in exc.errors():
+        original = item.get("ctx", {}).get("error")
+        if isinstance(original, PackRuleError):
+            return original
+    return None
+
+
 def _validate_model[T: BaseModel](model: type[T], payload: Any, *, where: str) -> T:
     try:
         return model.model_validate(payload)
     except ValidationError as exc:
+        problems = [
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}" for item in exc.errors()
+        ]
+        named = _named_rule(exc)
+        if named is not None:
+            raise _fail(named.code, f"{where}: {named}", problems) from exc
         raise _fail(
-            "pack_contract_invalid",
-            f"{where} does not satisfy {model.__name__}",
-            [
-                f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
-                for item in exc.errors()
-            ],
+            "pack_contract_invalid", f"{where} does not satisfy {model.__name__}", problems
         ) from exc
 
 
@@ -842,8 +860,34 @@ def _catalog_files(root: Path, manifest: PackManifest) -> tuple[str, ...]:
     return tuple(sorted(catalogs))
 
 
+#: The hash a pack item carries before `pack stamp` has computed its real one.
+PLACEHOLDER_ITEM_HASH = "0" * 64
+
+
+def _unstamped(document: Any) -> Any:
+    """A catalog with a placeholder hash on every entry that declares none.
+
+    `pack stamp` is what *produces* a content hash, so reading a catalog strictly while
+    stamping made an author write a plausible sha256 by hand before the tool that
+    computes hashes would run. Tolerated here and nowhere else: `load_pack` reads the
+    same catalogs strictly, so a pack cannot ship without the hashes being real.
+    """
+
+    if not isinstance(document, dict):
+        return document
+    assets = []
+    for entry in document.get("assets", []):
+        if not isinstance(entry, dict):
+            assets.append(entry)
+            continue
+        provenance = dict(entry.get("provenance") or {})
+        provenance.setdefault("content_hash", PLACEHOLDER_ITEM_HASH)
+        assets.append({**entry, "provenance": provenance})
+    return {**document, "assets": assets}
+
+
 def declared_assets(
-    root: Path, manifest: PackManifest
+    root: Path, manifest: PackManifest, *, unstamped_ok: bool = False
 ) -> tuple[tuple[str, PackAssetFile, PackAsset, str], ...]:
     """Every recording the pack declares: where it is declared, and the digest it has.
 
@@ -857,8 +901,9 @@ def declared_assets(
     by_key: dict[str, str] = {}
     by_path: dict[str, str] = {}
     for relative in _catalog_files(root, manifest):
+        payload = _read_json(root / relative, relative=relative)
         document = _validate_model(
-            PackAssetFile, _read_json(root / relative, relative=relative), where=relative
+            PackAssetFile, _unstamped(payload) if unstamped_ok else payload, where=relative
         )
         for asset in document.assets:
             where = f"{relative}#{asset.asset_key}"
@@ -892,11 +937,21 @@ def declared_assets(
     return tuple(declared)
 
 
-def audio_digests(root: Path, manifest: PackManifest) -> dict[str, str]:
-    """`asset_key` to the digest of its bytes, for hashing the tasks that play them."""
+def audio_digests(
+    root: Path, manifest: PackManifest, *, unstamped_ok: bool = False
+) -> dict[str, str]:
+    """`asset_key` to the digest of its bytes, for hashing the tasks that play them.
+
+    The digest comes from the file, so an entry whose own content hash has not been
+    computed yet still answers this question -- which is why `pack stamp` may pass
+    `unstamped_ok` and get the same digests `load_pack` will derive afterwards.
+    """
 
     return {
-        asset.asset_key: digest for _where, _file, asset, digest in declared_assets(root, manifest)
+        asset.asset_key: digest
+        for _where, _file, asset, digest in declared_assets(
+            root, manifest, unstamped_ok=unstamped_ok
+        )
     }
 
 

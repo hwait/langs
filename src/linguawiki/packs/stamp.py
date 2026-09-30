@@ -245,7 +245,7 @@ def _stamp_json(root: Path, manifest: PackManifest, relative: str) -> tuple[list
                 for item in items
             ]
         elif content_kind == pack_format.TASK_KIND:
-            digests = pack_format.audio_digests(root, manifest)
+            digests = pack_format.audio_digests(root, manifest, unstamped_ok=True)
             contexts = [
                 pack_format.task_context(file_header, item.presentation, digests) for item in items
             ]
