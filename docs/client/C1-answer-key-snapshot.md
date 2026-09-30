@@ -9,6 +9,30 @@ depends_on: []
 
 Parent: [Learner Client Delivery Plan](../learner-client-plan.md)
 
+## Review clearance — 2026-09-30
+
+**Cleared.** Implementation `f1eebca` was approved after both review rounds; merge
+`2c383e5` preserves that implementation. Subsequent source changes are comments only.
+No C1 findings remain open. The checklist below records the reviewed implementation,
+including the implementation details corrected during review; §0 records the historical
+starting point, not prerequisites to run against the shipped database.
+
+Independent verification in the final review: **88 targeted tests passed** across
+deterministic scoring, scoring policy, verification-gate dispatch, and template-fixture
+equivalence. The implementer reported both full gates green: **2,083 tests passed,
+93.68% coverage**. Those full gates were not independently rerun for this clearance.
+
+Two privacy gaps remain explicitly deferred to [Stage 7.4a](../stage7.md#74a-retention-the-assessment-path-cannot-yet-honour):
+withdrawing stored assessment text and applying retention to learner text in rubric
+`--input` payloads. This clearance covers C1's response and excerpt paths, not a claim
+that all assessment text can be withdrawn or all rubric text is consent-filtered.
+
+Invisible characters remain significant under `scoring.v1`. Explaining a mismatch can be
+added without changing the policy; accepting additional forms requires a policy-version
+change or reviewed pack answers.
+
+## Reviewed scope
+
 **Goal.** The core computes scores for `objective` and `short-response` tasks against an
 immutable snapshot of the task as served. No model, no client, no server.
 
@@ -19,7 +43,7 @@ prompt, or the rubric body. This stage adds those three to the snapshot and noth
 `content_hash` is already the drift detector, which is why no row ever needs backfilling
 from a changed pack.
 
-Three facts shape the rest of the stage:
+The following describes the pre-C1 state and the reasons for the implementation:
 
 - **The answer key is untyped today.** `PackAssessmentTask.expected` is `dict[str, Any]`
   and the only rule is that `objective` and `short-response` declare a non-empty one, so
@@ -104,8 +128,9 @@ Three facts shape the rest of the stage:
       `objective` and `short-response` and continues to require a rubric for the other
       three. A `json_schema_extra` note describing the shape would be invisible at
       runtime.
-- [ ] Parsing happens in exactly one function — `parse_answer_key(raw: str | None)` — used
-      by the scorer, by `pack validate`, and by `db check`. It refuses with
+- [ ] Stored-key parsing happens in one function — `parse_answer_key(raw: str | None)` —
+      used by the scorer and `db check`. Pack validation uses the same `AnswerKey` model
+      through `PackAssessmentTask.expected`. The stored-key parser refuses with
       `assessment_answer_key_malformed`, naming which rule failed: not JSON, not an
       object, unknown key, `answers` not a list, empty list, non-string member, blank
       member.
@@ -134,7 +159,8 @@ Three facts shape the rest of the stage:
 - [ ] Add `SCORING_POLICY_VERSION` as a module constant beside the other policy values in
       `linguawiki/placement.py`. Bump it whenever the rules below change.
 - [ ] Add a pure function — no database, no I/O — in `linguawiki/placement.py` beside
-      `select_task`, taking the served snapshot and the response and returning a score.
+      `select_task`, taking the task type, validated answers resolved from the served
+      record, and the response, and returning a score.
 - [ ] One comparison serves both scorable types, and it is the whole rule: `fold` from
       `linguawiki/text.py` (NFKC, then case-fold), with surrounding whitespace stripped
       and internal runs collapsed to one space, applied to the response and to each
@@ -193,7 +219,7 @@ Three facts shape the rest of the stage:
       provably identical and may be read from the bank; the result records which account
       it used.
 - [ ] If the hash differs, refuse deterministic scoring with `assessment_score_required`
-      and mark the task unscorable without a judge.
+      and explain that a supplied score is required; leave the task answerable.
 - [ ] If some of the three are present and some are not, refuse with
       `assessment_snapshot_partial` and do **not** fall back to the bank. A partial
       snapshot is damage, not a legacy row, and treating it as one lets the mutable pack
@@ -210,9 +236,9 @@ Three facts shape the rest of the stage:
 - [ ] Refuse the combinations that cannot be computed, each by its own code: no `--score`
       and no `--response`; no `--score` with a rubric-scored task type; no `--score` where
       §7 refuses the snapshot.
-- [ ] `--response` is argv, so it is bounded text; a long written answer belongs in the
-      `--input` payload the command already accepts. Keep the same refusal for blank text
-      on both paths.
+- [ ] `--response` is argv; a long written answer uses `--response-file <path>` (or `-`
+      for stdin). Keep the same refusal for blank text on both paths. `--input` remains
+      the rubric payload and is not a response input.
 - [ ] Update `.agents/skills/linguawiki-assess/SKILL.md` so the skill stops supplying
       scores for machine-scorable tasks, and passes the learner's answer rather than an
       excerpt it chose.
@@ -222,13 +248,16 @@ Three facts shape the rest of the stage:
 The schema cannot carry any of this, so each rule below is a named check that reads
 defensively and never raises.
 
-- [ ] `served_answer_key_complete` — no `assessment_run_tasks` row has some of the three
-      snapshot columns and not the others. Extend the existing `served_snapshot_complete`
-      wording so the two groups are not confused: 0016's group and this one are
-      independent, and a row may legitimately be whole in one and absent in the other.
-- [ ] `served_answer_key_wellformed` — every non-null `expected_json` parses as a
-      supported answer key and every non-null `rubric_json` is a JSON object; report the
-      rows that will not parse rather than aborting.
+- [ ] `served_answer_key_complete` — classify the three snapshot columns through
+      `contracts.served_snapshot_state`, shared with the scorer: all NULL is absent;
+      all nonblank is whole; anything else is partial. Keep this separate from
+      `served_snapshot_complete`: 0016's group and this one are independent, and a row
+      may legitimately be whole in one and absent in the other.
+- [ ] `served_answer_key_wellformed` — a non-null `expected_json` must parse as a
+      supported answer key for a machine-scorable task, or a JSON object for a rubric-scored
+      task (whose absent key is stored as `{}`). Every non-null `rubric_json` must be a
+      JSON object. Report unreadable rows rather than aborting, including decoder
+      `ValueError` and `RecursionError` failures.
 - [ ] `result_score_provenance` — `score_source` is `computed` or `supplied` on every row,
       and `computed` holds exactly when `scoring_policy_version` is present. Check both
       directions: a version recorded against a supplied score is a claim nobody made.
@@ -263,9 +292,10 @@ defensively and never raises.
 
 ## Gate
 
-- [ ] `./.tools/uv run python scripts/generate_schemas.py` — the answer-key contract
-      changed, so this one is not optional
-- [ ] `./.tools/uv run python scripts/verify.py`
+- [ ] Published schema regenerated and checked in; validate it with
+      `./.tools/uv run python scripts/generate_schemas.py --check`.
+- [ ] `./.tools/uv run python scripts/verify.py` — implementer-reported release-gate pass;
+      independent review verification is recorded above.
 
 ## Done when
 
