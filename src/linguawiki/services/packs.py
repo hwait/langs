@@ -1524,14 +1524,21 @@ def _install_assessments(database: Database, pack: LoadedPack, *, pack_id: str) 
         database.execute(
             "INSERT INTO assessment_tasks (content_id, definition_id, dimension, task_type, "
             "level_code, difficulty, content_family, modality, prompt, rubric_version, "
-            "rubric_json, expected_json, permitted_help, is_anchor, target_refs_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "rubric_json, expected_json, presentation_json, permitted_help, is_anchor, "
+            "target_refs_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (content_id) DO UPDATE SET dimension = excluded.dimension, "
             "task_type = excluded.task_type, level_code = excluded.level_code, "
             "difficulty = excluded.difficulty, content_family = excluded.content_family, "
             "modality = excluded.modality, prompt = excluded.prompt, "
             "rubric_version = excluded.rubric_version, rubric_json = excluded.rubric_json, "
-            "expected_json = excluded.expected_json, permitted_help = excluded.permitted_help, "
+            "expected_json = excluded.expected_json, "
+            # Written on conflict as well as on insert. An upgrade that removes a task's
+            # presentation has to clear the column: leaving the previous pack's choices
+            # standing behind a task that no longer has them makes the bank disagree
+            # with the pack it says it was installed from.
+            "presentation_json = excluded.presentation_json, "
+            "permitted_help = excluded.permitted_help, "
             "is_anchor = excluded.is_anchor, target_refs_json = excluded.target_refs_json",
             [
                 str(item.content_id),
@@ -1550,6 +1557,17 @@ def _install_assessments(database: Database, pack: LoadedPack, *, pack_id: str) 
                 # "nothing to compare against" for a rubric-scored task.
                 json.dumps(
                     {} if task.expected is None else task.expected.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                # NULL rather than `{}`: this column is nullable and `{}` would be a
+                # presentation record with no kind. `expected_json` uses `{}` only
+                # because its column is NOT NULL and `{}` has always meant "nothing to
+                # compare against" there.
+                None
+                if task.presentation is None
+                else json.dumps(
+                    task.presentation.model_dump(mode="json"),
                     ensure_ascii=False,
                     sort_keys=True,
                 ),

@@ -1256,6 +1256,47 @@ class TaskPresentation(ContractModel):
         return self
 
 
+def parse_task_presentation(raw: str | None) -> TaskPresentation | None:
+    """Read a stored presentation record, refusing by name whichever rule it breaks.
+
+    The one place a stored record is parsed: the bank reader, the serve path and
+    `db check` all come through here, so "what is a usable presentation" has a single
+    answer. Two implementations of that question drift, and a caller told "valid" by one
+    and refused by the other has been told the opposite of the truth.
+
+    Absent is not a refusal. `NULL` is what every task in every pack meant before the
+    column existed, and it still means *render as free text*.
+    """
+
+    def refuse(reason: str) -> LinguaWikiError:
+        return LinguaWikiError(
+            "assessment_presentation_malformed",
+            f"the presentation record cannot be rendered: {reason}",
+            details=(ErrorDetail(field="presentation", reason=reason),),
+        )
+
+    if raw is None or not raw.strip():
+        return None
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise refuse(f"not valid JSON: {exc}") from exc
+    except ValueError as exc:
+        raise refuse(f"holds a value no parser will read: {exc}") from exc
+    except RecursionError as exc:
+        # Not a `ValueError`, so it would escape as an unhandled crash out of `db check`,
+        # whose contract is never to raise.
+        raise refuse("nested too deeply for any parser to read") from exc
+    if not isinstance(document, dict):
+        raise refuse(f"not a JSON object but {type(document).__name__}")
+    try:
+        return TaskPresentation.model_validate(document)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        field = ".".join(str(part) for part in first["loc"]) or "presentation"
+        raise refuse(f"{field} {first['msg'].lower()}") from exc
+
+
 class PackAssessmentTask(ContractModel):
     """One bank item. `difficulty` is on the ordinal grid the staircase works on."""
 

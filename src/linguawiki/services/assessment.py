@@ -18,19 +18,22 @@ Two refusals are the point of this module rather than incidental to it:
 from __future__ import annotations
 
 import json
+import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from linguawiki.clock import Clock, SystemClock, aware_utc
 from linguawiki.contracts import (
     SNAPSHOT_ABSENT,
     SNAPSHOT_WHOLE,
     PackMaturity,
+    TaskPresentation,
     parse_answer_key,
+    parse_task_presentation,
     reads_as_json_object,
     served_snapshot_state,
 )
@@ -93,6 +96,13 @@ class DimensionReport(ContractModel):
     unavailable_reason: str | None = None
 
 
+class ServedAsset(ContractModel):
+    """A recording as served: which one was meant, and which bytes were played."""
+
+    content_id: str
+    sha256: str
+
+
 class NextTaskReport(ContractModel):
     run_id: str
     dimension: str
@@ -105,6 +115,12 @@ class NextTaskReport(ContractModel):
     difficulty: float
     content_family: str
     prompt: str
+    #: What the learner is shown, exactly as it was snapshotted -- with a shuffled order
+    #: already resolved, so a resumed task cannot reshuffle. `None` means free text.
+    presentation: TaskPresentation | None = None
+    #: The recording the learner heard, as `(content id, sha256)`. The digest is the
+    #: half that answers "is this the same recording", so both are kept.
+    asset: ServedAsset | None = None
     rubric: dict[str, object] = Field(default_factory=dict)
     rubric_version: int = 1
     permitted_help: str = "none"
@@ -723,6 +739,28 @@ def _dimension_states(
     return [_load_state(row, dimension_kind=kinds[str(row[1])]) for row in rows]
 
 
+def _serve_presentation(
+    shown: TaskPresentation | None, *, run_id: str, content_id: str
+) -> TaskPresentation | None:
+    """Resolve everything about a presentation that a serve decides, once.
+
+    Only the order is decided here today. A shuffle is a property of *this* serving, not
+    of the bank: resolving it at read time would reshuffle a resumed task, and the
+    learner would be shown a different arrangement of the question they are part-way
+    through. The realized order is what is stored, so `order` comes back `fixed` --
+    "already settled" rather than "the pack said fixed".
+
+    The seed is the run and the task rather than the clock, so the same serve is
+    reproducible from the record if anybody ever has to ask what happened.
+    """
+
+    if shown is None or shown.order != "shuffled":
+        return shown
+    order = list(shown.choices)
+    random.Random(f"{run_id}:{content_id}").shuffle(order)
+    return shown.model_copy(update={"choices": tuple(order), "order": "fixed"})
+
+
 def next_task(
     paths: WorkspacePaths,
     *,
@@ -780,13 +818,22 @@ def next_task(
             task = database.one(
                 "SELECT record.stable_key, task.prompt, task.rubric_json, task.rubric_version, "
                 "task.permitted_help, record.content_hash, task.target_refs_json, "
-                "task.expected_json "
+                "task.expected_json, task.presentation_json "
                 "FROM assessment_tasks task "
                 "JOIN content_records record ON record.content_id = task.content_id "
                 "WHERE task.content_id = ?",
                 [selection.candidate.content_id],
             )
             assert task is not None
+            # Resolved here, before anything is written: a shuffle happens once, and the
+            # order the learner saw is the order that is stored. Re-reading the bank on
+            # resume would reshuffle, which is a different question asked under the
+            # identity of the one they were credited for.
+            shown = _serve_presentation(
+                parse_task_presentation(None if task[8] is None else str(task[8])),
+                run_id=run_id,
+                content_id=selection.candidate.content_id,
+            )
             sequence = (
                 int(
                     database.scalar(
@@ -815,8 +862,9 @@ def next_task(
                     "INSERT INTO assessment_run_tasks (run_id, sequence, content_id, dimension, "
                     "status, served_at, task_type, level_code, difficulty, content_family, "
                     "modality, is_anchor, rubric_version, content_hash, target_refs_json, "
-                    "expected_json, prompt_snapshot, rubric_json) "
-                    "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "expected_json, prompt_snapshot, rubric_json, presentation_json, "
+                    "asset_identity_json) "
+                    "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         run_id,
                         sequence,
@@ -835,6 +883,17 @@ def next_task(
                         str(task[7]),
                         str(task[1]),
                         str(task[2]),
+                        None
+                        if shown is None
+                        else json.dumps(
+                            shown.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+                        ),
+                        # Nothing resolves a pack recording yet -- no pack ships one --
+                        # so this is null in every row a serve writes today. The column
+                        # exists now because the snapshot is the only place the identity
+                        # could ever be recorded, and a run served before it existed
+                        # could not be given one afterwards.
+                        None,
                     ],
                 )
                 # The learner has now seen it, whether or not they answer. Recording the
@@ -860,6 +919,7 @@ def next_task(
                 difficulty=selection.candidate.difficulty,
                 content_family=selection.candidate.content_family,
                 prompt=str(task[1]),
+                presentation=shown,
                 rubric=json.loads(str(task[2])),
                 rubric_version=int(task[3]),
                 permitted_help=str(task[4]),
@@ -1424,6 +1484,214 @@ def seed_declared_estimates(
         )
         seeded.append(dimension)
     return tuple(seeded)
+
+
+class ServedTaskReport(ContractModel):
+    """What the learner was shown, read from the record of the serving.
+
+    Never from `assessment_tasks`. A pack is mutable and a run is not, so re-reading the
+    bank would let a pack edit made after the sitting decide what the learner is held to
+    have been asked -- new choices against the answer key 0030 snapshotted, or a
+    replaced recording under the same key.
+    """
+
+    run_id: str
+    content_id: str
+    sequence: int
+    status: str
+    dimension: str
+    task_type: str
+    modality: str
+    level_code: str
+    difficulty: float
+    content_family: str
+    prompt: str | None = None
+    presentation: TaskPresentation | None = None
+    asset: ServedAsset | None = None
+    rubric_version: int = 1
+
+
+def _refuse_presentation(code: str, message: str, reason: str) -> LinguaWikiError:
+    return LinguaWikiError(
+        code, message, details=(ErrorDetail(field="presentation", reason=reason),)
+    )
+
+
+def _resolve_served_asset(database: Database, identity: ServedAsset) -> ServedAsset:
+    """Prove the recording the snapshot names is still the recording it named.
+
+    The identity is `(content id, sha256)` and only the digest can answer the question:
+    a key resolves to whatever currently answers to it, which is precisely the
+    substitution this refuses. The bytes are not in the database, so they are read from
+    the pack the installation records -- safely, because what comes back is checked
+    against the digest rather than trusted for being in the right place.
+
+    The two refusals are separate codes on purpose. "Nobody has this recording" and
+    "somebody has a different one" send an operator to different places, and matching
+    error prose to tell them apart is how that distinction gets lost.
+    """
+
+    source = str(pack_service.installed_pack(database)["source_path"] or "")
+    resolved = None
+    if source:
+        try:
+            # Loading the whole pack to read one digest is wasteful and deliberate for
+            # now: no pack ships a recording, so this runs only against a hand-made row.
+            # When audio arrives in C5 it wants an installed asset table, not a cache.
+            for candidate in load_pack(resolve_pack_path(source)).assets:
+                if str(candidate.content_id) == identity.content_id:
+                    resolved = candidate
+                    break
+        except LinguaWikiError:
+            resolved = None
+    if resolved is None:
+        raise LinguaWikiError(
+            "assessment_asset_unavailable",
+            f"the recording {identity.content_id} this task played is not available",
+            details=(ErrorDetail(field="asset", reason="no pack holds it"),),
+        )
+    if resolved.sha256 != identity.sha256:
+        raise LinguaWikiError(
+            "assessment_asset_changed",
+            f"the recording {identity.content_id} has been replaced since it was served; "
+            "a different recording is a different question",
+            details=(ErrorDetail(field="asset", reason=f"served {identity.sha256}"),),
+        )
+    return identity
+
+
+def served_task(
+    paths: WorkspacePaths,
+    *,
+    content_id: str,
+    run: str | None = None,
+    track: str | None = None,
+    clock: Clock | None = None,
+) -> ServedTaskReport:
+    """One served task, as it was served."""
+
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        track_id = None if track is None else learner_service.resolve_track(database, track)
+        return served_task_report(
+            database, _resolve_run(database, run, track_id=track_id), content_id=content_id
+        )
+
+
+def served_task_report(
+    database: Database, run_id: str, *, content_id: str
+) -> ServedTaskReport:
+    """The `(database, id)` form, for use inside a writer that already holds the lock."""
+
+    row = database.one(
+        "SELECT sequence, status, dimension, task_type, level_code, difficulty, "
+        "content_family, modality, rubric_version, prompt_snapshot, presentation_json, "
+        "asset_identity_json, content_hash FROM assessment_run_tasks "
+        "WHERE run_id = ? AND content_id = ?",
+        [run_id, content_id],
+    )
+    if row is None:
+        raise LinguaWikiError(
+            "assessment_task_not_served",
+            "that task was not served in this run; ask for the next task first",
+            details=(ErrorDetail(field="content_id", reason="task was not served"),),
+        )
+    shown = parse_task_presentation(None if row[10] is None else str(row[10]))
+    identity = _parse_asset_identity(None if row[11] is None else str(row[11]))
+    # The two columns are one group. An identity with no presentation, and an audio
+    # presentation with no identity, are each damage rather than a legacy row: neither
+    # can say what the learner heard, and reading past either sends the reader back to
+    # the mutable bank the snapshot exists to replace.
+    if identity is not None and shown is None:
+        raise _refuse_presentation(
+            "assessment_presentation_partial",
+            "this task recorded a recording it was played with but not how it was shown",
+            "asset identity without a presentation",
+        )
+    if shown is not None and shown.audio is not None and identity is None:
+        raise _refuse_presentation(
+            "assessment_presentation_partial",
+            "this task recorded that it played a recording but not which bytes",
+            "audio presentation without an asset identity",
+        )
+    if shown is None:
+        _assert_no_presentation_was_lost(database, content_id=content_id, served_hash=row[12])
+    return ServedTaskReport(
+        run_id=run_id,
+        content_id=content_id,
+        sequence=int(row[0]),
+        status=str(row[1]),
+        dimension=str(row[2]),
+        task_type=str(row[3]),
+        level_code=str(row[4]),
+        difficulty=float(row[5]),
+        content_family=str(row[6]),
+        modality=str(row[7]),
+        rubric_version=int(row[8]),
+        prompt=None if row[9] is None else str(row[9]),
+        presentation=shown,
+        asset=None if identity is None else _resolve_served_asset(database, identity),
+    )
+
+
+def _parse_asset_identity(raw: str | None) -> ServedAsset | None:
+    """Read a stored asset identity, defensively: the column has no `json_valid`."""
+
+    if raw is None or not raw.strip():
+        return None
+    try:
+        document = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise _refuse_presentation(
+            "assessment_presentation_malformed",
+            f"the recorded asset identity cannot be read: {exc}",
+            "asset identity is not readable JSON",
+        ) from exc
+    if not isinstance(document, dict):
+        raise _refuse_presentation(
+            "assessment_presentation_malformed",
+            "the recorded asset identity is not a JSON object",
+            f"asset identity is a {type(document).__name__}",
+        )
+    try:
+        return ServedAsset.model_validate(document)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        field = ".".join(str(part) for part in first["loc"]) or "asset"
+        raise _refuse_presentation(
+            "assessment_presentation_malformed",
+            f"the recorded asset identity is unusable: {field} {first['msg'].lower()}",
+            f"asset identity {field}",
+        ) from exc
+
+
+def _assert_no_presentation_was_lost(
+    database: Database, *, content_id: str, served_hash: object
+) -> None:
+    """A null snapshot is truthful for a row served before 0031 -- and only then.
+
+    Before that migration no bank held a presentation, so nothing could have been shown
+    and nothing was lost. But if the live bank row holds one *and* its content hash still
+    equals the snapshotted one, the content is provably identical and cannot have been
+    served without it: the snapshot is damage, not a legacy row. Falling back to the bank
+    here would be exactly the substitution the snapshot exists to prevent, so it refuses.
+    """
+
+    if served_hash is None:
+        return
+    row = database.one(
+        "SELECT task.presentation_json, record.content_hash FROM assessment_tasks task "
+        "JOIN content_records record ON record.content_id = task.content_id "
+        "WHERE task.content_id = ?",
+        [content_id],
+    )
+    if row is None or row[0] is None or str(row[1]) != str(served_hash):
+        return
+    raise _refuse_presentation(
+        "assessment_presentation_partial",
+        "this task recorded no presentation, but the unchanged bank row has one; "
+        "the snapshot is damaged rather than older than the column",
+        "null snapshot against an unchanged bank row that has a presentation",
+    )
 
 
 def report(

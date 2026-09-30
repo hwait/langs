@@ -219,3 +219,66 @@ def test_the_correct_choice_value_is_what_the_scorer_credits() -> None:
         for choice in shown.presentation.choices
     }
     assert scores == {"pięć bilety": 0.0, "pięć biletów": 1.0, "pięć biletu": 0.0}
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        ("{", "not JSON"),
+        ("[]", "not an object"),
+        ('"multiple-choice"', "not an object"),
+        ("{}", "no kind"),
+        ('{"kind": "unheard-of"}', "unknown kind"),
+        ('{"kind": "free-text", "surprise": 1}', "unknown key"),
+        ('{"kind": "multiple-choice", "choices": "tak"}', "choices not a list"),
+        ('{"kind": "multiple-choice", "choices": [{"value": "tak"}]}', "one choice"),
+        (
+            '{"kind": "multiple-choice", "choices": [{"value": "tak"}, {"value": "  "}]}',
+            "a blank choice value",
+        ),
+        (
+            '{"kind": "multiple-choice", "choices": [{"value": "Tak"}, {"value": " tak"}]}',
+            "two choices that fold to one",
+        ),
+        ('{"kind": "free-text", "choices": [{"value": "tak"}]}', "free text with choices"),
+    ],
+)
+def test_a_stored_presentation_is_revalidated_on_the_way_out(raw: str, reason: str) -> None:
+    """The column is a round trip through JSON and has no `json_valid` to protect it.
+
+    DuckDB refuses a constrained `ALTER TABLE ADD COLUMN`, so the shape is enforced here
+    or nowhere. A record can also be hand-edited, damaged, or restored from a release
+    that wrote a different shape between the install and the serve.
+    """
+
+    from linguawiki.contracts import parse_task_presentation
+    from linguawiki.errors import LinguaWikiError
+
+    with pytest.raises(LinguaWikiError) as failure:
+        parse_task_presentation(raw)
+
+    assert failure.value.payload.code == "assessment_presentation_malformed"
+    assert failure.value.payload.details, f"{reason} must name the rule that failed"
+
+
+def test_an_absent_stored_presentation_is_free_text_rather_than_a_refusal() -> None:
+    """NULL is what every task in every pack meant before the column existed."""
+
+    from linguawiki.contracts import parse_task_presentation
+
+    assert parse_task_presentation(None) is None
+    assert parse_task_presentation("") is None
+    assert parse_task_presentation("   ") is None
+
+
+def test_a_well_formed_stored_presentation_parses() -> None:
+    from linguawiki.contracts import parse_task_presentation
+
+    shown = parse_task_presentation(
+        '{"kind": "multiple-choice", "order": "shuffled",'
+        ' "choices": [{"value": "tak"}, {"value": "nie", "display": "nie (no)"}]}'
+    )
+    assert shown is not None
+    assert shown.kind == "multiple-choice"
+    assert shown.order == "shuffled"
+    assert [choice.display for choice in shown.choices] == ["tak", "nie (no)"]
