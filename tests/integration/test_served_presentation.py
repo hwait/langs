@@ -164,13 +164,20 @@ def test_serving_a_task_snapshots_the_presentation_as_shown(
     assert row[1] is None, "a text task heard nothing"
 
 
+def _content_id(workspace: PolishWorkspace, stable_key: str) -> str:
+    with open_reader(workspace.paths) as database:
+        row = database.one(
+            "SELECT content_id FROM content_records WHERE stable_key = ?", [stable_key]
+        )
+    assert row is not None, f"{stable_key} is not installed"
+    return str(row[0])
+
+
 def _serve_until(workspace: PolishWorkspace, run_id: str, stable_key: str) -> str:
     """Serve tasks until `stable_key` comes up, parking the others."""
 
     while True:
-        served = assessment_service.next_task(
-            workspace.paths, run=run_id, clock=workspace.clock
-        )
+        served = assessment_service.next_task(workspace.paths, run=run_id, clock=workspace.clock)
         assert isinstance(served, assessment_service.NextTaskReport), "bank ran out"
         if served.stable_key == stable_key:
             return served.content_id
@@ -373,3 +380,115 @@ def test_an_unresolvable_recording_is_refused_rather_than_substituted(
             polish_workspace.paths, run=run.run_id, content_id=content_id
         )
     assert failure.value.payload.code == code
+
+
+def _checks(workspace: PolishWorkspace) -> dict[str, Any]:
+    from linguawiki.db.integrity import check_database
+
+    with open_reader(workspace.paths) as database:
+        report = check_database(database)
+    return {check.name: check for check in report.checks}
+
+
+PRESENTATION_CHECKS = (
+    "bank_presentation_wellformed",
+    "served_presentation_complete",
+    "served_presentation_wellformed",
+)
+
+
+def test_a_healthy_workspace_passes_every_presentation_check(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    _serve_until(polish_workspace, run.run_id, CHOOSER)
+
+    checks = _checks(polish_workspace)
+
+    for name in PRESENTATION_CHECKS:
+        assert name in checks, f"{name} did not run"
+        assert checks[name].status == "ok", checks[name].message
+
+
+def test_db_check_finds_a_bank_presentation_that_contradicts_its_task(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """The ALTER could carry no CHECK, so the rule lives here or nowhere."""
+
+    content_id = _content_id(polish_workspace, CHOOSER)
+    with (
+        open_writer(polish_workspace.paths, command="test.damage") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE assessment_tasks SET task_type = 'extended-productive' WHERE content_id = ?",
+            [content_id],
+        )
+
+    check = _checks(polish_workspace)["bank_presentation_wellformed"]
+
+    assert check.status == "failed"
+    assert content_id in "".join(check.context.values())
+
+
+def test_db_check_finds_half_a_served_presentation_and_names_the_row(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, CHOOSER)
+    _damage(
+        polish_workspace,
+        run.run_id,
+        content_id,
+        presentation_json=None,
+        asset_identity_json=json.dumps({"content_id": "cnt_x", "sha256": "a" * 64}),
+    )
+
+    check = _checks(polish_workspace)["served_presentation_complete"]
+
+    assert check.status == "failed"
+    assert content_id in "".join(check.context.values())
+
+
+def test_db_check_reports_an_unreadable_presentation_rather_than_raising(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A diagnostic that aborts on damaged input tells an operator less than one that lies."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, CHOOSER)
+    _damage(
+        polish_workspace,
+        run.run_id,
+        content_id,
+        presentation_json="{not json at all",
+        asset_identity_json=json.dumps({"content_id": "cnt_x"}),
+    )
+
+    check = _checks(polish_workspace)["served_presentation_wellformed"]
+
+    assert check.status == "failed"
+    reported = "".join(check.context.values())
+    assert "presentation cannot be read" in reported
+    assert "asset identity" in reported
+
+
+def test_db_check_finds_an_asset_identity_missing_its_digest(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """An identity with a key alone cannot answer the question it exists for."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, CHOOSER)
+    _damage(
+        polish_workspace,
+        run.run_id,
+        content_id,
+        presentation_json=json.dumps({"kind": "free-text", "audio": {"asset_key": "pl.audio.x"}}),
+        asset_identity_json=json.dumps({"content_id": "cnt_x"}),
+    )
+
+    check = _checks(polish_workspace)["served_presentation_wellformed"]
+
+    assert check.status == "failed"
+    assert content_id in "".join(check.context.values())

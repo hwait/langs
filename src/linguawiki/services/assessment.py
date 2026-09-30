@@ -1577,9 +1577,7 @@ def served_task(
         )
 
 
-def served_task_report(
-    database: Database, run_id: str, *, content_id: str
-) -> ServedTaskReport:
+def served_task_report(database: Database, run_id: str, *, content_id: str) -> ServedTaskReport:
     """The `(database, id)` form, for use inside a writer that already holds the lock."""
 
     row = database.one(

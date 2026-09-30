@@ -10,6 +10,7 @@ from linguawiki.contracts import (
     SNAPSHOT_PARTIAL,
     LockManifest,
     parse_answer_key,
+    parse_task_presentation,
     reads_as_json_object,
     served_snapshot_state,
 )
@@ -729,6 +730,147 @@ def _reads_as_answer_key(raw: str) -> bool:
     except LinguaWikiError:
         return False
     return True
+
+
+def _readable_json_object(raw: str) -> dict[str, object] | None:
+    """A stored JSON object, or `None` when nothing will read it.
+
+    `RecursionError` is not a `ValueError`: deeply nested but otherwise valid JSON
+    exhausts the decoder's stack, and catching only the malformed case let it escape a
+    diagnostic whose whole contract is never to raise.
+    """
+
+    try:
+        document = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _reads_as_presentation(raw: str) -> bool:
+    """Asks `parse_task_presentation`, so the check and the reader cannot disagree."""
+
+    try:
+        parse_task_presentation(raw)
+    except LinguaWikiError:
+        return False
+    return True
+
+
+def _presentation_checks(database: Database) -> list[CheckResult]:
+    """Migration 0031's two groups: the bank's record, and the record of what was served.
+
+    None of it can be a constraint. DuckDB refuses `ALTER TABLE ... ADD COLUMN` with one,
+    so neither `presentation_json` carries `json_valid` and neither carries a vocabulary
+    check on the kind. Each rule parses defensively: a diagnostic that aborts on damaged
+    input tells an operator less than one that names the rows that will not parse.
+
+    This is a third independent snapshot group, beside 0016's and 0030's. A row may
+    legitimately be whole in one and absent in another, so widening either of those
+    checks would make it lie about the others.
+    """
+
+    checks: list[CheckResult] = []
+    # The bank. `task_type` and `modality` sit on the same row, so the check asks what
+    # the row itself says it needs rather than the stronger question of every row.
+    bank: list[str] = []
+    for content_id, task_type, modality, raw in database.query(
+        "SELECT content_id, task_type, modality, presentation_json FROM assessment_tasks "
+        "WHERE presentation_json IS NOT NULL ORDER BY content_id"
+    ):
+        try:
+            shown = parse_task_presentation(str(raw))
+        except LinguaWikiError as failure:
+            bank.append(f"{content_id}: {failure.payload.details[0].reason}")
+            continue
+        if shown is None:
+            continue
+        if shown.choices and str(task_type) != "objective":
+            bank.append(f"{content_id}: a {task_type} task carries choices")
+        if shown.audio is not None and str(modality) != "audio":
+            bank.append(f"{content_id}: a {modality} task carries a recording")
+    if bank:
+        checks.append(
+            _failed(
+                "bank_presentation_wellformed",
+                "an installed task says it is shown in a way its own type or modality "
+                "cannot be, so a client would render a question nobody can answer",
+                tasks="; ".join(bank),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "bank_presentation_wellformed",
+                "every installed presentation agrees with the task it belongs to",
+            )
+        )
+    # The served snapshot. Completeness and readability are separate questions asked over
+    # the same rows: a record that will not parse cannot be judged complete, and a
+    # complete pair of columns can still hold a record nobody can render.
+    partial: list[str] = []
+    malformed: list[str] = []
+    for run_id, content_id, raw_shown, raw_identity in database.query(
+        "SELECT run_id, content_id, presentation_json, asset_identity_json "
+        "FROM assessment_run_tasks "
+        "WHERE presentation_json IS NOT NULL OR asset_identity_json IS NOT NULL "
+        "ORDER BY run_id, content_id"
+    ):
+        where = f"{run_id}/{content_id}"
+        shown = None
+        if raw_shown is not None:
+            try:
+                shown = parse_task_presentation(str(raw_shown))
+            except LinguaWikiError:
+                malformed.append(f"{where}: the presentation cannot be read")
+        identity = None
+        if raw_identity is not None:
+            identity = _readable_json_object(str(raw_identity))
+            if identity is None:
+                malformed.append(f"{where}: the asset identity cannot be read")
+            elif not (identity.get("content_id") and identity.get("sha256")):
+                # A key alone answers "which recording was meant" and not "is this the
+                # recording they heard", which is the only question the snapshot exists
+                # to settle.
+                malformed.append(f"{where}: the asset identity carries no digest")
+        if raw_identity is not None and raw_shown is None:
+            partial.append(f"{where}: a recording with nothing saying how it was shown")
+        if shown is not None and shown.audio is not None and raw_identity is None:
+            partial.append(f"{where}: an audio task with nothing saying which bytes")
+    if partial:
+        checks.append(
+            _failed(
+                "served_presentation_complete",
+                "a run holds half of what it showed -- a recording with no presentation, "
+                "or an audio presentation with no recording -- which can establish "
+                "neither what the learner faced nor that the record predates the column",
+                served="; ".join(partial),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "served_presentation_complete",
+                "every served presentation and asset identity is whole or wholly absent",
+            )
+        )
+    if malformed:
+        checks.append(
+            _failed(
+                "served_presentation_wellformed",
+                "a served record of what the learner was shown cannot be read, so what "
+                "they were actually asked can no longer be established from the run",
+                served="; ".join(malformed),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "served_presentation_wellformed",
+                "every served presentation parses and every asset identity names bytes",
+            )
+        )
+    return checks
 
 
 def _served_answer_key_checks(database: Database) -> list[CheckResult]:
@@ -2531,6 +2673,11 @@ def check_database(
             for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
         ):
             checks.extend(_served_answer_key_checks(database))
+        if available["served_answer_key"] and any(
+            name == "presentation_json"
+            for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
+        ):
+            checks.extend(_presentation_checks(database))
         if available["mastery"] and any(
             name == "evidence_ceiling"
             for name, _ in expected_schema(applied).get("track_item_state", ())
