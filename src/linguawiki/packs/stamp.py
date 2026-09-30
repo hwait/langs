@@ -26,6 +26,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from linguawiki.contracts import (
+    PackAssetFile,
     PackActivityFile,
     PackAssessmentFile,
     PackBundleFile,
@@ -38,6 +39,7 @@ from linguawiki.contracts import (
 )
 from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.packs import format as pack_format
+from linguawiki.versions import file_sha256
 
 PLACEHOLDER_HASH = "0" * 64
 
@@ -56,6 +58,7 @@ JSON_ITEMS: tuple[tuple[str, type[BaseModel], str, str], ...] = (
         pack_format.DESCRIPTOR_KIND,
     ),
     (pack_format.ASSESSMENTS_PREFIX, PackAssessmentFile, "tasks", pack_format.TASK_KIND),
+    (pack_format.ASSETS_PREFIX, PackAssetFile, "assets", pack_format.ASSET_KIND),
     (pack_format.ACTIVITIES_PREFIX, PackActivityFile, "templates", pack_format.ACTIVITY_KIND),
     (
         pack_format.REFERENCES_PREFIX,
@@ -118,7 +121,11 @@ def _pack_files(root: Path) -> Iterator[str]:
 def _identity(item: BaseModel) -> tuple[str, PackItemProvenance]:
     """One item's stable key and provenance, whichever field name it uses for the key."""
 
-    key = getattr(item, "stable_key", None) or getattr(item, "bundle_key", None)
+    key = (
+        getattr(item, "stable_key", None)
+        or getattr(item, "bundle_key", None)
+        or getattr(item, "asset_key", None)
+    )
     provenance = getattr(item, "provenance", None)
     assert key is not None and isinstance(provenance, PackItemProvenance), type(item).__name__
     return str(key), provenance
@@ -177,6 +184,25 @@ def _stamp_jsonl(
     return stamped, "\n".join(output) + "\n"
 
 
+def _asset_digest(root: Path, relative: str, *, where: str) -> str:
+    """Hash the bytes an asset names, or refuse by the name `pack validate` uses.
+
+    Reading a file can fail, and "cannot be read" is an answer rather than an error to
+    propagate: this is the first thing stamping does with an asset, so an unreadable or
+    absent recording surfaced as a bare `OSError` out of a command whose whole job is
+    to report on a pack.
+    """
+
+    try:
+        return file_sha256(root / relative)
+    except OSError as exc:
+        raise LinguaWikiError(
+            "pack_asset_missing",
+            f"{where} names a recording that cannot be read",
+            details=(ErrorDetail(field=relative, reason=str(exc)),),
+        ) from exc
+
+
 def _stamp_json(root: Path, manifest: PackManifest, relative: str) -> tuple[list[StampedItem], str]:
     path = root / relative
     document = json.loads(path.read_text(encoding="utf-8"))
@@ -198,7 +224,17 @@ def _stamp_json(root: Path, manifest: PackManifest, relative: str) -> tuple[list
         parsed = model.model_validate(
             {**document, collection: [_with_placeholder(record) for record in records]}
         )
-        context = pack_format.file_context(parsed, collection)
+        file_header = pack_format.file_context(parsed, collection)
+        items = getattr(parsed, collection)
+        # An asset's hash covers the bytes it names, so its context is per item rather
+        # than per file. Both the digest and its shape come from `pack_format`, because
+        # a second derivation here is a pack that is stale the moment it is stamped.
+        contexts = [
+            pack_format.asset_context(parsed, _asset_digest(root, item.path, where=relative))
+            if content_kind == pack_format.ASSET_KIND
+            else file_header
+            for item in items
+        ]
         stamped = [
             _stamp_one(
                 manifest,
@@ -208,7 +244,7 @@ def _stamp_json(root: Path, manifest: PackManifest, relative: str) -> tuple[list
                 content_kind=content_kind,
                 context=context,
             )
-            for record, item in zip(records, getattr(parsed, collection), strict=True)
+            for record, item, context in zip(records, items, contexts, strict=True)
         ]
     return stamped, json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 

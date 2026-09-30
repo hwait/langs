@@ -27,6 +27,16 @@ PRESENTATION_KINDS: tuple[str, ...] = ("multiple-choice", "free-text")
 #: time, and the realized order is snapshotted; a resumed task must not reshuffle.
 CHOICE_ORDERS: tuple[str, ...] = ("fixed", "shuffled")
 
+#: Media types a pack asset may declare. Audio only: nothing else in this repository
+#: knows what to do with a pack-shipped file, and a vocabulary that accepts what no
+#: caller handles is documentation pretending to be a constraint.
+ASSET_MEDIA_TYPES: tuple[str, ...] = ("audio/wav", "audio/mpeg", "audio/ogg", "audio/flac")
+
+#: Where a pack keeps the bytes an asset names. Role is assigned by declared path
+#: everywhere else in a pack, and this keeps a recording out of `assets/`, where the
+#: loader reads every file as a catalog.
+MEDIA_PREFIX = "media/"
+
 
 def colliding_choice_values(values: Sequence[str]) -> tuple[str, ...]:
     """Choice values that are the same answer under the comparison that scores them.

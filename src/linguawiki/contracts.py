@@ -1320,6 +1320,39 @@ class PackAssessmentTask(ContractModel):
         return self
 
 
+AssetMediaType = Annotated[
+    str, Vocabulary(presentation_policy.ASSET_MEDIA_TYPES, "asset media type")
+]
+
+
+class PackAsset(ContractModel):
+    """A recording the pack ships, named so a task can play it.
+
+    The digest is deliberately **not** here. A pack manifest already names every file in
+    the directory at its exact digest, and the loader hashes all of them before anything
+    else happens, so a second declaration would be a second source of truth -- and the
+    one that could disagree with the bytes.
+    """
+
+    asset_key: str = Field(pattern=PACK_STABLE_KEY_PATTERN)
+    #: Pack-relative, under `media/`. Resolved with containment, because a symlink out of
+    #: the pack reads through to bytes the manifest happily verifies.
+    path: str
+    media_type: AssetMediaType
+    duration_ms: int = Field(gt=0)
+    #: What is said. This is where an audio task's spoken text goes when it stops being
+    #: smuggled inside the prompt, and it is the accessible alternative to the recording.
+    transcript: NonBlankStr
+    provenance: PackItemProvenance
+
+
+class PackAssetFile(ContractModel):
+    schema_name: Literal["lingua.pack.assets.v1"] = "lingua.pack.assets.v1"
+    schema_version: Literal[1] = 1
+    catalog_key: str = Field(pattern=PACK_KEY_PATTERN)
+    assets: tuple[PackAsset, ...]
+
+
 class PackAssessmentFile(ContractModel):
     schema_name: Literal["lingua.pack.assessment.v1"] = "lingua.pack.assessment.v1"
     schema_version: Literal[1] = 1
@@ -1644,6 +1677,7 @@ SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "lingua.pack.source-policy.v1": PackSourcePolicy,
     "lingua.pack.proficiency.v1": PackProficiencyFile,
     "lingua.pack.assessment.v1": PackAssessmentFile,
+    "lingua.pack.assets.v1": PackAssetFile,
     "lingua.pack.activities.v1": PackActivityFile,
     "lingua.pack.references.v1": PackReferencesFile,
     "lingua.pack.expectations.v1": PackExpectations,
