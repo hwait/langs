@@ -23,6 +23,7 @@ from pydantic import (
 from pydantic_core import CoreSchema, core_schema
 
 from linguawiki import evidence as evidence_policy
+from linguawiki import presentation as presentation_policy
 from linguawiki import sources as source_policy
 from linguawiki import transcripts as transcript_policy
 from linguawiki.clock import require_utc, require_utc_if_set, validate_iana_timezone
@@ -1180,6 +1181,81 @@ def parse_answer_key(raw: str | None) -> AnswerKey:
         raise refuse(f"{field} {first['msg'].lower()}") from exc
 
 
+PresentationKind = Annotated[
+    str, Vocabulary(presentation_policy.PRESENTATION_KINDS, "presentation kind")
+]
+ChoiceOrder = Annotated[str, Vocabulary(presentation_policy.CHOICE_ORDERS, "choice order")]
+
+
+class PresentationChoice(ContractModel):
+    """One button. `value` is submitted and scored; `display` is only drawn."""
+
+    value: NonBlankStr
+    #: What the learner reads, when it differs from what they submit -- a gloss, a
+    #: transliteration, a label. It is never compared against the answer key, so a
+    #: choice may read `pięć biletów (5 tickets)` while `value` stays `pięć biletów`.
+    display: NonBlankStr | None = None
+
+    @model_validator(mode="after")
+    def display_defaults_to_the_value(self) -> PresentationChoice:
+        if self.display is None:
+            # One field for a renderer to read, rather than a fallback every caller has
+            # to remember. `value` is still what is submitted.
+            object.__setattr__(self, "display", self.value)
+        return self
+
+
+class TaskAudio(ContractModel):
+    """The recording a listening task plays, and how often it may be played.
+
+    The allowance sits *inside* this record rather than beside it, so "a replay
+    allowance where nothing is played" is unrepresentable instead of being a rule
+    somebody has to write and somebody else has to check.
+    """
+
+    asset_key: str = Field(pattern=PACK_STABLE_KEY_PATTERN)
+    #: `None` is unlimited. A count is a count: zero replays is not an allowance, it is
+    #: a task that cannot be heard.
+    replay_allowance: int | None = Field(default=None, ge=1)
+
+
+class TaskPresentation(ContractModel):
+    """How one task is rendered. Absent means *free text*, which is not the same thing
+    as `kind: free-text` with nothing else: an absent record is a pack that has not been
+    authored for the client, and an explicit one is a decision somebody made."""
+
+    presentation_version: int = Field(default=1, ge=1)
+    kind: PresentationKind
+    choices: tuple[PresentationChoice, ...] = ()
+    order: ChoiceOrder = "fixed"
+    #: What a written answer should look like, shown beside the field. Prose for the
+    #: learner, never parsed.
+    response_shape: NonBlankStr | None = None
+    audio: TaskAudio | None = None
+
+    @model_validator(mode="after")
+    def the_record_agrees_with_its_own_kind(self) -> TaskPresentation:
+        if self.kind == "multiple-choice":
+            if len(self.choices) < 2:
+                raise ValueError("a multiple-choice task needs at least two choices")
+            if self.response_shape is not None:
+                raise ValueError("a multiple-choice task is clicked, not written into")
+        else:
+            if self.choices:
+                raise ValueError(f"a {self.kind} task has no choices")
+            if self.order != "fixed":
+                raise ValueError(f"a {self.kind} task has nothing to order")
+        collisions = presentation_policy.colliding_choice_values(
+            [choice.value for choice in self.choices]
+        )
+        if collisions:
+            raise ValueError(
+                "choice values must differ under the comparison that scores them; "
+                f"repeated: {list(collisions)}"
+            )
+        return self
+
+
 class PackAssessmentTask(ContractModel):
     """One bank item. `difficulty` is on the ordinal grid the staircase works on."""
 
@@ -1200,10 +1276,40 @@ class PackAssessmentTask(ContractModel):
     rubric_version: int = Field(default=1, ge=1)
     rubric: dict[str, Any] = Field(default_factory=dict)
     expected: AnswerKey | None = None
+    presentation: TaskPresentation | None = None
     permitted_help: str = "none"
     is_anchor: bool = False
     target_keys: tuple[str, ...] = ()
     provenance: PackItemProvenance
+
+    @model_validator(mode="after")
+    def the_presentation_agrees_with_the_task(self) -> PackAssessmentTask:
+        """Cross-check the record against the task it belongs to, and against its key.
+
+        `task_type`, `modality` and `expected` all live on this model, so this is the
+        one place that can see the whole question. The choice/key rule is the reason it
+        matters: `score_response` compares the submitted string against the key, so a
+        bank whose correct button is not a string the key accepts is a bank of tasks
+        nobody can answer correctly -- and the learner, not the pack, gets the zero.
+        """
+
+        shown = self.presentation
+        if shown is None:
+            return self
+        if shown.choices and self.task_type != "objective":
+            raise ValueError(f"a {self.task_type} task is not answered by choosing")
+        if shown.audio is not None and self.modality != "audio":
+            raise ValueError(f"a {self.modality} task plays no recording")
+        if shown.choices and self.expected is not None:
+            answering = presentation_policy.choices_answering_key(
+                [choice.value for choice in shown.choices], self.expected.answers
+            )
+            if len(answering) != 1:
+                raise ValueError(
+                    "exactly one choice value must be an answer the key accepts; "
+                    f"{len(answering)} are: {list(answering)}"
+                )
+        return self
 
     @model_validator(mode="after")
     def scored_tasks_declare_how_they_are_scored(self) -> PackAssessmentTask:

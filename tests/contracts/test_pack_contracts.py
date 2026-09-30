@@ -407,13 +407,23 @@ def test_a_model_produced_assessment_file_validates_against_its_published_schema
     if optional:
         required = {
             **required,
-            "task_type": "short-response",
-            "modality": "text",
+            "task_type": "objective",
+            "modality": "audio",
             "rubric_version": 3,
             "expected": {"answers": ["tak", "owszem"]},
             "permitted_help": "dictionary-allowed",
             "is_anchor": True,
             "target_keys": ("pl.item.one",),
+            "presentation": {
+                "presentation_version": 1,
+                "kind": "multiple-choice",
+                "choices": [
+                    {"value": "tak", "display": "tak (yes)"},
+                    {"value": "nie"},
+                ],
+                "order": "shuffled",
+                "audio": {"asset_key": "pl.audio.one", "replay_allowance": 3},
+            },
         }
     document = PackAssessmentFile.model_validate(
         {

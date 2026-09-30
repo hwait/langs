@@ -88,6 +88,17 @@
           "title": "Permitted Help",
           "type": "string"
         },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskPresentation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "prompt": {
           "minLength": 1,
           "title": "Prompt",
@@ -437,6 +448,35 @@
       "title": "PackItemReview",
       "type": "object"
     },
+    "PresentationChoice": {
+      "additionalProperties": false,
+      "description": "One button. `value` is submitted and scored; `display` is only drawn.",
+      "properties": {
+        "display": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "PresentationChoice",
+      "type": "object"
+    },
     "ReviewerKind": {
       "enum": [
         "machine",
@@ -447,6 +487,101 @@
       ],
       "title": "ReviewerKind",
       "type": "string"
+    },
+    "TaskAudio": {
+      "additionalProperties": false,
+      "description": "The recording a listening task plays, and how often it may be played.\n\nThe allowance sits *inside* this record rather than beside it, so \"a replay\nallowance where nothing is played\" is unrepresentable instead of being a rule\nsomebody has to write and somebody else has to check.",
+      "properties": {
+        "asset_key": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+          "title": "Asset Key",
+          "type": "string"
+        },
+        "replay_allowance": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replay Allowance"
+        }
+      },
+      "required": [
+        "asset_key"
+      ],
+      "title": "TaskAudio",
+      "type": "object"
+    },
+    "TaskPresentation": {
+      "additionalProperties": false,
+      "description": "How one task is rendered. Absent means *free text*, which is not the same thing\nas `kind: free-text` with nothing else: an absent record is a pack that has not been\nauthored for the client, and an explicit one is a decision somebody made.",
+      "properties": {
+        "audio": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskAudio"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "choices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PresentationChoice"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "kind": {
+          "enum": [
+            "multiple-choice",
+            "free-text"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "order": {
+          "default": "fixed",
+          "enum": [
+            "fixed",
+            "shuffled"
+          ],
+          "title": "Order",
+          "type": "string"
+        },
+        "presentation_version": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Presentation Version",
+          "type": "integer"
+        },
+        "response_shape": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Shape"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "TaskPresentation",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

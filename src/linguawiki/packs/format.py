@@ -363,6 +363,35 @@ UNHASHED_PROVENANCE_FIELDS = frozenset(
 )
 
 
+#: Payload fields added *after* this hash schema was frozen, each with the value at
+#: which it is omitted from the canonical payload.
+#:
+#: The payload is hashed whole, which is what makes a field added later covered by
+#: default. The cost is that an optional field with a `None` default writes
+#: `"<field>": null` into the canonical payload of every item that does not use it, so
+#: introducing one moves the hash of content nobody edited: a pack this repository does
+#: not own fails `pack validate` on a core upgrade, and its reviews detach from text
+#: that was reviewed. That is the false positive the hash exists to avoid.
+#:
+#: `exclude_none=True` on the dump is *not* the fix. Rubric-scored tasks already
+#: serialize `"expected": null`, and a blanket rule would move those hashes instead --
+#: causing the very defect it was added to prevent. The omission is per field, recorded
+#: here, and the rule for the next one is the same: when a field is added to a hashed
+#: payload, list it here at its introduction-time default, and the hash of content that
+#: does not use it does not move.
+POST_V1_PAYLOAD_DEFAULTS: Mapping[str, Any] = {"presentation": None}
+
+
+def _canonical_payload(payload: BaseModel) -> dict[str, Any]:
+    """The payload as hashed: whole, minus post-v1 fields left at their default."""
+
+    document = payload.model_dump(mode="json")
+    for field_name, omitted_at in POST_V1_PAYLOAD_DEFAULTS.items():
+        if field_name in document and document[field_name] == omitted_at:
+            del document[field_name]
+    return document
+
+
 def pack_item_hash(
     *,
     content_id: ContentId,
@@ -385,9 +414,14 @@ def pack_item_hash(
 
     `context` carries the containing file's header, so a task also depends on the form it
     belongs to and a descriptor on its framework.
+
+    The one exception to "whole" is `POST_V1_PAYLOAD_DEFAULTS`: a field added after this
+    schema was frozen is omitted while it holds its introduction-time default, so adding
+    one does not move the hash of content nobody edited. An item that *uses* the field is
+    hashed with it, as any other field.
     """
 
-    document = payload.model_dump(mode="json")
+    document = _canonical_payload(payload)
     declared = document.pop("provenance", {})
     hashed_provenance = {
         key: value for key, value in declared.items() if key not in UNHASHED_PROVENANCE_FIELDS
