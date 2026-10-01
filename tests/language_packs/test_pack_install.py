@@ -28,7 +28,9 @@ from linguawiki.services import packs as pack_service
 from linguawiki.services import workspace as workspace_service
 from tests.conftest import (
     FIXTURE_PACKS,
+    NEXT_PILOT_VERSION,
     PILOT_PACK,
+    PILOT_VERSION,
     PolishWorkspace,
     SyntheticWorkspace,
 )
@@ -164,7 +166,7 @@ def test_a_different_version_requires_the_update_command(
 
     pack_service.install(synthetic_workspace.paths, editable_pilot, clock=synthetic_workspace.clock)
     manifest = json.loads((editable_pilot / "manifest.json").read_text(encoding="utf-8"))
-    manifest["version"] = "0.2.0"
+    manifest["version"] = NEXT_PILOT_VERSION
     (editable_pilot / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -185,20 +187,20 @@ def test_a_different_version_requires_the_update_command(
         dry_run=True,
     )
     assert preview.dry_run is True
-    assert preview.updated_from == "0.1.1"
+    assert preview.updated_from == PILOT_VERSION
     with open_reader(synthetic_workspace.paths, clock=synthetic_workspace.clock) as database:
-        assert database.scalar("SELECT version FROM pack_installations") == "0.1.1"
+        assert database.scalar("SELECT version FROM pack_installations") == PILOT_VERSION
 
 
 def _bump_version_and_change_an_item(root: Path, *, remove_key: str) -> tuple[str, str]:
-    """Publish a 0.2.0 that edits one item and drops another, and say which."""
+    """Publish a 0.3.0 that edits one item and drops another, and say which."""
 
     path = root / "seed" / "knowledge.jsonl"
     records = [
         json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
     changed = records[0]["stable_key"]
-    records[0]["body"] = records[0]["body"] + " Revised in 0.2.0."
+    records[0]["body"] = records[0]["body"] + " Revised in 0.3.0."
     kept = [record for record in records if record["stable_key"] != remove_key]
     path.write_text(
         "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in kept) + "\n",
@@ -229,7 +231,7 @@ def _bump_version_and_change_an_item(root: Path, *, remove_key: str) -> tuple[st
         encoding="utf-8",
     )
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    manifest["version"] = "0.2.0"
+    manifest["version"] = NEXT_PILOT_VERSION
     (root / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -284,7 +286,7 @@ def test_an_update_deprecates_a_removed_item_rather_than_deleting_it(
         )
     assert row is not None
     assert str(row[0]) == "deprecated"
-    assert "absent from pack version 0.2.0" in str(row[1])
+    assert f"absent from pack version {NEXT_PILOT_VERSION}" in str(row[1])
 
 
 def test_an_update_keeps_learner_state_attached_to_the_items_it_changed(
@@ -320,7 +322,7 @@ def test_a_pack_may_not_change_the_language_it_serves(
 ) -> None:
     pack_service.install(synthetic_workspace.paths, editable_pilot, clock=synthetic_workspace.clock)
     manifest = json.loads((editable_pilot / "manifest.json").read_text(encoding="utf-8"))
-    manifest["version"] = "0.2.0"
+    manifest["version"] = NEXT_PILOT_VERSION
     manifest["language"] = "cs"
     (editable_pilot / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"

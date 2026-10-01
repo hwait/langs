@@ -25,6 +25,10 @@ model calls for machine-scorable work.
 
 - [ ] Multiple-choice renders as **buttons**, from the snapshotted presentation. No prose
       typing, and no parsing of prompt text.
+- [ ] A button submits its choice's **`value`**, verbatim — never an index or an option id.
+      That is what the scorer compares against the served answer key (C2a); anything else
+      needs a mapping the snapshot does not carry. `display` is what is drawn, and is never
+      submitted.
 - [ ] `short-response` renders as a single field with the expected shape shown.
 - [ ] A task with no presentation record renders as free text rather than failing.
 - [ ] Submitting sends the idempotency key from C3; a retry after a lost response must not

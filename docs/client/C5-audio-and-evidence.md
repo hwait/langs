@@ -21,6 +21,32 @@ names that failure — *"skipping it left the bytes sitting unregistered under a
 directory, accounted for by nothing"* (`services/artifacts.py`) — and Stage 5 closed it for
 package ingestion. Do not reopen it through the browser.
 
+## 0. Inherited from C2 — pack-shipped recordings
+
+C2 built the pack side of audio and left two things here, deliberately.
+
+- [ ] **Install pack assets into a table.** `served_task` resolves a served recording by
+      loading the whole pack from `pack_installations.source_path` to read one digest.
+      That is correct -- what comes back is checked against the snapshotted digest rather
+      than trusted -- and it was cheap while no pack shipped audio. Once one does, every
+      audio task read pays for a full `load_pack`. Store `(content_id, path, sha256,
+      media_type, duration_ms)` at install time and resolve from there, keeping the
+      digest comparison: the point was never where the file is, it is whether the bytes
+      are the ones the learner heard.
+- [ ] **Decide whether an asset becomes learner content.** C2 deliberately keeps a
+      recording out of `content_records`: its `content_kind` is a closed CHECK on the
+      most-referenced table in the schema, DuckDB cannot re-constrain it, and rebuilding
+      it for zero rows was not worth doing while nothing in a learner database referenced
+      a recording. `LoadedPack.installable_items` is where that split is stated. If C5
+      wants `db check`, a rights audit, or a purge to reason about pack audio from the
+      database, that is the migration to weigh.
+- [ ] **The pilot's six listening recordings.** `pl-pilot` 0.2.0 ships none, so its six
+      audio tasks still carry the spoken sentence in the prompt and declare no asset --
+      what they measure today is reading a sentence somebody transcribed. The contract,
+      the catalog, the validation and the refusals are all in place and tested;
+      `tests/language_packs/test_pilot_presentation.py` pins the gap so it stays visible.
+      Producing the recordings, with their rights and origin class, is what closes it.
+
 ## 1. Capture, with consent first
 
 - [ ] Press to start, press to stop. **No countdown.**

@@ -28,5 +28,6 @@
   "0027_utterance_identity_and_supersession": "20bb708314871e3ff5d5a4a71f00f7dab45fe4998b42cde937c7b5b75121f867",
   "0028_override_provenance": "070f8d8c98d392f96e45e5bca5d93b1aaa84f7b4c23ea9c19aa541cb303315b0",
   "0029_selected_clips": "3b17c2b04fe60b6c277bfc7b0559fb60289fceee1f7ce865dabf8b69ab973137",
-  "0030_served_answer_key": "8e06a6d1e4d4cdae1ffdfc5e8b3605215afacce5b0ca0174a367938229ef43e5"
+  "0030_served_answer_key": "8e06a6d1e4d4cdae1ffdfc5e8b3605215afacce5b0ca0174a367938229ef43e5",
+  "0031_task_presentation": "64face577fd80a2386209711ce1b4d33bdb61eb32651b1a45823275c7656069e"
 }

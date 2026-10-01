@@ -23,6 +23,7 @@ from pydantic import (
 from pydantic_core import CoreSchema, core_schema
 
 from linguawiki import evidence as evidence_policy
+from linguawiki import presentation as presentation_policy
 from linguawiki import sources as source_policy
 from linguawiki import transcripts as transcript_policy
 from linguawiki.clock import require_utc, require_utc_if_set, validate_iana_timezone
@@ -1180,6 +1181,225 @@ def parse_answer_key(raw: str | None) -> AnswerKey:
         raise refuse(f"{field} {first['msg'].lower()}") from exc
 
 
+class PackRuleError(ValueError):
+    """A model rule that has a name its callers know.
+
+    A validator raises a `ValueError` and pydantic keeps the instance in the error's
+    context, so the code survives the trip through `ValidationError` and `pack validate`
+    can report the rule that failed rather than "this file does not satisfy its model".
+    Codes are part of the contract: a caller that can only see `pack_contract_invalid`
+    cannot tell a bank with two right answers from a task carrying choices it should not,
+    and recovering the difference by matching error prose is how that breaks again.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _non_blank_choice(value: str) -> str:
+    """`min_length=1` accepts `"   "`, and no comparison can ever match it."""
+
+    if not value.strip():
+        raise PackRuleError("pack_choice_values_invalid", "a choice value must not be blank")
+    return value
+
+
+PresentationKind = Annotated[
+    str, Vocabulary(presentation_policy.PRESENTATION_KINDS, "presentation kind")
+]
+ChoiceOrder = Annotated[str, Vocabulary(presentation_policy.CHOICE_ORDERS, "choice order")]
+
+
+class PresentationChoice(ContractModel):
+    """One button. `value` is submitted and scored; `display` is only drawn."""
+
+    value: Annotated[str, Field(min_length=1), AfterValidator(_non_blank_choice)]
+    #: What the learner reads, when it differs from what they submit -- a gloss, a
+    #: transliteration, a label. It is never compared against the answer key, so a
+    #: choice may read `pięć biletów (5 tickets)` while `value` stays `pięć biletów`.
+    display: NonBlankStr | None = None
+
+    @model_validator(mode="after")
+    def display_defaults_to_the_value(self) -> PresentationChoice:
+        if self.display is None:
+            # One field for a renderer to read, rather than a fallback every caller has
+            # to remember. `value` is still what is submitted.
+            object.__setattr__(self, "display", self.value)
+        return self
+
+
+class TaskAudio(ContractModel):
+    """The recording a listening task plays, and how often it may be played.
+
+    The allowance sits *inside* this record rather than beside it, so "a replay
+    allowance where nothing is played" is unrepresentable instead of being a rule
+    somebody has to write and somebody else has to check.
+    """
+
+    asset_key: str = Field(pattern=PACK_STABLE_KEY_PATTERN)
+    #: `None` is unlimited. A count is a count: zero replays is not an allowance, it is
+    #: a task that cannot be heard.
+    replay_allowance: int | None = Field(default=None, ge=1)
+
+
+class TaskPresentation(ContractModel):
+    """How one task is rendered. Absent means *free text*, which is not the same thing
+    as `kind: free-text` with nothing else: an absent record is a pack that has not been
+    authored for the client, and an explicit one is a decision somebody made."""
+
+    presentation_version: int = Field(default=1, ge=1)
+    kind: PresentationKind
+    choices: tuple[PresentationChoice, ...] = ()
+    order: ChoiceOrder = "fixed"
+    #: What a written answer should look like, shown beside the field. Prose for the
+    #: learner, never parsed.
+    response_shape: NonBlankStr | None = None
+    audio: TaskAudio | None = None
+
+    @model_validator(mode="after")
+    def the_record_agrees_with_its_own_kind(self) -> TaskPresentation:
+        if self.kind == "multiple-choice":
+            if len(self.choices) < 2:
+                raise PackRuleError(
+                    "pack_presentation_mismatched",
+                    "a multiple-choice task needs at least two choices",
+                )
+            if self.response_shape is not None:
+                raise PackRuleError(
+                    "pack_presentation_mismatched",
+                    "a multiple-choice task is clicked, not written into",
+                )
+        else:
+            if self.choices:
+                raise PackRuleError(
+                    "pack_presentation_mismatched", f"a {self.kind} task has no choices"
+                )
+            if self.order != "fixed":
+                raise PackRuleError(
+                    "pack_presentation_mismatched", f"a {self.kind} task has nothing to order"
+                )
+        collisions = presentation_policy.colliding_choice_values(
+            [choice.value for choice in self.choices]
+        )
+        if collisions:
+            raise PackRuleError(
+                "pack_choice_values_invalid",
+                "choice values must differ under the comparison that scores them; "
+                f"repeated: {list(collisions)}",
+            )
+        return self
+
+
+class ServedAsset(ContractModel):
+    """A recording as served: which one was meant, and which bytes were played.
+
+    Both halves, always. The content ID answers *which recording was meant*; only the
+    digest answers *is this the recording they heard*, which is the one question the
+    snapshot exists to settle.
+    """
+
+    content_id: NonBlankStr
+    sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+def snapshot_lost_its_presentation(
+    *, served_hash: object, bank_hash: object, bank_presentation: object
+) -> bool:
+    """Whether a null presentation snapshot is damage rather than a row that predates it.
+
+    Null is truthful for a task served before the column existed: no bank held a
+    presentation then, so nothing could have been shown and nothing was lost. But if the
+    live bank row still hashes to what was served *and* it has a presentation, the
+    content is provably identical and cannot have been served without one.
+
+    Asked by the reader and by `db check`, from here, because a rule those two ask
+    differently is a rule that tells an operator the workspace is clean and then refuses
+    them.
+    """
+
+    return (
+        served_hash is not None
+        and bank_hash is not None
+        and bank_presentation is not None
+        and str(bank_hash) == str(served_hash)
+    )
+
+
+def parse_asset_identity(raw: str | None) -> ServedAsset | None:
+    """Read a stored asset identity, refusing by name whichever rule it breaks.
+
+    The one place a stored identity is parsed, for the same reason as
+    `parse_task_presentation`: `db check` and the read path asked this question two
+    different ways, so an operator was told a workspace was clean and the read then
+    refused. A half-answer here -- a key with no digest -- passes the check that looks
+    for JSON and fails the reader that needs to compare bytes.
+    """
+
+    def refuse(reason: str) -> LinguaWikiError:
+        return LinguaWikiError(
+            "assessment_presentation_malformed",
+            f"the recorded asset identity cannot be used: {reason}",
+            details=(ErrorDetail(field="asset", reason=reason),),
+        )
+
+    if raw is None or not raw.strip():
+        return None
+    try:
+        document = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise refuse(f"not readable JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise refuse(f"not a JSON object but {type(document).__name__}")
+    try:
+        return ServedAsset.model_validate(document)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        field = ".".join(str(part) for part in first["loc"]) or "asset"
+        raise refuse(f"{field} {first['msg'].lower()}") from exc
+
+
+def parse_task_presentation(raw: str | None) -> TaskPresentation | None:
+    """Read a stored presentation record, refusing by name whichever rule it breaks.
+
+    The one place a stored record is parsed: the bank reader, the serve path and
+    `db check` all come through here, so "what is a usable presentation" has a single
+    answer. Two implementations of that question drift, and a caller told "valid" by one
+    and refused by the other has been told the opposite of the truth.
+
+    Absent is not a refusal. `NULL` is what every task in every pack meant before the
+    column existed, and it still means *render as free text*.
+    """
+
+    def refuse(reason: str) -> LinguaWikiError:
+        return LinguaWikiError(
+            "assessment_presentation_malformed",
+            f"the presentation record cannot be rendered: {reason}",
+            details=(ErrorDetail(field="presentation", reason=reason),),
+        )
+
+    if raw is None or not raw.strip():
+        return None
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise refuse(f"not valid JSON: {exc}") from exc
+    except ValueError as exc:
+        raise refuse(f"holds a value no parser will read: {exc}") from exc
+    except RecursionError as exc:
+        # Not a `ValueError`, so it would escape as an unhandled crash out of `db check`,
+        # whose contract is never to raise.
+        raise refuse("nested too deeply for any parser to read") from exc
+    if not isinstance(document, dict):
+        raise refuse(f"not a JSON object but {type(document).__name__}")
+    try:
+        return TaskPresentation.model_validate(document)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        field = ".".join(str(part) for part in first["loc"]) or "presentation"
+        raise refuse(f"{field} {first['msg'].lower()}") from exc
+
+
 class PackAssessmentTask(ContractModel):
     """One bank item. `difficulty` is on the ordinal grid the staircase works on."""
 
@@ -1200,10 +1420,46 @@ class PackAssessmentTask(ContractModel):
     rubric_version: int = Field(default=1, ge=1)
     rubric: dict[str, Any] = Field(default_factory=dict)
     expected: AnswerKey | None = None
+    presentation: TaskPresentation | None = None
     permitted_help: str = "none"
     is_anchor: bool = False
     target_keys: tuple[str, ...] = ()
     provenance: PackItemProvenance
+
+    @model_validator(mode="after")
+    def the_presentation_agrees_with_the_task(self) -> PackAssessmentTask:
+        """Cross-check the record against the task it belongs to, and against its key.
+
+        `task_type`, `modality` and `expected` all live on this model, so this is the
+        one place that can see the whole question. The choice/key rule is the reason it
+        matters: `score_response` compares the submitted string against the key, so a
+        bank whose correct button is not a string the key accepts is a bank of tasks
+        nobody can answer correctly -- and the learner, not the pack, gets the zero.
+        """
+
+        shown = self.presentation
+        if shown is None:
+            return self
+        if shown.choices and self.task_type != "objective":
+            raise PackRuleError(
+                "pack_presentation_mismatched",
+                f"a {self.task_type} task is not answered by choosing",
+            )
+        if shown.audio is not None and self.modality != "audio":
+            raise PackRuleError(
+                "pack_presentation_mismatched", f"a {self.modality} task plays no recording"
+            )
+        if shown.choices and self.expected is not None:
+            answering = presentation_policy.choices_answering_key(
+                [choice.value for choice in shown.choices], self.expected.answers
+            )
+            if len(answering) != 1:
+                raise PackRuleError(
+                    "pack_choices_do_not_answer",
+                    "exactly one choice value must be an answer the key accepts; "
+                    f"{len(answering)} are: {list(answering)}",
+                )
+        return self
 
     @model_validator(mode="after")
     def scored_tasks_declare_how_they_are_scored(self) -> PackAssessmentTask:
@@ -1212,6 +1468,39 @@ class PackAssessmentTask(ContractModel):
         if self.task_type not in {"objective", "short-response"} and not self.rubric:
             raise ValueError(f"{self.task_type} task must declare a rubric")
         return self
+
+
+AssetMediaType = Annotated[
+    str, Vocabulary(presentation_policy.ASSET_MEDIA_TYPES, "asset media type")
+]
+
+
+class PackAsset(ContractModel):
+    """A recording the pack ships, named so a task can play it.
+
+    The digest is deliberately **not** here. A pack manifest already names every file in
+    the directory at its exact digest, and the loader hashes all of them before anything
+    else happens, so a second declaration would be a second source of truth -- and the
+    one that could disagree with the bytes.
+    """
+
+    asset_key: str = Field(pattern=PACK_STABLE_KEY_PATTERN)
+    #: Pack-relative, under `media/`. Resolved with containment, because a symlink out of
+    #: the pack reads through to bytes the manifest happily verifies.
+    path: str
+    media_type: AssetMediaType
+    duration_ms: int = Field(gt=0)
+    #: What is said. This is where an audio task's spoken text goes when it stops being
+    #: smuggled inside the prompt, and it is the accessible alternative to the recording.
+    transcript: NonBlankStr
+    provenance: PackItemProvenance
+
+
+class PackAssetFile(ContractModel):
+    schema_name: Literal["lingua.pack.assets.v1"] = "lingua.pack.assets.v1"
+    schema_version: Literal[1] = 1
+    catalog_key: str = Field(pattern=PACK_KEY_PATTERN)
+    assets: tuple[PackAsset, ...]
 
 
 class PackAssessmentFile(ContractModel):
@@ -1538,6 +1827,7 @@ SCHEMA_MODELS: dict[str, type[BaseModel]] = {
     "lingua.pack.source-policy.v1": PackSourcePolicy,
     "lingua.pack.proficiency.v1": PackProficiencyFile,
     "lingua.pack.assessment.v1": PackAssessmentFile,
+    "lingua.pack.assets.v1": PackAssetFile,
     "lingua.pack.activities.v1": PackActivityFile,
     "lingua.pack.references.v1": PackReferencesFile,
     "lingua.pack.expectations.v1": PackExpectations,

@@ -25,15 +25,15 @@ write, and a definition of done. Take them in dependency order.
 | Stage | Document | Depends on |
 |---|---|---|
 | C1 | [Answer-key snapshot](client/C1-answer-key-snapshot.md) ✅ shipped | — |
-| C2a | [Presentation contract and pack authoring](client/C2a-presentation-contract.md) | — |
-| C2b | [Served-presentation snapshot](client/C2b-served-presentation-snapshot.md) | C1, C2a |
+| C2a | [Presentation contract and pack authoring](client/C2a-presentation-contract.md) ✅ shipped | — |
+| C2b | [Presentation persistence and the served snapshot](client/C2b-served-presentation-snapshot.md) ✅ shipped | C1, C2a |
 | C3 | [Server and generated contract](client/C3-server-and-contract.md) | C1, C2a, C2b |
 | C4 | [Assessment screen](client/C4-assessment-screen.md) | C3 |
 | C5 | [Audio, and the claims that rest on it](client/C5-audio-and-evidence.md) | C4 |
 | C6 | [Submission lifecycle and batching](client/C6-async-judging-and-batching.md) | C4, C5 |
 | C7 | [Session management](client/C7-session-management.md) | C4 |
 
-**C1 and C2a can start today, in parallel, and need no client code.**
+**C1, C2a and C2b are shipped. C3 is next and is unblocked.**
 
 ## Stage numbering
 
@@ -145,38 +145,74 @@ and the structure the learner was actually shown is preserved with the answer ke
 **Depends on.** Split, because the two halves have different prerequisites and the authoring
 must not be blocked behind code:
 
-- **C2a — contract and authoring: nothing.** The presentation contract, the pack work, and
-  pack validation. This is the schedule risk and can start immediately, in parallel with C1.
-- **C2b — served-presentation snapshot: C1 and C2a.** Extending the served-task snapshot with
-  the presentation requires C1's snapshot to exist and C2a's contract to define its shape.
+- **C2a — contract and authoring: nothing.** The presentation contract, the pack asset
+  catalog, the pack work, and pack validation. This is the schedule risk and can start
+  immediately, in parallel with C1. It touches no database.
+- **C2b — persistence and the served snapshot: C1 and C2a.** The bank migration, the
+  installer, and the served-task snapshot. Extending the snapshot requires C1's snapshot to
+  exist and C2a's contract to define its shape; the bank column has to come with it, because
+  `assessment_tasks` has no presentation column and the installer writes an enumerated column
+  list, so a pack carrying presentation would install into a bank that discards it.
 
 **Work.**
 - Versioned presentation contract: typed `choices` for multiple-choice, an asset reference and
   replay allowance for audio tasks, expected response shape for `short-response`.
 - Distinguish **multiple-choice** from **deterministically scored free text**. Both are
   machine-scorable; they render differently.
+- **A choice submits its `value`, and the scorer is untouched.** `score_response` folds the
+  response and compares it against the served `AnswerKey`; it does not know what a choice is.
+  So exactly one choice `value` must fold-match the key, and `display` is never scored. An
+  option id mapped back to an answer would be a second place the right answer is recorded.
+- **An optional field added to a hashed payload moves every existing hash.** `pack_item_hash`
+  dumps the payload whole, so `presentation: … | None = None` writes `"presentation": null`
+  into content nobody edited and detaches its reviews. The field is omitted from the canonical
+  payload when absent; a blanket `exclude_none` is not the fix, because rubric-scored tasks
+  already serialize `"expected": null`.
+- **Pack audio has to be invented before it can be referenced.** There is no asset concept and
+  no audio file in any pack, and a stable id alone can resolve to changed bytes after an
+  update. C2a adds an asset catalog whose identity is `(id, digest)`, validated by opening the
+  file rather than believing the entry — and six `pl-pilot` recordings are a content
+  deliverable, not a checkbox. If they cannot be produced, those tasks keep their prompts and
+  declare no asset; changing their `modality` to hide the gap would make a receptive dimension
+  untestable, since `REQUIRED_MODALITIES` demands `audio`.
 - Pack work on `pl-pilot`: options are currently encoded inside the prompt string
   (`"Which is correct? 'pięć bilety' / …"`) and audio tasks carry spoken text in `prompt`
   rather than referencing a clip. This is authoring and migration, not a rendering concern.
 - A task without a presentation record renders as free text. The client never guesses.
-- **C2b — the served presentation is snapshotted with the answer key**, extending C1's
-  snapshot: choices as shown, their order, the asset **identity** (not merely a path), and the
-  replay allowance in force. A run paused before a pack update and resumed after it must show
-  the learner the same choices the answer key belongs to. This item, and its
+- **C2b — presentation reaches the bank and then the snapshot.** One migration adds
+  `presentation_json` to `assessment_tasks` and `presentation_json` + `asset_identity_json` to
+  `assessment_run_tasks`; splitting them would permit a release in which the bank holds
+  presentation no serve can snapshot. The installer writes the column on insert *and* on
+  conflict, so an upgrade that removes a presentation clears it. The snapshot then keeps
+  choices as shown, their order, the asset **identity** — id *and* digest, not merely a path —
+  and the replay allowance in force. A run paused before a pack update and resumed after it
+  must show the learner the same choices the answer key belongs to. This item, and its
   resume-after-pack-update test, cannot be met by C2a alone.
 
 **Verification.**
 - Every `pl-pilot` objective task exposes typed choices, or is explicitly marked free-text.
 - A task with no presentation record round-trips as free text rather than failing.
-- Pack validation rejects a presentation record that disagrees with its task type.
+- **The two fixture packs, which are not re-authored, still validate with the hashes they
+  shipped with** — no re-stamp, with one derived hash pinned as a literal so the next optional
+  field that moves it fails there.
+- **The correct button scores.** A re-authored objective task's correct choice `value`, put
+  through `score_response` against that task's key, returns 1.0; another choice returns 0.0.
+- Pack validation rejects a presentation record that disagrees with its task type, an
+  objective task whose choices match its key zero times or twice, colliding or blank choice
+  values, and an asset whose file is missing, altered, or outside the pack root.
+- **Install round trip**: presentation survives install, reopen, and a reinstall that changes
+  one task's choices and removes another's.
 - **Resume-after-pack-update**: serve a task, pause, change the pack's choices and assets,
   resume — the learner sees the served presentation, and the asset resolves to the served
   identity or the task is refused rather than shown with a substituted clip.
 
 **Exit gate.** Every task the pilot pack can serve is renderable as buttons or as an honest
-free-text field, decided by data rather than by parsing.
+free-text field, decided by data rather than by parsing, and what a learner was shown survives
+a pack update.
 
-**Estimate.** 3–5 days, most of it authoring.
+**Estimate.** 5–8 days, most of it authoring — revised upward from 3–5 because the asset
+catalog and the recordings did not exist when the first estimate was made, and because the
+bank migration and installer moved into C2b rather than being absent from the plan.
 
 ---
 
@@ -457,6 +493,10 @@ that growth, rather than as a separate pass, avoids authoring the bank twice.
 - **C2a is the schedule risk.** It is content authoring, which is slower and less predictable
   than code, and the pilot pack is thin across the board. It may be worth doing alongside the
   pack growth Stage 8 implies rather than as a separate push.
+- **Six Polish recordings are on the critical path for audio, and nobody has made them.** They
+  are a production deliverable with rights and provenance, not a code task. C2a names the
+  fallback — no asset reference, prompts unchanged — but taking it leaves C5's listening work
+  resting on a bank that still cannot play anything.
 - **A second entry point can drift.** The server must refuse what the CLI refuses; the
   equivalence tests in C3 are the only thing keeping that true.
 - **OpenAPI conformance is not correctness.** The sequencing rules in C6, the snapshot rule in
@@ -464,6 +504,9 @@ that growth, rather than as a separate pass, avoids authoring the bank twice.
 - **Estimates assume the constraints hold as reproduced.** Each was verified against the code
   at revision 2 of the proposal; a migration that changes the assessment tables invalidates
   the C1 and C6 estimates.
+- **Adding a field to a hashed pack payload is a cross-cutting change.** The hash covers the
+  whole payload by design, so any stage that extends a pack contract owes the same
+  unchanged-pack test C2a adds, or it moves hashes for content nobody edited.
 
 ## Not attempted, and why
 

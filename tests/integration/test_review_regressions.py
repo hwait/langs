@@ -24,7 +24,12 @@ from linguawiki.services import authoring as authoring_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import onboarding as onboarding_service
 from linguawiki.services import packs as pack_service
-from tests.conftest import PILOT_PACK, PolishWorkspace, SyntheticWorkspace
+from tests.conftest import (
+    NEXT_PILOT_VERSION,
+    PILOT_PACK,
+    PolishWorkspace,
+    SyntheticWorkspace,
+)
 
 TEMPLATE: dict[str, Any] = {
     "schema_name": "lingua.pack.template.v1",
@@ -601,7 +606,7 @@ def test_a_run_refuses_to_serve_from_a_pack_it_did_not_start_against(
         polish_workspace.paths, run=run.run_id, clock=polish_workspace.clock
     )
     assert isinstance(first, assessment_service.NextTaskReport)
-    updated = _republished(PILOT_PACK, tmp_path / "pl-pilot-next", version="0.2.0")
+    updated = _republished(PILOT_PACK, tmp_path / "pl-pilot-next", version=NEXT_PILOT_VERSION)
     pack_service.install(
         polish_workspace.paths, updated, clock=polish_workspace.clock, allow_update=True
     )
@@ -804,7 +809,7 @@ def test_a_pack_that_drops_a_level_stops_offering_it(
     frameworks[0]["levels"] = [
         level for level in frameworks[0]["levels"] if level not in {"C1", "C2"}
     ]
-    _republished(PILOT_PACK, narrowed, version="0.2.0", frameworks=frameworks)
+    _republished(PILOT_PACK, narrowed, version=NEXT_PILOT_VERSION, frameworks=frameworks)
     pack_service.install(
         polish_workspace.paths, narrowed, clock=polish_workspace.clock, allow_update=True
     )
@@ -893,7 +898,7 @@ def test_a_scored_run_keeps_its_bands_when_the_pack_narrows(
         polish_workspace.paths, run=run.run_id, clock=polish_workspace.clock
     )
     narrowed = _narrowed_to(
-        PILOT_PACK, tmp_path / "pl-narrow", ["A1", "A2", "B1", "B2"], version="0.2.0"
+        PILOT_PACK, tmp_path / "pl-narrow", ["A1", "A2", "B1", "B2"], version=NEXT_PILOT_VERSION
     )
     # Nothing binds the levels this run used any more, so the update is allowed.
     learner_service.update_track(
@@ -945,7 +950,7 @@ def test_an_update_that_withdraws_a_level_a_track_uses_is_refused(
         polish_workspace.paths, target_level="C2", clock=polish_workspace.clock
     )
     narrowed = _narrowed_to(
-        PILOT_PACK, tmp_path / "pl-narrow", ["A1", "A2", "B1", "B2"], version="0.2.0"
+        PILOT_PACK, tmp_path / "pl-narrow", ["A1", "A2", "B1", "B2"], version=NEXT_PILOT_VERSION
     )
 
     preview = pack_service.diff(polish_workspace.paths, narrowed, clock=polish_workspace.clock)
@@ -970,7 +975,7 @@ def test_resolving_the_tracks_lets_the_narrowing_update_proceed(
         polish_workspace.paths, target_level="C2", clock=polish_workspace.clock
     )
     narrowed = _narrowed_to(
-        PILOT_PACK, tmp_path / "pl-narrow", ["A1", "A2", "B1", "B2"], version="0.2.0"
+        PILOT_PACK, tmp_path / "pl-narrow", ["A1", "A2", "B1", "B2"], version=NEXT_PILOT_VERSION
     )
 
     learner_service.update_track(
@@ -980,7 +985,7 @@ def test_resolving_the_tracks_lets_the_narrowing_update_proceed(
         polish_workspace.paths, narrowed, clock=polish_workspace.clock, allow_update=True
     )
 
-    assert report.version == "0.2.0"
+    assert report.version == NEXT_PILOT_VERSION
     assert report.diff is not None
     assert report.diff.level_conflicts == ()
 
@@ -994,7 +999,7 @@ def test_a_preview_of_a_narrowing_update_is_never_refused(
         polish_workspace.paths, target_level="C2", clock=polish_workspace.clock
     )
     narrowed = _narrowed_to(
-        PILOT_PACK, tmp_path / "pl-narrow", ["A1", "A2", "B1", "B2"], version="0.2.0"
+        PILOT_PACK, tmp_path / "pl-narrow", ["A1", "A2", "B1", "B2"], version=NEXT_PILOT_VERSION
     )
 
     dry = pack_service.install(
@@ -1097,7 +1102,9 @@ def test_a_track_naming_no_level_still_blocks_removal_of_its_framework(
     )
     assert (track.declared_level, track.current_level, track.target_level) == (None, None, None)
     # Re-keyed, so the pack itself is well-formed and the track guard is what refuses.
-    reframed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-reframed", version="0.2.0")
+    reframed = _reframed_and_rekeyed(
+        PILOT_PACK, tmp_path / "pl-reframed", version=NEXT_PILOT_VERSION
+    )
 
     preview = pack_service.diff(installed_pilot.paths, reframed, clock=installed_pilot.clock)
     with pytest.raises(LinguaWikiError) as failure:
@@ -1116,7 +1123,9 @@ def test_a_track_naming_no_level_still_blocks_removal_of_its_framework(
 def test_a_track_with_levels_also_blocks_removal_of_its_framework(
     polish_workspace: PolishWorkspace, tmp_path: Path
 ) -> None:
-    reframed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-reframed", version="0.2.0")
+    reframed = _reframed_and_rekeyed(
+        PILOT_PACK, tmp_path / "pl-reframed", version=NEXT_PILOT_VERSION
+    )
 
     with pytest.raises(LinguaWikiError) as failure:
         pack_service.install(
@@ -1130,7 +1139,7 @@ def test_a_preview_of_a_framework_removal_is_never_refused(
     polish_workspace: PolishWorkspace, tmp_path: Path
 ) -> None:
     reframed = _reframed(
-        PILOT_PACK, tmp_path / "pl-reframed", framework_id="cefr-2024", version="0.2.0"
+        PILOT_PACK, tmp_path / "pl-reframed", framework_id="cefr-2024", version=NEXT_PILOT_VERSION
     )
 
     dry = pack_service.install(
@@ -1187,7 +1196,7 @@ def test_redefining_an_installed_frameworks_version_is_refused(
     """
 
     reversioned = _reversioned(
-        PILOT_PACK, tmp_path / "pl-2024", framework_version="2024", version="0.2.0"
+        PILOT_PACK, tmp_path / "pl-2024", framework_version="2024", version=NEXT_PILOT_VERSION
     )
 
     with pytest.raises(LinguaWikiError) as failure:
@@ -1214,7 +1223,7 @@ def test_renaming_an_installed_framework_is_refused(
     manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
     frameworks = manifest["frameworks"]
     frameworks[0]["name"] = "Council of Europe Reference Levels"
-    renamed = _republished(PILOT_PACK, target, version="0.2.0", frameworks=frameworks)
+    renamed = _republished(PILOT_PACK, target, version=NEXT_PILOT_VERSION, frameworks=frameworks)
 
     with pytest.raises(LinguaWikiError) as failure:
         pack_service.install(
@@ -1230,13 +1239,13 @@ def test_an_unchanged_framework_reinstalls_without_complaint(
 ) -> None:
     """The guard rejects redefinition, not republication."""
 
-    same = _republished(PILOT_PACK, tmp_path / "pl-same", version="0.2.0")
+    same = _republished(PILOT_PACK, tmp_path / "pl-same", version=NEXT_PILOT_VERSION)
 
     report = pack_service.install(
         installed_pilot.paths, same, clock=installed_pilot.clock, allow_update=True
     )
 
-    assert report.version == "0.2.0"
+    assert report.version == NEXT_PILOT_VERSION
     assert report.frameworks == ("cefr",)
 
 
@@ -1255,7 +1264,7 @@ def test_a_learner_can_be_moved_onto_a_replacement_framework(
     workspace could never adopt a replacement framework at all.
     """
 
-    reframed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-2024", version="0.2.0")
+    reframed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-2024", version=NEXT_PILOT_VERSION)
 
     # 1. The update is refused while the learner is still taught in the old framework.
     with pytest.raises(LinguaWikiError) as blocked:
@@ -1403,7 +1412,7 @@ def test_a_bundle_naming_an_undeclared_framework_is_refused_at_load(
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    _republished(PILOT_PACK, target, version="0.2.0")
+    _republished(PILOT_PACK, target, version=NEXT_PILOT_VERSION)
 
     with pytest.raises(PackError) as failure:
         load_pack(target)
@@ -1489,7 +1498,7 @@ def test_a_framework_change_may_not_keep_a_scoped_records_identity(
         PILOT_PACK,
         tmp_path / "pl-same-keys",
         framework_id="cefr-2024",
-        version="0.2.0",
+        version=NEXT_PILOT_VERSION,
         framework_version="2024",
     )
 
@@ -1522,7 +1531,7 @@ def test_a_preview_of_a_rebinding_update_is_never_refused(
         PILOT_PACK,
         tmp_path / "pl-same-keys",
         framework_id="cefr-2024",
-        version="0.2.0",
+        version=NEXT_PILOT_VERSION,
         framework_version="2024",
     )
 
@@ -1544,7 +1553,7 @@ def test_re_keying_the_scoped_records_completes_the_framework_change(
 ) -> None:
     """The remediation the refusal names, with every surface checked afterwards."""
 
-    rekeyed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-rekeyed", version="0.2.0")
+    rekeyed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-rekeyed", version=NEXT_PILOT_VERSION)
 
     report = pack_service.install(
         installed_pilot.paths, rekeyed, clock=installed_pilot.clock, allow_update=True
@@ -1590,7 +1599,7 @@ def test_withdrawing_every_assessment_form_supersedes_the_installed_bank(
     """An empty incoming definition set must not turn `NOT IN` into SQL unknown."""
 
     replacement = _reframed_and_rekeyed(
-        PILOT_PACK, tmp_path / "pl-without-assessments", version="0.2.0"
+        PILOT_PACK, tmp_path / "pl-without-assessments", version=NEXT_PILOT_VERSION
     )
     for path in sorted((replacement / "assessments").glob("*.json")):
         path.unlink()
@@ -1603,7 +1612,7 @@ def test_withdrawing_every_assessment_form_supersedes_the_installed_bank(
             json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-    _republished(replacement, replacement, version="0.3.0")
+    _republished(replacement, replacement, version=NEXT_PILOT_VERSION)
 
     report = pack_service.install(
         installed_pilot.paths,
@@ -1665,7 +1674,7 @@ def test_a_task_a_learner_has_answered_may_not_be_refiled(
         polish_workspace.paths, run=run.run_id, clock=polish_workspace.clock
     )
     assert isinstance(served, assessment_service.NextTaskReport)
-    rekeyed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-rekeyed", version="0.2.0")
+    rekeyed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-rekeyed", version=NEXT_PILOT_VERSION)
 
     preview = pack_service.diff(polish_workspace.paths, rekeyed, clock=polish_workspace.clock)
     with pytest.raises(LinguaWikiError) as failure:
@@ -1723,7 +1732,7 @@ def test_reviving_an_archived_track_after_its_framework_was_replaced_is_refused(
         status="archived",
         clock=polish_workspace.clock,
     )
-    rekeyed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-rekeyed", version="0.2.0")
+    rekeyed = _reframed_and_rekeyed(PILOT_PACK, tmp_path / "pl-rekeyed", version=NEXT_PILOT_VERSION)
     pack_service.install(
         polish_workspace.paths, rekeyed, clock=polish_workspace.clock, allow_update=True
     )

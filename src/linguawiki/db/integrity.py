@@ -10,8 +10,11 @@ from linguawiki.contracts import (
     SNAPSHOT_PARTIAL,
     LockManifest,
     parse_answer_key,
+    parse_asset_identity,
+    parse_task_presentation,
     reads_as_json_object,
     served_snapshot_state,
+    snapshot_lost_its_presentation,
 )
 from linguawiki.db import migrations as migration_module
 from linguawiki.db.backup import table_row_counts
@@ -25,6 +28,7 @@ from linguawiki.errors import LinguaWikiError
 from linguawiki.ids import IdPrefix, validate_id
 from linguawiki.models import ContractModel
 from linguawiki.placement import MACHINE_SCORABLE_TASK_TYPES
+from linguawiki.presentation import choices_answering_key
 from linguawiki.versions import core_pin, skill_bundle_pin
 
 ORPHAN_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
@@ -729,6 +733,179 @@ def _reads_as_answer_key(raw: str) -> bool:
     except LinguaWikiError:
         return False
     return True
+
+
+def _reads_as_presentation(raw: str) -> bool:
+    """Asks `parse_task_presentation`, so the check and the reader cannot disagree."""
+
+    try:
+        parse_task_presentation(raw)
+    except LinguaWikiError:
+        return False
+    return True
+
+
+def _presentation_checks(database: Database) -> list[CheckResult]:
+    """Migration 0031's two groups: the bank's record, and the record of what was served.
+
+    None of it can be a constraint. DuckDB refuses `ALTER TABLE ... ADD COLUMN` with one,
+    so neither `presentation_json` carries `json_valid` and neither carries a vocabulary
+    check on the kind. Each rule parses defensively: a diagnostic that aborts on damaged
+    input tells an operator less than one that names the rows that will not parse.
+
+    This is a third independent snapshot group, beside 0016's and 0030's. A row may
+    legitimately be whole in one and absent in another, so widening either of those
+    checks would make it lie about the others.
+    """
+
+    checks: list[CheckResult] = []
+    # The bank. `task_type` and `modality` sit on the same row, so the check asks what
+    # the row itself says it needs rather than the stronger question of every row.
+    bank: list[str] = []
+    for content_id, task_type, modality, raw, expected_json in database.query(
+        "SELECT content_id, task_type, modality, presentation_json, expected_json "
+        "FROM assessment_tasks WHERE presentation_json IS NOT NULL ORDER BY content_id"
+    ):
+        try:
+            shown = parse_task_presentation(str(raw))
+        except LinguaWikiError as failure:
+            bank.append(f"{content_id}: {failure.payload.details[0].reason}")
+            continue
+        if shown is None:
+            continue
+        if shown.choices and str(task_type) != "objective":
+            bank.append(f"{content_id}: a {task_type} task carries choices")
+        if shown.audio is not None and str(modality) != "audio":
+            bank.append(f"{content_id}: a {modality} task carries a recording")
+        if not shown.choices:
+            continue
+        # The consequence, not the derivation. A bank that was hand-repaired, partially
+        # restored, or written by a future installer bug can hold buttons none of which
+        # the key accepts -- and then every learner who presses one scores 0.0 with
+        # nothing anywhere saying why. Checking only that the record *parses* passes
+        # exactly the state the model's other half forbids.
+        try:
+            key = parse_answer_key(str(expected_json))
+        except LinguaWikiError:
+            bank.append(f"{content_id}: a task with choices has no usable answer key")
+            continue
+        answering = choices_answering_key([choice.value for choice in shown.choices], key.answers)
+        if len(answering) != 1:
+            bank.append(
+                f"{content_id}: {len(answering)} of its choices are answers the key accepts"
+            )
+    if bank:
+        checks.append(
+            _failed(
+                "bank_presentation_wellformed",
+                "an installed task says it is shown in a way its own type or modality "
+                "cannot be, so a client would render a question nobody can answer",
+                tasks="; ".join(bank),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "bank_presentation_wellformed",
+                "every installed presentation agrees with the task it belongs to",
+            )
+        )
+    # The served snapshot. Completeness and readability are separate questions asked over
+    # the same rows: a record that will not parse cannot be judged complete, and a
+    # complete pair of columns can still hold a record nobody can render.
+    partial: list[str] = []
+    malformed: list[str] = []
+    # Every served row, not only the ones with something in them. A snapshot cleared to
+    # NULL beside an unchanged bank row that *has* a presentation is damage the reader
+    # refuses, and filtering it out is how an operator was told the workspace was clean
+    # and then refused. The bank row comes along on the same query, because that
+    # comparison is the whole rule.
+    for (
+        run_id,
+        content_id,
+        raw_shown,
+        raw_identity,
+        served_hash,
+        bank_shown,
+        bank_hash,
+    ) in database.query(
+        "SELECT served.run_id, served.content_id, served.presentation_json, "
+        "served.asset_identity_json, served.content_hash, task.presentation_json, "
+        "record.content_hash FROM assessment_run_tasks served "
+        "LEFT JOIN assessment_tasks task ON task.content_id = served.content_id "
+        "LEFT JOIN content_records record ON record.content_id = served.content_id "
+        "ORDER BY served.run_id, served.content_id"
+    ):
+        where = f"{run_id}/{content_id}"
+        # Through the same two parsers the reader uses. `db check` and the read path
+        # asking this question two different ways is how an operator is told a workspace
+        # is clean and then refused -- told the opposite of the truth, in this file's own
+        # words -- and "present" is *parses to something*, not "the column is not NULL":
+        # an empty string is absent to one and present to the other.
+        shown = None
+        readable_shown = True
+        if raw_shown is not None:
+            try:
+                shown = parse_task_presentation(str(raw_shown))
+            except LinguaWikiError:
+                readable_shown = False
+                malformed.append(f"{where}: the presentation cannot be read")
+        identity = None
+        readable_identity = True
+        if raw_identity is not None:
+            try:
+                # A key with no digest is refused here by the same rule the reader
+                # applies: it answers "which recording was meant" and not "is this the
+                # recording they heard", which is the only question the snapshot settles.
+                identity = parse_asset_identity(str(raw_identity))
+            except LinguaWikiError:
+                readable_identity = False
+                malformed.append(f"{where}: the asset identity cannot be read")
+        if readable_shown and readable_identity:
+            if identity is not None and shown is None:
+                partial.append(f"{where}: a recording with nothing saying how it was shown")
+            if shown is not None and shown.audio is not None and identity is None:
+                partial.append(f"{where}: an audio task with nothing saying which bytes")
+            if shown is None and snapshot_lost_its_presentation(
+                served_hash=served_hash, bank_hash=bank_hash, bank_presentation=bank_shown
+            ):
+                partial.append(
+                    f"{where}: no presentation, beside an unchanged bank row that has one"
+                )
+    if partial:
+        checks.append(
+            _failed(
+                "served_presentation_complete",
+                "a run holds half of what it showed -- a recording with no presentation, "
+                "or an audio presentation with no recording -- which can establish "
+                "neither what the learner faced nor that the record predates the column",
+                served="; ".join(partial),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "served_presentation_complete",
+                "every served presentation and asset identity is whole or wholly absent",
+            )
+        )
+    if malformed:
+        checks.append(
+            _failed(
+                "served_presentation_wellformed",
+                "a served record of what the learner was shown cannot be read, so what "
+                "they were actually asked can no longer be established from the run",
+                served="; ".join(malformed),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "served_presentation_wellformed",
+                "every served presentation parses and every asset identity names bytes",
+            )
+        )
+    return checks
 
 
 def _served_answer_key_checks(database: Database) -> list[CheckResult]:
@@ -2531,6 +2708,18 @@ def check_database(
             for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
         ):
             checks.extend(_served_answer_key_checks(database))
+        if (
+            available["served_answer_key"]
+            and "assessment_tasks" in expected
+            and any(
+                name == "presentation_json"
+                for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
+            )
+        ):
+            # `assessment_tasks` is in the gate because the bank half of this check reads
+            # it, and a diagnostic that raises a `CatalogException` on a workspace missing
+            # a table is the one thing `db check` must never do.
+            checks.extend(_presentation_checks(database))
         if available["mastery"] and any(
             name == "evidence_ceiling"
             for name, _ in expected_schema(applied).get("track_item_state", ())
