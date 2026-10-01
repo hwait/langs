@@ -271,6 +271,37 @@ def test_db_check_finds_a_count_that_disagrees_with_its_rows(recorded: PolishWor
     assert task.content_id in "".join(check.context.values())  # type: ignore[attr-defined]
 
 
+def test_plays_recorded_by_the_page_reach_a_result_recorded_elsewhere(
+    recorded: PolishWorkspace,
+) -> None:
+    """The page plays, the learner pauses, and the CLI or a skill records the answer.
+
+    The plays happened and are recorded, so the count is a fact whoever records the result.
+    Leaving it NULL beside play rows was a state `db check` rightly calls damage, reached
+    with nothing but public calls.
+    """
+
+    run = _listening_run(recorded)
+    task = _serve(recorded, run.run_id)
+    _play(recorded, run.run_id, task.content_id, "play-1")
+
+    assessment_service.record(
+        recorded.paths,
+        run=run.run_id,
+        content_id=task.content_id,
+        score=1.0,
+        assessor_kind="human",
+        clock=recorded.clock,
+    )
+
+    with open_reader(recorded.paths) as database:
+        count = database.scalar(
+            "SELECT play_count FROM assessment_results WHERE run_id = ?", [run.run_id]
+        )
+    assert count == 1
+    assert _checks(recorded)["result_play_counts_agree"].status == "ok"  # type: ignore[attr-defined]
+
+
 def test_db_check_finds_a_null_count_beside_play_rows(recorded: PolishWorkspace) -> None:
     """A NULL on one side of a comparison is a mismatch, not a row to skip."""
 
@@ -284,7 +315,10 @@ def test_db_check_finds_a_null_count_beside_play_rows(recorded: PolishWorkspace)
         score=1.0,
         assessor_kind="human",
         clock=recorded.clock,
+        actor="client",
     )
+    with open_writer(recorded.paths, command="test.damage") as database:
+        database.execute("UPDATE assessment_results SET play_count = NULL")
 
     assert _checks(recorded)["result_play_counts_agree"].status == "failed"  # type: ignore[attr-defined]
 

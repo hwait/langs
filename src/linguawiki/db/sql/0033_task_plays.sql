@@ -28,9 +28,10 @@ CREATE UNIQUE INDEX assessment_task_plays_key ON assessment_task_plays (idempote
 -- The count `record` derived when it scored the task, from the rows above.
 --
 -- NULL is truthful in two cases and is not damage in either: a result recorded before
--- this migration, and a result recorded through a surface that does not track plays (the
--- CLI, a skill). A count of zero is a different fact -- the learner answered without
--- listening -- and only a surface that records plays can establish it.
+-- this migration, and a result with no play rows recorded through a surface that does not
+-- track plays (the CLI, a skill). A count of zero is a different fact -- the learner
+-- answered without listening -- and only a surface that records plays can establish it.
+-- Plays that *were* recorded are counted whoever records the result.
 --
 -- Unconstrained, like every column added since 0016: DuckDB refuses
 -- `ALTER TABLE ... ADD COLUMN` with a constraint. `result_play_counts_agree` asserts that

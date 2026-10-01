@@ -468,9 +468,9 @@ FINALIZED_EVENT = "assessment.finalized"
 DEFAULT_ACTOR = "cli"
 
 #: The surfaces that record every play of a recording before it is heard. Only they can
-#: establish a play count -- including zero, which is the claim that the learner answered
-#: without listening -- so `record` stores a count for their results and `NULL` for every
-#: other surface's, which is the truth about a CLI or skill that never saw the plays.
+#: claim *zero* -- that the learner answered without listening -- so a result with no play
+#: rows gets a count from them and `NULL` from any other surface, which is the truth about
+#: a CLI or skill that never saw the plays. Recorded plays count whoever records the result.
 PLAY_TRACKING_ACTORS: frozenset[str] = frozenset({"client"})
 
 
@@ -1692,9 +1692,14 @@ def record(
         # Derived from the play rows, never accepted: a caller-supplied count would be one
         # more place a caller could talk its way into a different claim. Only for a task
         # that played a recording, and only from a surface that records plays.
+        #
+        # Recorded plays are a fact whoever records the result: a page plays, the learner
+        # pauses, and the CLI scores the answer. Only "no plays" depends on the surface --
+        # zero from one that records plays, unknown (`NULL`) from one that cannot know.
+        plays = _plays_used(database, run_id, content_id) if served[13] is not None else 0
         play_count = (
-            _plays_used(database, run_id, content_id)
-            if served[13] is not None and actor in PLAY_TRACKING_ACTORS
+            plays
+            if served[13] is not None and (plays or actor in PLAY_TRACKING_ACTORS)
             else None
         )
         with database.transaction() as transaction:
