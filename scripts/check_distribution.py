@@ -25,6 +25,12 @@ WHEEL_RESOURCES = {
     "linguawiki/resources/language-packs/pl-pilot/manifest.json",
     "linguawiki/resources/language-packs/pl-pilot/seed/knowledge.jsonl",
     "linguawiki/resources/language-packs/fixtures/inflected/manifest.json",
+    # The browser client ships with everything else rather than behind an extra: with a
+    # stdlib-only server an extra would carry no dependencies, which makes it a boundary
+    # nothing enforces. A wheel that shipped the CLI and not the server would otherwise pass
+    # this gate, and `client serve` would fail only once a learner ran it.
+    "linguawiki/client/server.py",
+    "linguawiki/client/security.py",
 }
 
 

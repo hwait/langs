@@ -75,6 +75,7 @@ def _verify(scratch: str) -> int:
     run([python, "-m", "ruff", "check", "."])
     run([python, "-m", "mypy", "src"])
     run([python, "scripts/generate_schemas.py", "--check"])
+    run([python, "scripts/generate_openapi.py", "--check"])
     validate_skills = [python, "scripts/validate_skills.py"]
     if args.external_skill_validator is not None:
         validate_skills.extend(["--external-validator", str(args.external_skill_validator)])

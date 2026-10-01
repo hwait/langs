@@ -1,0 +1,30 @@
+-- The help the learner was allowed, as served.
+--
+-- `permitted_help` has lived only on `assessment_tasks` -- the bank -- which is mutable,
+-- while a run is not. That was invisible while a task was served exactly once and
+-- reported in the same call. It stops being invisible as soon as a task can be handed
+-- back: a client that asks for its outstanding task again would read the allowance from
+-- whatever the pack says now, so a pack edited between the two serves would change what
+-- help is offered for a task the learner is already credited with facing. Migration 0016
+-- snapshotted what a task *demanded*, 0030 what a scorer needs, 0031 how it was shown;
+-- this is the last thing a client reads that none of them kept.
+--
+-- It is NOT a fourth member of 0030's or 0031's groups, and must not be folded into
+-- either check. A single column has no partial state, so "whole or wholly absent" is not
+-- a question it can be asked: NULL means the row was served before this migration, which
+-- is truthful, and there is nothing a second column could contradict.
+--
+-- There is no backfill, deliberately. The bank's current value is not what an older serve
+-- used -- that is the whole reason this column exists -- so copying it in would be a
+-- claim about a sitting nobody recorded, and `IS NOT NULL` in the check below would then
+-- skip exactly the rows the write path refuses hardest.
+ALTER TABLE assessment_run_tasks ADD COLUMN permitted_help VARCHAR;
+
+-- Unconstrained, like every column added since 0016: DuckDB refuses
+-- `ALTER TABLE ... ADD COLUMN` with a constraint ("Adding columns with constraints not
+-- yet supported") and `assessment_run_tasks` cannot be recreated, because it is widely
+-- referenced. So the `length(permitted_help) > 0` that guards the bank's own column
+-- cannot be repeated here. The serve path writes it from the same row it reports,
+-- `served_help_allowance_wellformed` asserts it over the data, and every reader treats
+-- absence as absence rather than as `none` -- the default would be a claim that help was
+-- refused, which is a different fact from not knowing.

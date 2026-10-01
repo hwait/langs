@@ -1,0 +1,917 @@
+"""The loopback server: a transport, and the refusals that keep it from being a hole.
+
+Loopback is not a security boundary. DNS rebinding is a documented attack against local
+servers that trust the `Host` header, so every rule here -- the host allowlist, the origin
+check on mutations, the per-start launch token -- runs before the service layer is reached.
+
+The other half is honesty about the database. DuckDB serves one connection per file, and a
+second connection in this process beside a held writer is refused outright, which is why the
+server is single-threaded and why `database_busy` and `writer_locked` are retried and then
+surfaced rather than hidden behind a spinner.
+"""
+
+from __future__ import annotations
+
+import http.client
+import json
+import socket
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from linguawiki.client import runtime as runtime_module
+from linguawiki.client import server as server_module
+from linguawiki.contract_validation import validate_json_contract
+from linguawiki.db.connection import open_writer
+from linguawiki.errors import LinguaWikiError
+from linguawiki.services import assessment as assessment_service
+from tests.conftest import PolishWorkspace
+
+
+@dataclass(frozen=True, slots=True)
+class Response:
+    status: int
+    headers: dict[str, str]
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RunningServer:
+    """A test client that controls every header, including the ones urllib owns.
+
+    `http.client` rather than `urllib.request` deliberately: setting `Request.host` retargets
+    the *connection* rather than overriding the header, so a forged-Host test written with
+    urllib goes off to resolve the forged name instead of reaching this server.
+    """
+
+    client: server_module.ClientServer
+
+    @property
+    def origin(self) -> str:
+        return f"http://127.0.0.1:{self.client.port}"
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        token: str | None = "",
+        host: str | None = "",
+        origin: str | None = "",
+        raw: bytes | None = None,
+        repeat: tuple[str, str] | None = None,
+    ) -> Response:
+        data = raw if raw is not None else (None if body is None else json.dumps(body).encode())
+        headers: list[tuple[str, str]] = [("Content-Type", "application/json")]
+        headers.append(("Host", f"127.0.0.1:{self.client.port}" if host == "" else str(host)))
+        if host is None:
+            headers = [entry for entry in headers if entry[0] != "Host"]
+        if token is not None:
+            headers.append(
+                (server_module.TOKEN_HEADER, self.client.token if token == "" else token)
+            )
+        if origin is not None:
+            headers.append(("Origin", self.origin if origin == "" else origin))
+        if repeat is not None:
+            headers.append(repeat)
+        connection = http.client.HTTPConnection("127.0.0.1", self.client.port, timeout=10)
+        try:
+            # `skip_host` keeps `http.client` from adding its own Host beside the one under
+            # test, which would make every forged-Host case a repeated-header case instead.
+            connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for name, value in headers:
+                connection.putheader(name, value)
+            connection.putheader("Content-Length", str(len(data or b"")))
+            connection.endheaders()
+            if data:
+                connection.send(data)
+            answer = connection.getresponse()
+            return Response(
+                status=answer.status,
+                headers=dict(answer.getheaders()),
+                payload=json.loads(answer.read() or b"{}"),
+            )
+        finally:
+            connection.close()
+
+
+@pytest.fixture
+def running(polish_workspace: PolishWorkspace) -> Iterator[RunningServer]:
+    client = server_module.build_server(polish_workspace.paths, clock=polish_workspace.clock)
+    thread = threading.Thread(target=client.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield RunningServer(client)
+    finally:
+        client.close()
+        thread.join(timeout=5)
+
+
+def _outward_address() -> str | None:
+    """This machine's own non-loopback address, or `None` when it has none.
+
+    Found by asking the routing table which source address would be used to reach a public
+    address -- no packet is sent. `gethostbyname(gethostname())` is not a substitute: on
+    macOS it frequently answers 127.0.0.1, which would make the test below assert nothing.
+    """
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))
+        address = str(probe.getsockname()[0])
+    except OSError:
+        return None
+    finally:
+        probe.close()
+    return None if address.startswith("127.") else address
+
+
+def test_the_server_binds_loopback_and_nothing_else(running: RunningServer) -> None:
+    """A privacy property, asserted on the socket rather than on the intention."""
+
+    assert running.client.server.server_address[0] == "127.0.0.1"
+    outward = _outward_address()
+    if outward is None:
+        pytest.skip("this host has no non-loopback address to attempt the connection from")
+    attempt = socket.socket()
+    attempt.settimeout(0.5)
+    try:
+        with pytest.raises(OSError):
+            attempt.connect((outward, running.client.port))
+    finally:
+        attempt.close()
+
+
+def test_health_answers_without_touching_the_database(running: RunningServer) -> None:
+    answer = running.request("GET", "/health")
+
+    assert answer.status == 200
+    assert answer.payload["ok"] is True
+    assert answer.payload["data"]["application"] == "linguawiki"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "code"),
+    [
+        ({"token": None}, "client_token_required"),
+        ({"token": "   "}, "client_token_required"),
+        ({"token": "not-the-token"}, "client_token_invalid"),
+        ({"host": "linguawiki.example.com"}, "client_host_denied"),
+        ({"host": None}, "client_host_denied"),
+    ],
+)
+def test_every_transport_refusal_keeps_its_own_code(
+    running: RunningServer, kwargs: dict[str, Any], code: str
+) -> None:
+    """Collapsing these would take away a page's ability to tell them apart.
+
+    "Reload with the token" and "you are not talking to the server you think you are" send
+    somebody to very different places.
+    """
+
+    answer = running.request("GET", "/health", **kwargs)
+
+    assert answer.status == 403
+    assert answer.payload["ok"] is False
+    assert answer.payload["error"]["code"] == code
+
+
+def test_a_mutation_without_an_origin_is_refused(running: RunningServer) -> None:
+    """Absent is the case the data is least trustworthy, not a pass.
+
+    A cross-site form post sends no `Origin` in some browsers, so treating absence as
+    permission is the whole attack.
+    """
+
+    answer = running.request("POST", "/runs", body={}, origin=None)
+
+    assert answer.status == 403
+    assert answer.payload["error"]["code"] == "client_origin_denied"
+
+
+def test_a_mutation_from_a_foreign_origin_is_refused(running: RunningServer) -> None:
+    answer = running.request("POST", "/runs", body={}, origin="https://evil.example.com")
+
+    assert answer.status == 403
+    assert answer.payload["error"]["code"] == "client_origin_denied"
+
+
+def test_a_read_does_not_require_an_origin(running: RunningServer) -> None:
+    """The token already proves the caller was handed the URL; a read changes nothing."""
+
+    answer = running.request("GET", "/health", origin=None)
+
+    assert answer.status == 200
+
+
+def test_a_token_from_a_previous_server_start_is_refused(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    other = server_module.build_server(polish_workspace.paths, clock=polish_workspace.clock)
+    try:
+        stale = other.token
+    finally:
+        other.close()
+
+    answer = running.request("GET", "/health", token=stale)
+
+    assert answer.payload["error"]["code"] == "client_token_invalid"
+
+
+def test_an_unknown_path_is_a_named_refusal_rather_than_a_stack_trace(
+    running: RunningServer,
+) -> None:
+    answer = running.request("GET", "/nope")
+
+    assert answer.status == 404
+    assert answer.payload["error"]["code"] == "client_route_not_found"
+
+
+def test_a_body_over_the_cap_is_refused_and_the_server_keeps_serving(
+    running: RunningServer,
+) -> None:
+    """An unbounded read on a single-threaded server is a one-request outage."""
+
+    oversized = json.dumps({"padding": "x" * (server_module.MAXIMUM_BODY_BYTES + 1)}).encode()
+
+    answer = running.request("POST", "/runs", raw=oversized)
+
+    assert answer.status == 413
+    assert answer.payload["error"]["code"] == "client_body_too_large"
+    assert running.request("GET", "/health").status == 200
+
+
+def test_a_body_that_is_not_an_object_is_refused_by_name(running: RunningServer) -> None:
+    answer = running.request("POST", "/runs", raw=b"[1, 2, 3]")
+
+    assert answer.status == 400
+    assert answer.payload["error"]["code"] == "invalid_contract"
+
+
+def test_a_busy_database_is_surfaced_as_retryable_rather_than_hidden(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """There is no "reads never fail". Another process holding the file is normal."""
+
+    with open_writer(polish_workspace.paths, command="test.hold", clock=polish_workspace.clock):
+        answer = running.request("GET", "/runs/asm_01ARZ3NDEKTSV4RRFFQ69G5FAV/screen")
+
+    assert answer.status == 503
+    assert answer.payload["error"]["retryable"] is True
+    assert answer.headers["Retry-After"] == "1"
+    assert answer.payload["error"]["code"] in {"database_busy", "writer_locked"}
+
+
+def test_the_server_holds_no_connection_between_requests(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    assert running.request("GET", "/health").status == 200
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+
+    assert running.request("GET", f"/runs/{run.run_id}").status == 200
+
+
+def test_the_runtime_file_records_the_port_and_never_the_token(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    recorded = json.loads(
+        runtime_module.runtime_path(polish_workspace.paths).read_text(encoding="utf-8")
+    )
+
+    assert recorded["port"] == running.client.port
+    assert running.client.token not in json.dumps(recorded)
+    assert "token" not in recorded
+
+
+def test_closing_the_server_removes_the_runtime_file(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    client = server_module.build_server(polish_workspace.paths, clock=polish_workspace.clock)
+    path = runtime_module.runtime_path(polish_workspace.paths)
+    assert path.exists()
+
+    client.close()
+
+    assert not path.exists()
+
+
+def test_the_launch_url_carries_the_token_in_the_fragment(running: RunningServer) -> None:
+    """Never the query string: a fragment reaches no access log, no `Referer`, no proxy."""
+
+    url = running.client.launch_url
+
+    assert url.startswith(f"http://127.0.0.1:{running.client.port}/#")
+    assert f"token={running.client.token}" in url.split("#", 1)[1]
+    assert "?" not in url
+
+
+# --- the calibration loop, and the equivalence that keeps it honest ---------------------
+
+
+def _drive(running: RunningServer, run_id: str, *, score: float = 1.0) -> int:
+    """Answer every task the server serves, over HTTP, until the run has nothing open."""
+
+    for scored in range(200):
+        served = running.request("POST", f"/runs/{run_id}/tasks", body={})
+        assert served.status == 200, served.payload
+        data = served.payload["data"]
+        if "content_id" not in data:
+            return scored
+        answer = running.request(
+            "POST",
+            f"/runs/{run_id}/results",
+            body={"content_id": data["content_id"], "score": score},
+        )
+        assert answer.status == 200, answer.payload
+    raise AssertionError("the run never closed")
+
+
+def test_a_calibration_runs_end_to_end_over_http_with_no_model(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    opened = running.request("POST", "/runs", body={})
+    assert opened.status == 200, opened.payload
+    run_id = opened.payload["data"]["run_id"]
+
+    scored = _drive(running, run_id)
+
+    screen = running.request("GET", f"/runs/{run_id}/screen")
+    assert screen.status == 200
+    assert screen.payload["data"]["outstanding"] == []
+    closed = running.request("POST", f"/runs/{run_id}/finalization", body={})
+    assert closed.status == 200, closed.payload
+    assert closed.payload["data"]["status"] == "finalized"
+    assert closed.payload["data"]["tasks_recorded"] == scored
+
+
+def test_the_server_reaches_the_same_estimates_the_service_layer_would(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """The server is a transport. Driving a run through it must not change its arithmetic."""
+
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+    _drive(running, run_id, score=0.5)
+    running.request("POST", f"/runs/{run_id}/finalization", body={})
+
+    through_http = running.request("GET", f"/runs/{run_id}").payload["data"]
+    directly = assessment_service.report(polish_workspace.paths, run=run_id)
+
+    assert through_http["dimensions"] == [
+        dimension.model_dump(mode="json") for dimension in directly.dimensions
+    ]
+
+
+def test_pausing_and_resuming_go_through_the_same_lifecycle(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+
+    paused = running.request("POST", f"/runs/{run_id}/status", body={"status": "paused"})
+    assert paused.payload["data"]["status"] == "paused"
+    refused = running.request("POST", f"/runs/{run_id}/tasks", body={})
+    resumed = running.request("POST", f"/runs/{run_id}/status", body={"status": "in-progress"})
+
+    assert refused.status == 422
+    assert refused.payload["error"]["code"] == "assessment_run_paused"
+    assert resumed.payload["data"]["status"] == "in-progress"
+
+
+def test_the_server_records_the_surface_and_not_a_different_command(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    from linguawiki.db.connection import open_reader
+
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+    served = running.request("POST", f"/runs/{run_id}/tasks", body={})
+    running.request(
+        "POST",
+        f"/runs/{run_id}/results",
+        body={"content_id": served.payload["data"]["content_id"], "score": 1.0},
+    )
+
+    with open_reader(polish_workspace.paths) as database:
+        rows = [
+            (str(actor), str(command))
+            for actor, command in database.query(
+                "SELECT actor, command FROM audit_log "
+                "WHERE command IN ('assessment.next', 'assessment.record')"
+            )
+        ]
+
+    assert sorted(rows) == [("client", "assessment.next"), ("client", "assessment.record")]
+
+
+def test_a_retried_serve_over_http_does_not_consume_a_second_task(
+    running: RunningServer,
+) -> None:
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+    body = {"idempotency_key": "http-serve-1"}
+
+    first = running.request("POST", f"/runs/{run_id}/tasks", body=body)
+    again = running.request("POST", f"/runs/{run_id}/tasks", body=body)
+
+    assert again.payload["data"]["content_id"] == first.payload["data"]["content_id"]
+    assert again.payload["data"]["served_again"] is True
+
+
+def test_a_changed_payload_under_one_key_is_a_conflict(running: RunningServer) -> None:
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+    served = running.request("POST", f"/runs/{run_id}/tasks", body={})
+    content_id = served.payload["data"]["content_id"]
+    running.request(
+        "POST",
+        f"/runs/{run_id}/results",
+        body={"content_id": content_id, "score": 1.0, "idempotency_key": "http-score-1"},
+    )
+
+    conflicting = running.request(
+        "POST",
+        f"/runs/{run_id}/results",
+        body={"content_id": content_id, "score": 0.0, "idempotency_key": "http-score-1"},
+    )
+
+    assert conflicting.status == 409
+    assert conflicting.payload["error"]["code"] == "idempotency_conflict"
+
+
+def test_a_repeated_decisive_header_is_refused_rather_than_resolved(
+    running: RunningServer,
+) -> None:
+    """Two Host headers is one request two readers would resolve differently."""
+
+    answer = running.request("GET", "/health", repeat=("Host", "evil.example.com"))
+
+    assert answer.status == 403
+    assert answer.payload["error"]["code"] == "client_header_repeated"
+
+
+def test_a_path_that_answers_another_method_says_so(running: RunningServer) -> None:
+    """ "Wrong verb" and "no such thing" send a caller to different places."""
+
+    answer = running.request("GET", "/runs")
+
+    assert answer.status == 405
+    assert answer.payload["error"]["code"] == "client_method_not_allowed"
+    assert answer.headers["Allow"] == "POST"
+
+
+def test_an_unparseable_run_identifier_is_a_routing_miss(running: RunningServer) -> None:
+    """A path that is not an identifier anybody could have meant is not a service question."""
+
+    answer = running.request("GET", "/runs/not-a-run-id/screen")
+
+    assert answer.status == 404
+    assert answer.payload["error"]["code"] == "client_route_not_found"
+
+
+def test_a_body_field_of_the_wrong_type_is_refused_rather_than_guessed(
+    running: RunningServer,
+) -> None:
+    """`score: "high"` is not a number, and guessing what it meant is a mark nobody computed.
+
+    Refused as `invalid_contract` rather than `invalid_arguments`: the published schema is now
+    enforced and catches this first, which is the more precise of the two answers -- the body
+    does not match the document the caller was given. The per-field type checks in
+    `routes.Request` stay as the second line, for anything a schema does not constrain.
+    """
+
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+    served = running.request("POST", f"/runs/{run_id}/tasks", body={})
+
+    answer = running.request(
+        "POST",
+        f"/runs/{run_id}/results",
+        body={"content_id": served.payload["data"]["content_id"], "score": "high"},
+    )
+
+    assert answer.status == 400
+    assert answer.payload["error"]["code"] == "invalid_contract"
+    # The failing field by name, not merely that something failed.
+    assert [detail["field"] for detail in answer.payload["error"]["details"]] == ["score"]
+
+
+def test_every_refusal_the_transport_can_raise_is_classified_as_one(running: RunningServer) -> None:
+    """The status mapping is by class, so a new transport code must join its class.
+
+    `client_header_repeated` was added to the checks and not to the class, and came back as
+    422 -- "understood, and refused on its own terms" -- for a request that was refused
+    permission. Read out of the module rather than listed here, so the next code added to
+    `security.py` cannot be classified by nobody.
+    """
+
+    import re
+    from pathlib import Path as _Path
+
+    from linguawiki.client import responses, security
+
+    source = _Path(security.__file__).read_text(encoding="utf-8")
+    raised = set(re.findall(r'"(client_[a-z_]+)"', source))
+
+    assert raised, "no refusal codes were found in the security module"
+    assert raised <= responses.FORBIDDEN_CODES
+    for code in sorted(raised):
+        assert responses.status_for(LinguaWikiError(code, "x")) == 403, code
+
+
+# --- the equivalence ADR 0008 makes a standing obligation -------------------------------
+
+
+def _cli_code(workspace: PolishWorkspace, argv: list[str]) -> str:
+    """The error code the CLI reports for one refusal, from its own envelope."""
+
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "linguawiki",
+            *argv,
+            "--workspace",
+            str(workspace.root),
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, result.stdout
+    return str(json.loads(result.stderr)["error"]["code"])
+
+
+def test_the_server_refuses_exactly_what_the_cli_refuses(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """Asserted over the same cases, not asserted in principle.
+
+    The server is a second entry point and has to stay as honest as the first. Comparing the
+    *code* rather than the status is what makes this a test of the service layer being shared
+    rather than of two mappings agreeing.
+    """
+
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+    absent = "cnt_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    missing_run = "asm_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+    cases: list[tuple[str, list[str], tuple[str, str, dict[str, Any]]]] = [
+        (
+            "a task that was never served",
+            ["assessment", "record", "--run", run_id, "--content", absent, "--score", "1.0"],
+            ("POST", f"/runs/{run_id}/results", {"content_id": absent, "score": 1.0}),
+        ),
+        (
+            "a run that does not exist",
+            ["assessment", "screen", "--run", missing_run],
+            ("GET", f"/runs/{missing_run}/screen", {}),
+        ),
+        (
+            "an empty response, which is a skip rather than a wrong answer",
+            [
+                "assessment",
+                "record",
+                "--run",
+                run_id,
+                "--content",
+                absent,
+                "--response",
+                "   ",
+            ],
+            (
+                "POST",
+                f"/runs/{run_id}/results",
+                {"content_id": absent, "response": "   "},
+            ),
+        ),
+    ]
+
+    for description, argv, (method, path, body) in cases:
+        through_the_server = running.request(method, path, body=body or None)
+        assert through_the_server.payload["ok"] is False, description
+        assert through_the_server.payload["error"]["code"] == _cli_code(polish_workspace, argv), (
+            description
+        )
+
+
+def test_both_entry_points_build_the_error_payload_from_one_contract(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """One error schema, not two that happen to agree today."""
+
+    answer = running.request("GET", "/runs/asm_01ARZ3NDEKTSV4RRFFQ69G5FAV/screen")
+
+    validate_json_contract(
+        "linguawiki.cli.error.v1",
+        answer.payload,
+        schema_directory=Path(__file__).resolve().parents[2] / "schemas",
+    )
+
+
+def test_repeating_a_status_transition_is_accepted_without_a_key(
+    running: RunningServer,
+) -> None:
+    """Why that route takes no idempotency key: it is idempotent by state.
+
+    `RUN_TRANSITIONS` permits `paused -> paused`, so a retry reaches the state it asked for
+    rather than doing something a second time. Every other mutation accumulates.
+    """
+
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+
+    first = running.request("POST", f"/runs/{run_id}/status", body={"status": "paused"})
+    again = running.request("POST", f"/runs/{run_id}/status", body={"status": "paused"})
+
+    assert first.status == 200
+    assert again.status == 200
+    assert again.payload["data"]["status"] == "paused"
+
+
+def test_health_does_not_report_a_busy_database_because_it_never_asks(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """The route that tells "up" from "busy" has to answer while the database is held."""
+
+    with open_writer(polish_workspace.paths, command="test.hold", clock=polish_workspace.clock):
+        answer = running.request("GET", "/health")
+
+    assert answer.status == 200
+
+
+def test_a_chunked_body_is_refused_rather_than_silently_read_as_empty(
+    running: RunningServer,
+) -> None:
+    """`Content-Length` is how the body is bounded, so a body without one is not read.
+
+    Dropping it silently turned a correct chunked request into "content_id is required",
+    which sends a client looking at the wrong field entirely.
+    """
+
+    connection = http.client.HTTPConnection("127.0.0.1", running.client.port, timeout=10)
+    try:
+        connection.putrequest("POST", "/runs", skip_host=True, skip_accept_encoding=True)
+        connection.putheader("Host", f"127.0.0.1:{running.client.port}")
+        connection.putheader(server_module.TOKEN_HEADER, running.client.token)
+        connection.putheader("Origin", running.origin)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Transfer-Encoding", "chunked")
+        connection.endheaders()
+        connection.send(b"2\r\n{}\r\n0\r\n\r\n")
+        answer = connection.getresponse()
+        payload = json.loads(answer.read() or b"{}")
+    finally:
+        connection.close()
+
+    assert answer.status == 400
+    assert payload["error"]["code"] == "invalid_contract"
+    assert "length" in payload["error"]["message"].lower()
+
+
+# --- findings from independent review ---------------------------------------------------
+
+
+def test_an_idle_connection_does_not_monopolize_the_server(running: RunningServer) -> None:
+    """A single-threaded server plus keep-alive is one client holding the whole surface.
+
+    The first connection stays open waiting for a second request that never comes, and every
+    other connection waits behind it. Serializing requests was the decision; serializing
+    *clients* was not.
+    """
+
+    first = http.client.HTTPConnection("127.0.0.1", running.client.port, timeout=5)
+    second = http.client.HTTPConnection("127.0.0.1", running.client.port, timeout=5)
+    try:
+        headers = {server_module.TOKEN_HEADER: running.client.token}
+        first.request("GET", "/health", headers=headers)
+        answered = first.getresponse()
+        assert answered.status == 200
+        answered.read()
+
+        second.request("GET", "/health", headers=headers)
+
+        assert second.getresponse().status == 200
+    finally:
+        first.close()
+        second.close()
+
+
+def test_headers_are_matched_without_regard_to_capitalization(
+    running: RunningServer,
+) -> None:
+    """HTTP header names are case-insensitive, and a client is entitled to lowercase them."""
+
+    connection = http.client.HTTPConnection("127.0.0.1", running.client.port, timeout=10)
+    try:
+        connection.putrequest("GET", "/health", skip_host=True, skip_accept_encoding=True)
+        connection.putheader("host", f"127.0.0.1:{running.client.port}")
+        connection.putheader(server_module.TOKEN_HEADER.lower(), running.client.token)
+        connection.endheaders()
+        answer = connection.getresponse()
+        payload = json.loads(answer.read() or b"{}")
+    finally:
+        connection.close()
+
+    assert answer.status == 200, payload
+
+
+def test_a_mutation_never_advertises_a_retry_that_would_repeat_it(
+    polish_workspace: PolishWorkspace, running: RunningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyless mutation that committed must not come back as retryable at all.
+
+    The first fix retried the trailing read and surfaced 503 when that budget ran out -- which
+    is advice that creates a second run if followed, and the `Retry-After` header made it
+    advice rather than a mere status. The report is now built through the connection the
+    command already holds, so there is no post-commit read to fail and nothing to advertise.
+    `report` is broken here to prove the mutation no longer depends on it.
+    """
+
+    def always_busy(*args: Any, **kwargs: Any) -> Any:
+        raise LinguaWikiError("database_busy", "held", retryable=True)
+
+    monkeypatch.setattr(assessment_service, "report", always_busy)
+
+    answer = running.request("POST", "/runs", body={})
+
+    from linguawiki.db.connection import open_reader
+
+    with open_reader(polish_workspace.paths) as database:
+        runs = int(database.scalar("SELECT count(*) FROM assessment_runs"))
+    assert answer.status == 200, answer.payload
+    assert runs == 1
+    assert "Retry-After" not in answer.headers
+
+
+def test_a_retryable_failure_after_a_mutation_committed_does_not_repeat_it(
+    polish_workspace: PolishWorkspace, running: RunningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transport retried the whole handler, including mutations that had already landed.
+
+    `start` commits, releases its writer, and *then* opens a reader for its report. A
+    `database_busy` on that read is retryable and comes from a call that already wrote, so
+    retrying it opened a second run and answered 200 -- the learner's workspace gained a run
+    nobody asked for.
+    """
+
+    original = assessment_service.report
+    calls = {"count": 0}
+
+    def busy_once(*args: Any, **kwargs: Any) -> Any:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise LinguaWikiError("database_busy", "held", retryable=True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(assessment_service, "report", busy_once)
+
+    answer = running.request("POST", "/runs", body={})
+
+    from linguawiki.db.connection import open_reader
+
+    with open_reader(polish_workspace.paths) as database:
+        runs = int(database.scalar("SELECT count(*) FROM assessment_runs"))
+    assert runs == 1, "a committed mutation was repeated by the retry"
+    # And it succeeds, because the report no longer comes from a second connection at all.
+    assert answer.status == 200, answer.payload
+    assert answer.payload["data"]["run_id"]
+
+
+def test_a_keyed_mutation_is_still_retried_because_a_second_attempt_replays(
+    polish_workspace: PolishWorkspace, running: RunningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is exactly what makes a second attempt safe, so a keyed call keeps its retry."""
+
+    original = assessment_service.report
+    calls = {"count": 0}
+
+    def busy_once(*args: Any, **kwargs: Any) -> Any:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise LinguaWikiError("database_busy", "held", retryable=True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(assessment_service, "report", busy_once)
+
+    answer = running.request("POST", "/runs", body={"idempotency_key": "keyed-start"})
+
+    from linguawiki.db.connection import open_reader
+
+    with open_reader(polish_workspace.paths) as database:
+        runs = int(database.scalar("SELECT count(*) FROM assessment_runs"))
+    assert answer.status == 200, answer.payload
+    assert runs == 1
+
+
+def test_a_body_field_the_published_schema_forbids_is_refused(running: RunningServer) -> None:
+    """The document declared `additionalProperties: false` and nothing enforced it.
+
+    A mistyped `idempotency_keey` created a run with no key at all, so the caller believed
+    its retries were safe and every one of them opened another run.
+    """
+
+    answer = running.request("POST", "/runs", body={"idempotency_keey": "typo"})
+
+    assert answer.status == 400
+    assert answer.payload["error"]["code"] == "invalid_contract"
+    assert "idempotency_keey" in json.dumps(answer.payload["error"])
+
+
+def test_a_body_value_the_published_schema_forbids_is_refused(running: RunningServer) -> None:
+    answer = running.request("POST", "/runs", body={"run_type": "not-a-run-type"})
+
+    assert answer.status == 400
+    assert answer.payload["error"]["code"] == "invalid_contract"
+
+
+def test_every_http_mutation_is_audited_as_the_client(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """§3's rule is about every mutation, not the two that had no audit row at all."""
+
+    from linguawiki.db.connection import open_reader
+
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+    assert (
+        running.request("POST", f"/runs/{run_id}/status", body={"status": "paused"}).status == 200
+    )
+    assert running.request("POST", f"/runs/{run_id}/finalization", body={}).status == 200
+
+    with open_reader(polish_workspace.paths) as database:
+        rows = sorted(
+            (str(command), str(actor))
+            for command, actor in database.query(
+                "SELECT command, actor FROM audit_log WHERE command LIKE 'assessment.%'"
+            )
+        )
+
+    assert rows == [
+        ("assessment.finalize", "client"),
+        ("assessment.start", "client"),
+        ("assessment.status", "client"),
+    ]
+
+
+def test_starting_a_run_honours_the_key_it_advertises(running: RunningServer) -> None:
+    """The route published a conflict response and delegated to a key-only lookup."""
+
+    first = running.request(
+        "POST", "/runs", body={"idempotency_key": "start-1", "modalities": ["text"]}
+    )
+    assert first.status == 200, first.payload
+
+    changed = running.request(
+        "POST", "/runs", body={"idempotency_key": "start-1", "modalities": ["audio"]}
+    )
+
+    assert changed.status == 409
+    assert changed.payload["error"]["code"] == "idempotency_conflict"
+
+
+def test_retrying_a_start_with_the_same_request_replays_it(running: RunningServer) -> None:
+    body = {"idempotency_key": "start-2", "modalities": ["text"]}
+
+    first = running.request("POST", "/runs", body=body)
+    again = running.request("POST", "/runs", body=body)
+
+    assert again.status == 200, again.payload
+    assert again.payload["data"]["run_id"] == first.payload["data"]["run_id"]
+
+
+def test_finalizing_checks_the_key_before_returning_a_stored_result(
+    running: RunningServer,
+) -> None:
+    """A guard placed after the path it guards is not a guard -- including this one."""
+
+    run_id = running.request("POST", "/runs", body={}).payload["data"]["run_id"]
+    assert (
+        running.request(
+            "POST",
+            f"/runs/{run_id}/finalization",
+            body={"idempotency_key": "close-1", "reason": "one"},
+        ).status
+        == 200
+    )
+
+    reused = running.request(
+        "POST",
+        f"/runs/{run_id}/finalization",
+        body={"idempotency_key": "close-1", "reason": "two"},
+    )
+
+    assert reused.status == 409
+    assert reused.payload["error"]["code"] == "idempotency_conflict"

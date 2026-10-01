@@ -908,6 +908,50 @@ def _presentation_checks(database: Database) -> list[CheckResult]:
     return checks
 
 
+def _served_help_allowance_checks(database: Database) -> list[CheckResult]:
+    """Migration 0032's column, which no constraint can guard.
+
+    `assessment_tasks.permitted_help` carries `length(permitted_help) > 0`; the served copy
+    cannot, because DuckDB refuses a constraint on an added column. So the rule lives here,
+    and it is deliberately *one* rule: a single column has no partial state, which is why
+    this is not folded into 0030's or 0031's "whole or wholly absent" groups.
+
+    NULL is not damage. It is what every row served before 0032 holds, and reading it as
+    blank would report history as a fault -- while reading it as `"none"` would be worse
+    still, because "help was refused" and "nobody recorded what help was allowed" are
+    different facts about a sitting.
+    """
+
+    blank = [
+        f"{run_id}/{content_id}"
+        for run_id, content_id, raw in database.query(
+            "SELECT run_id, content_id, permitted_help FROM assessment_run_tasks "
+            "ORDER BY run_id, content_id"
+        )
+        # Asked in Python, not as `trim(permitted_help) = ''`: DuckDB's `trim` removes
+        # spaces where `str.strip` removes every kind of whitespace, so a tab-only value
+        # would be damage to the writer and whole to a SQL version of this check.
+        if raw is not None and not str(raw).strip()
+    ]
+    if blank:
+        return [
+            _failed(
+                "served_help_allowance_wellformed",
+                "a served task records a help allowance that says nothing, so what the "
+                "learner was allowed while answering can no longer be established from "
+                "the run",
+                served="; ".join(blank),
+            )
+        ]
+    return [
+        _ok(
+            "served_help_allowance_wellformed",
+            "every recorded help allowance names something, or is absent because the row "
+            "predates the column",
+        )
+    ]
+
+
 def _served_answer_key_checks(database: Database) -> list[CheckResult]:
     """Migration 0030's snapshot group, and the provenance of every score that followed.
 
@@ -2708,6 +2752,11 @@ def check_database(
             for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
         ):
             checks.extend(_served_answer_key_checks(database))
+        if available["served_answer_key"] and any(
+            name == "permitted_help"
+            for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
+        ):
+            checks.extend(_served_help_allowance_checks(database))
         if (
             available["served_answer_key"]
             and "assessment_tasks" in expected

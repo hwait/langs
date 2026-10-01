@@ -1,0 +1,2237 @@
+{
+  "components": {
+    "schemas": {
+      "AssessmentRunReport": {
+        "additionalProperties": false,
+        "properties": {
+          "algorithm_version": {
+            "title": "Algorithm Version",
+            "type": "string"
+          },
+          "available_modalities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Available Modalities",
+            "type": "array"
+          },
+          "calibration_label": {
+            "title": "Calibration Label",
+            "type": "string"
+          },
+          "declared_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Level"
+          },
+          "dimensions": {
+            "items": {
+              "$ref": "#/components/schemas/DimensionReport"
+            },
+            "title": "Dimensions",
+            "type": "array"
+          },
+          "finalized_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Finalized At"
+          },
+          "framework_id": {
+            "title": "Framework Id",
+            "type": "string"
+          },
+          "framework_levels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Framework Levels",
+            "type": "array"
+          },
+          "pack_key": {
+            "title": "Pack Key",
+            "type": "string"
+          },
+          "pack_maturity": {
+            "title": "Pack Maturity",
+            "type": "string"
+          },
+          "pack_version": {
+            "title": "Pack Version",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "run_type": {
+            "title": "Run Type",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Stop Reason"
+          },
+          "tasks_recorded": {
+            "default": 0,
+            "title": "Tasks Recorded",
+            "type": "integer"
+          },
+          "tasks_served": {
+            "default": 0,
+            "title": "Tasks Served",
+            "type": "integer"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "string"
+          },
+          "untested_dimensions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Untested Dimensions",
+            "type": "array"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run_id",
+          "track_id",
+          "run_type",
+          "calibration_label",
+          "status",
+          "algorithm_version",
+          "pack_key",
+          "pack_version",
+          "pack_maturity",
+          "framework_id",
+          "framework_levels",
+          "declared_level",
+          "available_modalities",
+          "dimensions"
+        ],
+        "title": "AssessmentRunReport",
+        "type": "object"
+      },
+      "DimensionReport": {
+        "additionalProperties": false,
+        "properties": {
+          "boundary_probed": {
+            "default": false,
+            "title": "Boundary Probed",
+            "type": "boolean"
+          },
+          "confidence": {
+            "default": "low",
+            "title": "Confidence",
+            "type": "string"
+          },
+          "credible_high": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Credible High"
+          },
+          "credible_low": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Credible Low"
+          },
+          "dimension": {
+            "title": "Dimension",
+            "type": "string"
+          },
+          "dimension_kind": {
+            "title": "Dimension Kind",
+            "type": "string"
+          },
+          "estimated_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Estimated Level"
+          },
+          "families": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Families",
+            "type": "array"
+          },
+          "maximum_tasks": {
+            "title": "Maximum Tasks",
+            "type": "integer"
+          },
+          "minimum_tasks": {
+            "title": "Minimum Tasks",
+            "type": "integer"
+          },
+          "posterior_mean": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Posterior Mean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Stop Reason"
+          },
+          "task_types": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Task Types",
+            "type": "array"
+          },
+          "tasks_used": {
+            "title": "Tasks Used",
+            "type": "integer"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unavailable Reason"
+          },
+          "uncertainty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Uncertainty"
+          }
+        },
+        "required": [
+          "dimension",
+          "dimension_kind",
+          "status",
+          "tasks_used",
+          "minimum_tasks",
+          "maximum_tasks"
+        ],
+        "title": "DimensionReport",
+        "type": "object"
+      },
+      "NextTaskReport": {
+        "additionalProperties": false,
+        "properties": {
+          "asset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServedAsset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "content_family": {
+            "title": "Content Family",
+            "type": "string"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "difficulty": {
+            "title": "Difficulty",
+            "type": "number"
+          },
+          "dimension": {
+            "title": "Dimension",
+            "type": "string"
+          },
+          "level_code": {
+            "title": "Level Code",
+            "type": "string"
+          },
+          "modality": {
+            "title": "Modality",
+            "type": "string"
+          },
+          "permitted_help": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": "none",
+            "title": "Permitted Help"
+          },
+          "presentation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskPresentation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "remaining_open_dimensions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Remaining Open Dimensions",
+            "type": "array"
+          },
+          "rubric": {
+            "additionalProperties": true,
+            "title": "Rubric",
+            "type": "object"
+          },
+          "rubric_version": {
+            "default": 1,
+            "title": "Rubric Version",
+            "type": "integer"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "selection_reason": {
+            "default": "informativeness",
+            "title": "Selection Reason",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "served_again": {
+            "default": false,
+            "title": "Served Again",
+            "type": "boolean"
+          },
+          "stable_key": {
+            "title": "Stable Key",
+            "type": "string"
+          },
+          "status": {
+            "default": "served",
+            "title": "Status",
+            "type": "string"
+          },
+          "task_type": {
+            "title": "Task Type",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run_id",
+          "dimension",
+          "sequence",
+          "content_id",
+          "stable_key",
+          "task_type",
+          "modality",
+          "level_code",
+          "difficulty",
+          "content_family",
+          "prompt"
+        ],
+        "title": "NextTaskReport",
+        "type": "object"
+      },
+      "OutstandingTask": {
+        "additionalProperties": false,
+        "description": "A task this run served and has not settled, as it was served.\n\nNever from `assessment_tasks`. A pack is mutable and a run is not, so re-reading the\nbank would let an edit made after the serving decide what the learner is held to have\nbeen asked.",
+        "properties": {
+          "answer_with": {
+            "default": "text",
+            "enum": [
+              "choice",
+              "text"
+            ],
+            "title": "Answer With",
+            "type": "string"
+          },
+          "asset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServedAsset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "content_family": {
+            "title": "Content Family",
+            "type": "string"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "difficulty": {
+            "title": "Difficulty",
+            "type": "number"
+          },
+          "dimension": {
+            "title": "Dimension",
+            "type": "string"
+          },
+          "level_code": {
+            "title": "Level Code",
+            "type": "string"
+          },
+          "modality": {
+            "title": "Modality",
+            "type": "string"
+          },
+          "permitted_help": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Permitted Help"
+          },
+          "plays_audio": {
+            "default": false,
+            "title": "Plays Audio",
+            "type": "boolean"
+          },
+          "presentation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskPresentation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Prompt"
+          },
+          "rubric": {
+            "additionalProperties": true,
+            "title": "Rubric",
+            "type": "object"
+          },
+          "rubric_version": {
+            "default": 1,
+            "title": "Rubric Version",
+            "type": "integer"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "task_type": {
+            "title": "Task Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content_id",
+          "dimension",
+          "sequence",
+          "task_type",
+          "modality",
+          "level_code",
+          "difficulty",
+          "content_family"
+        ],
+        "title": "OutstandingTask",
+        "type": "object"
+      },
+      "PresentationChoice": {
+        "additionalProperties": false,
+        "description": "One button. `value` is submitted and scored; `display` is only drawn.",
+        "properties": {
+          "display": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display"
+          },
+          "value": {
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "PresentationChoice",
+        "type": "object"
+      },
+      "RunScreen": {
+        "additionalProperties": false,
+        "description": "The whole state of one run, in one read.",
+        "properties": {
+          "available_modalities": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Available Modalities",
+            "type": "array"
+          },
+          "calibration_label": {
+            "title": "Calibration Label",
+            "type": "string"
+          },
+          "dimensions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DimensionReport"
+            },
+            "title": "Dimensions",
+            "type": "array"
+          },
+          "framework_id": {
+            "title": "Framework Id",
+            "type": "string"
+          },
+          "framework_levels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Framework Levels",
+            "type": "array"
+          },
+          "outstanding": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OutstandingTask"
+            },
+            "title": "Outstanding",
+            "type": "array"
+          },
+          "pack_key": {
+            "title": "Pack Key",
+            "type": "string"
+          },
+          "pack_version": {
+            "title": "Pack Version",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "run_type": {
+            "title": "Run Type",
+            "type": "string"
+          },
+          "screen_version": {
+            "default": 1,
+            "title": "Screen Version",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tasks_recorded": {
+            "default": 0,
+            "title": "Tasks Recorded",
+            "type": "integer"
+          },
+          "tasks_served": {
+            "default": 0,
+            "title": "Tasks Served",
+            "type": "integer"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run_id",
+          "track_id",
+          "run_type",
+          "calibration_label",
+          "status",
+          "pack_key",
+          "pack_version",
+          "framework_id"
+        ],
+        "title": "RunScreen",
+        "type": "object"
+      },
+      "ServedAsset": {
+        "additionalProperties": false,
+        "description": "A recording as served: which one was meant, and which bytes were played.\n\nBoth halves, always. The content ID answers *which recording was meant*; only the\ndigest answers *is this the recording they heard*, which is the one question the\nsnapshot exists to settle.",
+        "properties": {
+          "content_id": {
+            "minLength": 1,
+            "title": "Content Id",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content_id",
+          "sha256"
+        ],
+        "title": "ServedAsset",
+        "type": "object"
+      },
+      "TaskAudio": {
+        "additionalProperties": false,
+        "description": "The recording a listening task plays, and how often it may be played.\n\nThe allowance sits *inside* this record rather than beside it, so \"a replay\nallowance where nothing is played\" is unrepresentable instead of being a rule\nsomebody has to write and somebody else has to check.",
+        "properties": {
+          "asset_key": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$",
+            "title": "Asset Key",
+            "type": "string"
+          },
+          "replay_allowance": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Replay Allowance"
+          }
+        },
+        "required": [
+          "asset_key"
+        ],
+        "title": "TaskAudio",
+        "type": "object"
+      },
+      "TaskPresentation": {
+        "additionalProperties": false,
+        "description": "How one task is rendered. Absent means *free text*, which is not the same thing\nas `kind: free-text` with nothing else: an absent record is a pack that has not been\nauthored for the client, and an explicit one is a decision somebody made.",
+        "properties": {
+          "audio": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskAudio"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "choices": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PresentationChoice"
+            },
+            "title": "Choices",
+            "type": "array"
+          },
+          "kind": {
+            "enum": [
+              "multiple-choice",
+              "free-text"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "order": {
+            "default": "fixed",
+            "enum": [
+              "fixed",
+              "shuffled"
+            ],
+            "title": "Order",
+            "type": "string"
+          },
+          "presentation_version": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Presentation Version",
+            "type": "integer"
+          },
+          "response_shape": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Response Shape"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "TaskPresentation",
+        "type": "object"
+      },
+      "linguawiki.cli.error.v1": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "correlation_id": {
+            "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/linguawiki.cli.error.v1.ErrorPayload"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "pattern": "(?:Z|\\+00:00)$",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "ok": {
+            "const": false,
+            "default": false,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command",
+          "correlation_id",
+          "generated_at",
+          "error"
+        ],
+        "title": "ErrorEnvelope",
+        "type": "object",
+        "x-linguawiki-semantic-model": "linguawiki.cli.error.v1"
+      },
+      "linguawiki.cli.error.v1.ErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "additionalProperties": true,
+            "title": "Context",
+            "type": "object"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Field"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
+      "linguawiki.cli.error.v1.ErrorPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "pattern": "^[a-z][a-z0-9_]+$",
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/linguawiki.cli.error.v1.ErrorDetail"
+            },
+            "title": "Details",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "default": false,
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorPayload",
+        "type": "object"
+      },
+      "linguawiki.cli.success.v1": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "correlation_id": {
+            "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "data": {
+            "title": "Data"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "pattern": "(?:Z|\\+00:00)$",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "ok": {
+            "const": true,
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "command",
+          "correlation_id",
+          "generated_at",
+          "data"
+        ],
+        "title": "GenericSuccessEnvelope",
+        "type": "object",
+        "x-linguawiki-semantic-model": "linguawiki.cli.success.v1"
+      }
+    },
+    "securitySchemes": {
+      "launchToken": {
+        "description": "Minted per server start, handed to the page through the URL fragment, and never written to disk.",
+        "in": "header",
+        "name": "X-LinguaWiki-Token",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "Generated from the Pydantic contracts and the server's own route table; never edited by hand. This document describes **shapes, not sequences**. At most one outstanding task per dimension, idempotent serving, scoring against the serve-time snapshot rather than the live pack, and every consent rule live in the service layer and its tests. Conformance to this document is not correctness.\\n\\nEvery request carries the launch token this server minted when it started; a launchToken is valid for one server start and is never stored.",
+    "license": {
+      "identifier": "MIT",
+      "name": "MIT"
+    },
+    "summary": "A loopback transport over the LinguaWiki service layer.",
+    "title": "LinguaWiki learner client",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                }
+              }
+            },
+            "description": "The server and the schema version it was built for."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          }
+        },
+        "summary": "Whether the server is up, without touching the database"
+      }
+    },
+    "/runs": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_start",
+        "parameters": [
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "dimensions": {
+                    "items": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "modalities": {
+                    "items": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "run_type": {
+                    "enum": [
+                      "pilot-calibration",
+                      "placement"
+                    ]
+                  },
+                  "track": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/AssessmentRunReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Open a bounded calibration or placement run"
+      }
+    },
+    "/runs/{run_id}": {
+      "get": {
+        "operationId": "assessment_report",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/AssessmentRunReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "A run's per-dimension estimates and budgets"
+      }
+    },
+    "/runs/{run_id}/finalization": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_finalize",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "reason": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/AssessmentRunReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Close a run and write one estimate per tested dimension"
+      }
+    },
+    "/runs/{run_id}/results": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_record",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "assessor": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "assessor_kind": {
+                    "enum": [
+                      "deterministic",
+                      "ai",
+                      "learner",
+                      "human"
+                    ]
+                  },
+                  "confidence": {
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ]
+                  },
+                  "content_id": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "response": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "response_excerpt": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "response_visibility": {
+                    "enum": [
+                      "withheld",
+                      "excerpt",
+                      "full"
+                    ]
+                  },
+                  "rubric": {
+                    "type": "object"
+                  },
+                  "score": {
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "content_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/AssessmentRunReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Score one served task and fold it into its dimension's posterior"
+      }
+    },
+    "/runs/{run_id}/screen": {
+      "get": {
+        "operationId": "assessment_screen",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/RunScreen"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Everything a client needs to draw the run, in one read"
+      }
+    },
+    "/runs/{run_id}/status": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_status",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "in-progress",
+                      "paused",
+                      "abandoned"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/AssessmentRunReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Pause, resume, or abandon a run"
+      }
+    },
+    "/runs/{run_id}/tasks": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_next",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/NextTaskReport"
+                        },
+                        {
+                          "$ref": "#/components/schemas/AssessmentRunReport"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Serve the next task, or hand back the one already outstanding"
+      }
+    }
+  },
+  "security": [
+    {
+      "launchToken": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "Loopback only. The port is in data/client-runtime.json; the token is not, and arrives in the fragment of the URL the launch command opens.",
+      "url": "http://127.0.0.1:{port}",
+      "variables": {
+        "port": {
+          "default": "0"
+        }
+      }
+    }
+  ],
+  "x-linguawiki-forbidden-codes": [
+    "client_header_repeated",
+    "client_host_denied",
+    "client_origin_denied",
+    "client_token_invalid",
+    "client_token_required"
+  ],
+  "x-linguawiki-retryable-status": 503
+}
