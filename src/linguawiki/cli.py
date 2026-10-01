@@ -511,6 +511,24 @@ def _curriculum_parser(subcommands: Any) -> None:
     _add_workspace(audit_report)
 
 
+def _client_parser(subcommands: Any) -> None:
+    client = subcommands.add_parser("client", help="the local browser client")
+    actions = client.add_subparsers(dest="action", required=True)
+    serve = actions.add_parser("serve", help="serve the client on loopback until interrupted")
+    serve.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="port to bind; 0 asks the operating system for a free one",
+    )
+    serve.add_argument(
+        "--no-open",
+        action="store_true",
+        help="print the launch URL instead of opening a browser",
+    )
+    _add_workspace(serve)
+
+
 def _assessment_parser(subcommands: Any) -> None:
     assessment = subcommands.add_parser("assessment", help="calibration and placement runs")
     actions = assessment.add_subparsers(dest="action", required=True)
@@ -1206,6 +1224,7 @@ def _parser() -> ContractArgumentParser:
     _resources_parser(subcommands)
     _curriculum_parser(subcommands)
     _assessment_parser(subcommands)
+    _client_parser(subcommands)
     _knowledge_parser(subcommands)
     _evidence_parser(subcommands)
     _errors_parser(subcommands)
@@ -2366,6 +2385,33 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
     _print(
         _envelope(command, report, clock, report.warnings), _assessment_lines(report), args.format
     )
+    return 0
+
+
+def _run_client(args: argparse.Namespace, clock: Clock, command: str) -> int:
+    """Bind, print where it is listening, and serve in the foreground.
+
+    The URL is printed whether or not a browser is opened, because it carries the launch
+    token for this start and there is nowhere else to get it: it is never written to disk.
+    """
+
+    from linguawiki.client import server as client_server
+
+    paths = _pack_workspace(args)
+    client = client_server.build_server(paths, port=args.port, clock=clock)
+    # On stderr, so `--format json` output on stdout stays a single parseable document.
+    print(f"LinguaWiki client listening on {client.origin}", file=sys.stderr)
+    print(f"open {client.launch_url}", file=sys.stderr)
+    if not args.no_open:
+        import webbrowser
+
+        webbrowser.open(client.launch_url)
+    try:
+        client.serve_forever()
+    except KeyboardInterrupt:
+        print("stopping", file=sys.stderr)
+    finally:
+        client.close()
     return 0
 
 
@@ -3745,6 +3791,8 @@ def _dispatch(args: argparse.Namespace, clock: Clock, command: str) -> int:
         return _run_speaking(args, clock, command)
     if args.group == "privacy":
         return _run_privacy(args, clock, command)
+    if args.group == "client":
+        return _run_client(args, clock, command)
     if args.group == "wiki":
         return _run_wiki(args, clock, command)
     raise LinguaWikiError("unknown_command", "command is not implemented")
