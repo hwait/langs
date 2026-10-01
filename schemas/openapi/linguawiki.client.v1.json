@@ -1043,6 +1043,18 @@
       "post": {
         "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
         "operationId": "assessment_start",
+        "parameters": [
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1350,6 +1362,16 @@
               "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -1509,6 +1531,16 @@
             "required": true,
             "schema": {
               "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
               "type": "string"
             }
           }
@@ -1845,6 +1877,16 @@
               "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
               "type": "string"
             }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -2005,6 +2047,16 @@
             "required": true,
             "schema": {
               "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
               "type": "string"
             }
           }

@@ -75,6 +75,7 @@ from linguawiki.placement import (
     unavailable_reason,
 )
 from linguawiki.provenance import PROMOTED_LIFECYCLES
+from linguawiki.retrying import with_retry
 from linguawiki.services import estimates as estimate_service
 from linguawiki.services import evidence as evidence_service
 from linguawiki.services import learners as learner_service
@@ -383,6 +384,25 @@ def outstanding_task_ids(database: Database, run_id: str) -> tuple[str, ...]:
     )
 
 
+def _report_after_writing(
+    paths: WorkspacePaths, run_id: str, clock: Clock, warnings: Sequence[str] = ()
+) -> AssessmentRunReport:
+    """Report on a run whose writer has just closed, retrying a refusal of the *read*.
+
+    These commands commit, release the writer, and only then open a reader -- because DuckDB
+    serves one connection per file and a writer that calls its own report deadlocks on its own
+    lock. That leaves a gap: another process can take the file in between, and the read is
+    refused with the retryable `database_busy`. Reported straight through, a mutation that had
+    already landed looked like a mutation that had failed, and any caller that retried it on
+    that basis performed it twice -- which is exactly how one `POST /runs` became two runs.
+
+    Only the read is retried here. The write is already done and is not repeated.
+    """
+
+    result = with_retry(lambda: report(paths, run=run_id, clock=clock))
+    return result.model_copy(update={"warnings": (*result.warnings, *warnings)})
+
+
 def _outstanding_dimensions(database: Database, run_id: str) -> Mapping[str, str]:
     """Dimensions holding a task that was served and never settled, to their task.
 
@@ -408,6 +428,7 @@ def _outstanding_dimensions(database: Database, run_id: str) -> Mapping[str, str
 #: `idempotency_conflict` reports, so a caller can tell "this key already served you a
 #: task" from "this key already scored one" -- which is the whole point of refusing a key
 #: that belongs to another operation.
+STARTED_EVENT = "assessment.started"
 SERVED_EVENT = "assessment.served"
 RECORDED_EVENT = "assessment.recorded"
 FINALIZED_EVENT = "assessment.finalized"
@@ -671,6 +692,7 @@ def start(
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.start",
+    actor: str = DEFAULT_ACTOR,
 ) -> AssessmentRunReport:
     """Open a bounded calibration or placement run and persist its starting state."""
 
@@ -684,12 +706,36 @@ def start(
         record = learner_service.track_context(database, track_id)
         pack_row = pack_service.installed_pack(database, record.pack_key)
         label = _assert_placement_bank(pack_row, run_type=run_type)
+        # Bound to a hash of the request, like every other key in this file. `start` had only
+        # ever looked the key up in `assessment_runs` and handed back whatever run it found,
+        # so a second call asking for *different* dimensions or modalities under one key was
+        # answered with the first run and told nothing -- a key alone cannot tell a retry from
+        # a reuse, which is the whole reason the hash exists.
+        opening_fingerprint = idempotency.request_hash(
+            operation=STARTED_EVENT,
+            track_id=track_id,
+            run_type=run_type,
+            dimensions=sorted(dimensions) if dimensions else None,
+            modalities=sorted(modalities) if modalities else None,
+        )
+        replayed = idempotency.resolve(
+            database,
+            key=idempotency_key,
+            event_type=STARTED_EVENT,
+            request_hash=opening_fingerprint,
+        )
+        if replayed is not None:
+            return run_report(database, str(replayed["run_id"]))
         if idempotency_key is not None:
             existing = database.one(
                 "SELECT run_id FROM assessment_runs WHERE idempotency_key = ?",
                 [idempotency_key],
             )
             if existing is not None:
+                # A run opened before the key carried a request hash. `resolve` found no
+                # event for it, so sameness cannot be established and this is the old
+                # behaviour, kept rather than turned into a refusal: the run exists and is
+                # the one the key names.
                 return run_report(database, str(existing[0]))
         kinds = _dimension_kinds(pack_row["manifest_json"])
         requested = tuple(dimensions) if dimensions else tuple(kinds)
@@ -787,22 +833,27 @@ def start(
                 command=command,
                 correlation_id=correlation_id,
                 outcome="succeeded",
+                actor=actor,
                 affected_records_json=json.dumps([str(run_id)]),
                 after_summary=f"started {label} for {track_id}",
             )
             migration_module.record_domain_event(
                 transaction,
-                event_type="assessment.started",
+                event_type=STARTED_EVENT,
                 aggregate_type="assessment_run",
                 aggregate_id=str(run_id),
                 correlation_id=correlation_id,
-                payload_json=json.dumps(
-                    {"run_type": run_type, "calibration_label": label}, sort_keys=True
+                payload_json=idempotency.payload(
+                    opening_fingerprint,
+                    run_id=str(run_id),
+                    run_type=run_type,
+                    calibration_label=label,
                 ),
-                idempotency_key=f"assessment.started:{run_id}",
+                # The caller's key when there is one, so `resolve` can find it; the synthetic
+                # one otherwise, which is what has always kept this event unique per run.
+                idempotency_key=idempotency_key or f"assessment.started:{run_id}",
             )
-    result = report(paths, run=str(run_id), clock=active_clock)
-    return result.model_copy(update={"warnings": (*result.warnings, *warnings)})
+    return _report_after_writing(paths, str(run_id), active_clock, warnings)
 
 
 def _dimension_states(
@@ -1160,6 +1211,20 @@ def next_task(
         # the least-progressed one.
         held = [state for state in open_states if state.dimension in outstanding]
         handed_content_id = outstanding[held[0].dimension] if held else None
+        # Read and validated *before* the key is claimed. `_hand_back` refuses a damaged
+        # snapshot, and a refusal has to leave nothing behind: claiming the key first meant a
+        # refused call burned it, so the retry the caller was entitled to make came back as a
+        # conflict about a request that had never succeeded.
+        handed = (
+            None
+            if handed_content_id is None
+            else _hand_back(
+                database,
+                run_id,
+                content_id=handed_content_id,
+                open_dimensions=[state.dimension for state in held],
+            )
+        )
         if idempotency_key is not None:
             # Whatever this call did -- handed a task back, or closed the last dimension and
             # served nothing -- it is the one operation this key performed, and recording it
@@ -1178,16 +1243,9 @@ def next_task(
                     payload_json=idempotency.payload(fingerprint, content_id=handed_content_id),
                     idempotency_key=idempotency_key,
                 )
-        if held:
-            handed = _hand_back(
-                database,
-                run_id,
-                content_id=str(handed_content_id),
-                open_dimensions=[state.dimension for state in held],
-            )
+        if handed is not None:
             return handed.model_copy(update={"warnings": tuple(warnings)})
-    result = report(paths, run=run_id, clock=active_clock)
-    return result.model_copy(update={"warnings": (*result.warnings, *warnings)})
+    return _report_after_writing(paths, run_id, active_clock, warnings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1417,24 +1475,14 @@ def record(
         track_id = None if track is None else learner_service.resolve_track(database, track)
         run_id = resolve_run(database, run, track_id=track_id)
         row = _run_row(database, run_id)
-        _assert_running(run_id, status=str(row[4]), action="take further results")
-        served = database.one(
-            "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
-            "content_family, modality, is_anchor, content_hash, expected_json, "
-            "prompt_snapshot, rubric_json FROM assessment_run_tasks "
-            "WHERE run_id = ? AND content_id = ?",
-            [run_id, content_id],
-        )
-        if served is None:
-            raise LinguaWikiError(
-                "assessment_task_not_served",
-                "that task was not served in this run; ask for the next task first",
-                details=(ErrorDetail(field="content_id", reason="task was not served"),),
-            )
-        conditions = json.loads(str(row[6]))
-        kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
-        record_track = learner_service.track_context(database, str(row[1]))
-        # The key is checked here, before the transaction, so the unique index on
+        # The key is checked here -- before the transaction, and before every guard below,
+        # including the one that asks whether the run may take further results. A retry is a
+        # retry whatever the run has become since: a client whose response was lost and which
+        # then paused, or whose pause and retry crossed, was told its completed work was new
+        # work it was not allowed to do. Resolving the replay first answers with what already
+        # happened, which is true in any run state.
+        #
+        # It also means the unique index on
         # `domain_events.idempotency_key` is never the thing that refuses: it did, with a
         # raw `ConstraintException` surfaced as `internal_error`, after every refusal below
         # had been placed before the transaction precisely to avoid that.
@@ -1471,6 +1519,23 @@ def record(
             is not None
         ):
             return run_report(database, run_id)
+        _assert_running(run_id, status=str(row[4]), action="take further results")
+        served = database.one(
+            "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
+            "content_family, modality, is_anchor, content_hash, expected_json, "
+            "prompt_snapshot, rubric_json FROM assessment_run_tasks "
+            "WHERE run_id = ? AND content_id = ?",
+            [run_id, content_id],
+        )
+        if served is None:
+            raise LinguaWikiError(
+                "assessment_task_not_served",
+                "that task was not served in this run; ask for the next task first",
+                details=(ErrorDetail(field="content_id", reason="task was not served"),),
+            )
+        conditions = json.loads(str(row[6]))
+        kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
+        record_track = learner_service.track_context(database, str(row[1]))
         # Scored from what was served, never from what the pack now says. Re-reading the
         # installed pack folded a difficulty the learner never faced into their posterior
         # whenever the pack changed mid-run.
@@ -1631,8 +1696,7 @@ def record(
                     ),
                     idempotency_key=idempotency_key,
                 )
-    result = report(paths, run=run_id, clock=active_clock)
-    return result.model_copy(update={"warnings": (*result.warnings, *warnings)})
+    return _report_after_writing(paths, run_id, active_clock, warnings)
 
 
 def set_status(
@@ -1643,6 +1707,7 @@ def set_status(
     track: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.pause",
+    actor: str = DEFAULT_ACTOR,
 ) -> AssessmentRunReport:
     """Pause or resume a run so a calibration can span several sittings."""
 
@@ -1666,11 +1731,12 @@ def set_status(
                 command=command,
                 correlation_id=EventId.new(),
                 outcome="succeeded",
+                actor=actor,
                 affected_records_json=json.dumps([run_id]),
                 before_summary=str(current[4]),
                 after_summary=status,
             )
-    return report(paths, run=run_id, clock=active_clock)
+    return _report_after_writing(paths, run_id, active_clock)
 
 
 def finalize(
@@ -1682,6 +1748,7 @@ def finalize(
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.finalize",
+    actor: str = DEFAULT_ACTOR,
 ) -> AssessmentRunReport:
     """Close a run, writing one uncertainty-aware estimate per tested dimension."""
 
@@ -1690,13 +1757,12 @@ def finalize(
         track_id = None if track is None else learner_service.resolve_track(database, track)
         run_id = resolve_run(database, run, track_id=track_id)
         row = _run_row(database, run_id)
-        if str(row[4]) == "finalized":
-            return run_report(database, run_id)
-        _assert_transition(run_id, current=str(row[4]), target="finalized")
-        # `finalize` writes the caller's key straight into the same unique index, so it had
-        # the same unpreflighted `ConstraintException` as `record`: a key that finalized one
-        # run, reused for another, died as `internal_error`. An already-finalized run
-        # replays above this, so what reaches here is a key being asked for a second run.
+        # Before the already-finalized early return, not after it. `finalize` writes the
+        # caller's key straight into the same unique index as `record`, so it had the same
+        # unpreflighted `ConstraintException` -- and placing the check below the early return
+        # meant a key that closed this run for one reason answered 200 when it was reused for
+        # another, which is the exact shape of "a guard placed after the path it guards is not
+        # a guard". An exact retry still replays; what differs now conflicts.
         closing_fingerprint = idempotency.request_hash(
             operation=FINALIZED_EVENT, run_id=run_id, reason=reason
         )
@@ -1710,6 +1776,9 @@ def finalize(
             is not None
         ):
             return run_report(database, run_id)
+        if str(row[4]) == "finalized":
+            return run_report(database, run_id)
+        _assert_transition(run_id, current=str(row[4]), target="finalized")
         conditions = json.loads(str(row[6]))
         kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
         record_track = learner_service.track_context(database, str(row[1]))
@@ -1751,6 +1820,7 @@ def finalize(
                 command=command,
                 correlation_id=EventId.new(),
                 outcome="succeeded",
+                actor=actor,
                 affected_records_json=json.dumps([run_id]),
                 after_summary=f"finalized with reason {reason}",
             )
@@ -1763,7 +1833,7 @@ def finalize(
                 payload_json=idempotency.payload(closing_fingerprint, reason=reason),
                 idempotency_key=idempotency_key or f"assessment.finalized:{run_id}",
             )
-    return report(paths, run=run_id, clock=active_clock)
+    return _report_after_writing(paths, run_id, active_clock)
 
 
 def seed_declared_estimates(

@@ -23,14 +23,22 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from linguawiki import __version__
 from linguawiki.client import responses, routes, runtime, security
-from linguawiki.client.retry import with_retry
 from linguawiki.client.security import TOKEN_HEADER
 from linguawiki.clock import Clock, SystemClock
 from linguawiki.db import migrations as migration_module
 from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.paths import WorkspacePaths
+from linguawiki.retrying import DEFAULT_ATTEMPTS, with_retry
+
+#: How long a connection may be silent before it is dropped. It bounds the wait for the
+#: request line as well as for the body: a socket that connects and says nothing is not
+#: distinguishable from one that is about to, and on a server that handles one request at a
+#: time the difference does not matter -- both hold the learner's only surface.
+REQUEST_TIMEOUT_SECONDS = 10
 
 #: The most a request body may be. A loopback page is still a page, and an unbounded
 #: `rfile.read` on a single-threaded server is a one-request outage: nothing else is served
@@ -113,6 +121,10 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = f"linguawiki/{__version__}"
+        #: Bound, because an unbounded wait on a socket that has sent nothing yet is the same
+        #: outage as an unbounded read: this server handles one request at a time, so a client
+        #: that connects and goes quiet would hold the only surface the learner has.
+        timeout = REQUEST_TIMEOUT_SECONDS
 
         def log_message(self, format: str, *args: Any) -> None:
             """Silence the default stderr access log.
@@ -152,11 +164,30 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 if route.mutates:
                     security.assert_origin(headers, origin=str(client["origin"]))
                 body = self._read_body()
+                _assert_declared_shape(body, route)
                 request = routes.Request(path_values=values, body=body, clock=clock, paths=paths)
                 # One reader per read, one writer per mutation, neither held across
                 # requests: the service call opens and closes its own connection inside
                 # this block, and the response is written after it has closed.
-                report = with_retry(lambda: route.handler(request))
+                #
+                # A read is retried freely. A mutation is retried only when it carries an
+                # idempotency key, and that is the whole rule: a retryable refusal does not
+                # say whether anything was written before it, so a blind retry of a mutation
+                # can repeat work that already landed -- it did, turning one `POST /runs`
+                # into two runs when the trailing report read was refused. The key is what
+                # makes a second attempt a replay rather than a repeat, so where there is no
+                # key there is no retry.
+                #
+                # The service layer closes the common case from its own side: a command that
+                # commits and then opens a reader for its report retries that *read* itself,
+                # so brief contention no longer reports a landed mutation as a failure. This
+                # rule is the backstop for when that budget is exhausted.
+                attempts = (
+                    DEFAULT_ATTEMPTS
+                    if not route.mutates or request.optional("idempotency_key", str) is not None
+                    else 1
+                )
+                report = with_retry(lambda: route.handler(request), attempts=attempts)
                 warnings = tuple(getattr(report, "warnings", ()) or ())
                 self._respond(
                     200,
@@ -267,7 +298,16 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
         def _respond(
             self, status: int, body: bytes, *, extra_headers: dict[str, str] | None = None
         ) -> None:
+            # One request per connection. HTTP/1.1 keeps a connection alive by default, and
+            # this server handles one at a time: the first client's idle socket then sat in
+            # the only handler slot waiting for a second request it had no intention of
+            # sending, and every other connection queued behind it. Keeping the version at
+            # 1.1 preserves the `Content-Length` semantics the body cap depends on; closing
+            # after each response is what keeps serializing *requests* from serializing
+            # *clients*. A loopback handshake per request costs nothing worth measuring.
+            self.close_connection = True
             self.send_response(status)
+            self.send_header("Connection", "close")
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             # A local page, and nothing else, may read these answers. `Access-Control-*` is
@@ -286,12 +326,51 @@ def _headers(handler: BaseHTTPRequestHandler) -> tuple[dict[str, str], dict[str,
     """The request's headers as a plain map, plus how often each decisive one appeared.
 
     `email.message.Message` is not a mapping and permits repeats, so the count is taken here
-    rather than being lost in a `dict()` that silently keeps the last value.
+    rather than being lost in a `dict()` that silently keeps the last value. The keys are
+    **folded to lower case**, because header names are case-insensitive and a plain `dict()`
+    of them is not: a client sending `host` and `x-linguawiki-token` -- which it is entitled
+    to do -- was refused as having sent neither, which is the most misleading answer
+    available. It says the client sent nothing where the client sent the right thing.
     """
 
-    values = {name: str(value) for name, value in handler.headers.items()}
+    values = {name.lower(): str(value) for name, value in handler.headers.items()}
     repeated = {name: len(handler.headers.get_all(name) or ()) for name in security.SINGLE_VALUED}
     return values, repeated
+
+
+def _assert_declared_shape(body: dict[str, Any], route: routes.Route) -> None:
+    """Hold the request to the schema the published document says it must satisfy.
+
+    Nothing enforced it. The document declares `additionalProperties: false`, and a body
+    carrying `idempotency_keey` created a run with no key at all -- so a caller that believed
+    its retries were deduplicated opened another run with every one of them. A published
+    constraint nothing checks is documentation shaped like a validation, which is worse than
+    none because nobody looks at it twice.
+
+    The error names the failing path, so a caller is told *which* field is wrong rather than
+    that something is.
+    """
+
+    if route.request_schema is None:
+        return
+    failures = sorted(
+        Draft202012Validator(dict(route.request_schema)).iter_errors(body),
+        key=lambda failure: list(failure.path),
+    )
+    if not failures:
+        return
+    raise LinguaWikiError(
+        "invalid_contract",
+        f"the request body does not match the published schema for {route.command}: "
+        f"{failures[0].message}",
+        details=tuple(
+            ErrorDetail(
+                field=".".join(str(part) for part in failure.path) or "body",
+                reason=failure.message,
+            )
+            for failure in failures
+        ),
+    )
 
 
 def _too_large() -> LinguaWikiError:

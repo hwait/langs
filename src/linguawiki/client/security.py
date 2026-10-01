@@ -31,6 +31,19 @@ ALLOWED_HOSTS = ("127.0.0.1", "localhost")
 SINGLE_VALUED = ("Host", "Origin", TOKEN_HEADER)
 
 
+def _value(headers: Mapping[str, str], name: str) -> str | None:
+    """One header, matched the way HTTP defines header names: without regard to case.
+
+    The map arrives with its keys already folded, and this is the only place that fact is
+    relied on -- so every check below asks for the canonical spelling and gets the right
+    answer whatever the client sent. Reading a case-sensitive dictionary refused a perfectly
+    ordinary lowercase `host` as *absent*, which is the most misleading answer available: it
+    says the client sent nothing where the client sent the right thing.
+    """
+
+    return headers.get(name.lower())
+
+
 def assert_single_valued(duplicated: Mapping[str, int]) -> None:
     """Refuse a request that sent any decisive header more than once."""
 
@@ -52,7 +65,7 @@ def _refuse(code: str, message: str, *, field: str, reason: str) -> LinguaWikiEr
 def assert_host(headers: Mapping[str, str], *, port: int) -> None:
     """Require the request to have been addressed to this server by an allowed name."""
 
-    value = headers.get("Host")
+    value = _value(headers, "Host")
     if value is None or not value.strip():
         # HTTP/1.0 permits no `Host` at all, and defaulting it to the bind address is
         # precisely how an allowlist gets bypassed: the check would always pass.
@@ -81,7 +94,7 @@ def assert_origin(headers: Mapping[str, str], *, origin: str) -> None:
     case where the data is least trustworthy.
     """
 
-    value = headers.get("Origin")
+    value = _value(headers, "Origin")
     if value is None or not value.strip():
         raise _refuse(
             "client_origin_denied",
@@ -107,7 +120,7 @@ def assert_token(headers: Mapping[str, str], *, expected: str) -> None:
     is what the refusal says.
     """
 
-    value = headers.get(TOKEN_HEADER)
+    value = _value(headers, TOKEN_HEADER)
     if value is None or not value.strip():
         raise _refuse(
             "client_token_required",

@@ -181,6 +181,21 @@ def _path_template(pattern: str) -> str:
     return template.replace(client_routes.RUN_ID, "{run_id}")
 
 
+#: Declared on every mutating operation, because every one of them refuses its absence. In
+#: prose only, a generated client sends no `Origin` at all and cannot make a single mutating
+#: call -- a description is not a parameter.
+ORIGIN_PARAMETER: dict[str, Any] = {
+    "name": "Origin",
+    "in": "header",
+    "required": True,
+    "description": (
+        "Must be this server's own origin. Absence is refused rather than treated as "
+        "permission: a cross-site form post sends no Origin in some browsers."
+    ),
+    "schema": {"type": "string", "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$"},
+}
+
+
 RUN_ID_PARAMETER: dict[str, Any] = {
     "name": "run_id",
     "in": "path",
@@ -233,8 +248,13 @@ def document(schema_directory: Path) -> dict[str, Any]:
                 **COMMON_RESPONSES,
             },
         }
+        parameters: list[dict[str, Any]] = []
         if "{run_id}" in template:
-            operation["parameters"] = [RUN_ID_PARAMETER]
+            parameters.append(RUN_ID_PARAMETER)
+        if route.mutates:
+            parameters.append(ORIGIN_PARAMETER)
+        if parameters:
+            operation["parameters"] = parameters
         if route.request_schema is not None:
             operation["requestBody"] = {
                 "required": False,

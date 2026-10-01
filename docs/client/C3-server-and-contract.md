@@ -77,6 +77,68 @@ read model asks the same two questions and a private copy would be a second answ
 `canonical_hash` moved out of `services/sessions.py` into `linguawiki/idempotency.py`, which
 is where it was first needed but not where it belongs.
 
+## Review round two — 2026-10-01
+
+Ten findings from an independent review, all ten reproduced before fixing and all ten of the
+reviewer's own checks passing after. Release gate: **2368 passed, 1 skipped**, 93.48%.
+
+Two could block or duplicate ordinary client work:
+
+- **An idle connection held the whole server.** HTTP/1.1 keeps a connection alive and this
+  server handles one request at a time, so the first client's idle socket sat in the only
+  handler slot waiting for a request it never sent. Serializing *requests* was the decision;
+  serializing *clients* was not. One request per connection now, plus a bounded socket wait,
+  because a socket that connects and says nothing is the same outage.
+- **A retried mutation could create a second run.** `start`, `record` and `finalize` commit,
+  release the writer, and *then* open a reader for their report — so a `database_busy` on that
+  read comes from a call that already landed, and the transport's blind retry turned one
+  `POST /runs` into two runs with a 200. The code comment claiming retries were safe "because
+  refusals happen before writes" was simply wrong. Fixed on both sides: each command retries
+  its own trailing *read*, so brief contention no longer reports a landed mutation as failed;
+  and the transport retries a mutation only when it carries an idempotency key, because that
+  is what makes a second attempt a replay rather than a repeat.
+
+Three were one mistake made three times — a guard placed after the path it guards, which this
+plan names in §4 and which I then committed anyway:
+
+- **`finalize` compared its key after the already-finalized early return**, so a key that
+  closed a run for one reason answered 200 when reused for another.
+- **`record` checked the running state before resolving a replay**, so a client whose response
+  was lost and which then paused was told its completed work was new work it could not do.
+- **A hand-back claimed its key before reading the snapshot**, so a damaged presentation
+  refused the call *and* burned the key — and the retry the caller was entitled to came back
+  as a conflict about a request that had never succeeded.
+
+And five more:
+
+- **`start`'s key was never bound to its request.** It looked the key up in `assessment_runs`
+  and handed back whatever run it found, so a second call asking for different modalities
+  under one key got the first run and was told nothing — while the route advertised a 409.
+- **Header lookup was case-sensitive.** `_headers` folded a case-insensitive collection into a
+  plain `dict`, so a client sending `host` and `x-linguawiki-token` — which it is entitled to
+  do — was refused as having sent *neither*. Reporting a correct header as absent is the most
+  misleading answer available.
+- **The published request schemas were never enforced.** The document declared
+  `additionalProperties: false` and nothing checked it, so `idempotency_keey` created a run
+  with no key at all and every "safe" retry opened another. A published constraint nothing
+  checks is documentation shaped like a validation — the failure this plan's own §9 warns
+  about, in the layer that reads the document.
+- **Three HTTP mutations were audited as CLI operations.** §3 says the surface is recorded for
+  every mutation; `actor` reached only the two that had no audit row at all.
+- **The contract mentioned `Origin` only in prose.** Every mutation refuses its absence, so a
+  client generated from the document could not make a single mutating call. It is a required
+  header parameter now.
+
+One expectation of mine changed rather than a behaviour: a wrong-typed body field is now
+`invalid_contract` rather than `invalid_arguments`, because the published schema catches it
+first. Same status, more precise code.
+
+One divergence from the reviewer, stated rather than bent to: their duplicate-run check also
+asserts the call returns 200. Satisfying that by retrying a keyless mutation would mean
+deciding that two identical keyless `POST /runs` calls are one run — and opening two
+calibrations for one track is something a learner may legitimately do. The trailing-read fix
+makes their assertion pass honestly instead.
+
 **Goal.** A loopback HTTP server exposing the read model and the calibration mutations,
 described by a generated OpenAPI 3.1 document. No UI; verified by contract tests and curl.
 

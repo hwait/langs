@@ -726,3 +726,80 @@ def test_a_key_that_handed_a_task_back_cannot_later_serve_a_different_one(
     assert isinstance(again, assessment_service.NextTaskReport)
     assert again.content_id == handed.content_id
     assert again.status == "answered"
+
+
+def test_a_recorded_result_can_still_be_replayed_after_the_run_is_paused(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A retry is a retry whatever the run has become since.
+
+    The running-state guard ran before the replay lookup, so a client whose response was lost
+    and which then paused -- or whose pause and retry crossed -- was told its completed work
+    was new work it could not do.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_one(polish_workspace, run.run_id)
+    arguments = {
+        "run": run.run_id,
+        "content_id": served.content_id,
+        "score": 1.0,
+        "idempotency_key": "score-after-pause",
+    }
+    assessment_service.record(polish_workspace.paths, clock=polish_workspace.clock, **arguments)
+    assessment_service.set_status(
+        polish_workspace.paths, run=run.run_id, status="paused", clock=polish_workspace.clock
+    )
+
+    replayed = assessment_service.record(
+        polish_workspace.paths, clock=polish_workspace.clock, **arguments
+    )
+
+    assert replayed.tasks_recorded == 1
+
+
+def test_a_refused_hand_back_does_not_consume_its_key(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A refusal must leave nothing behind, including a key it never answered with.
+
+    The event committed before the snapshot was read, so a damaged presentation refused the
+    call *and* burned the key -- and the retry the caller was entitled to make came back as a
+    conflict about a request that never succeeded.
+    """
+
+    import pytest
+
+    from linguawiki.errors import LinguaWikiError
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    while True:
+        served = _serve_one(polish_workspace, run.run_id)
+        if served.served_again:
+            break
+    with (
+        open_writer(polish_workspace.paths, command="test.damage") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE assessment_run_tasks SET presentation_json = ? "
+            "WHERE run_id = ? AND content_id = ?",
+            ['{"kind": "unheard-of"}', run.run_id, served.content_id],
+        )
+
+    with pytest.raises(LinguaWikiError):
+        assessment_service.next_task(
+            polish_workspace.paths,
+            run=run.run_id,
+            idempotency_key="refused-serve",
+            clock=polish_workspace.clock,
+        )
+
+    with open_reader(polish_workspace.paths) as database:
+        claimed = int(
+            database.scalar(
+                "SELECT count(*) FROM domain_events WHERE idempotency_key = ?",
+                ["refused-serve"],
+            )
+        )
+    assert claimed == 0

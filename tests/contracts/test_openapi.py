@@ -272,3 +272,25 @@ def test_the_whole_document_assembles_without_a_collision() -> None:
     """The namespacing has to hold over the real set, not only over a constructed pair."""
 
     assert document(SCHEMAS)["components"]["schemas"]
+
+
+def test_every_mutating_operation_declares_the_required_origin_header() -> None:
+    """Prose in a description is not a parameter a generated client will send.
+
+    Every mutation refuses an absent `Origin`, so a client built from this document without
+    one is a client that cannot make a single mutating call.
+    """
+
+    whole = read_document()
+
+    for template, path in whole["paths"].items():
+        for method, operation in path.items():
+            if method == "get":
+                continue
+            declared = [
+                parameter
+                for parameter in operation.get("parameters", [])
+                if parameter.get("name") == "Origin" and parameter.get("in") == "header"
+            ]
+            assert declared, f"{method} {template} does not declare Origin"
+            assert declared[0]["required"] is True, f"{method} {template}"

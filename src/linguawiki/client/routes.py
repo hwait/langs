@@ -141,6 +141,7 @@ def _start(request: Request) -> Any:
         idempotency_key=request.optional("idempotency_key", str),
         clock=request.clock,
         command="assessment.start",
+        actor=ACTOR,
     )
 
 
@@ -182,6 +183,7 @@ def _set_status(request: Request) -> Any:
         status=request.required("status", str),
         clock=request.clock,
         command="assessment.status",
+        actor=ACTOR,
     )
 
 
@@ -193,6 +195,7 @@ def _finalize(request: Request) -> Any:
         idempotency_key=request.optional("idempotency_key", str),
         clock=request.clock,
         command="assessment.finalize",
+        actor=ACTOR,
     )
 
 

@@ -1,12 +1,21 @@
-"""Bounded retry for the two refusals that mean "somebody else has the file".
+"""Bounded retry for the refusals that mean "somebody else has the file".
 
 DuckDB holds an exclusive lock on the database and the application lock is non-blocking, so
-a learner running one CLI command makes the server's next read fail. That is normal rather
-than exceptional, and the correct response is to try again a few times and then say so.
+a learner running one CLI command makes another process's next read fail. That is normal
+rather than exceptional, and the correct response is to try again a few times and then say so.
+
+Shared rather than client-specific, because the service layer needs it too: a command that
+commits and then opens a reader for its report can be refused on that read, and reporting a
+mutation that has already landed as a failure is worse than waiting 50ms for it.
 
 Retrying is decided by the error's own `retryable` flag, never by a list of codes here: a
 list in a second place is a list that drifts, and a new retryable refusal would be surfaced
-immediately by a server that kept its own copy.
+immediately by whichever caller kept its own copy.
+
+**What this cannot make safe.** A retryable refusal does not say whether anything was written
+before it. Retrying an operation that *writes* is only safe when a second attempt replays --
+which is what an idempotency key is for -- or when what is being retried is a read. Callers
+decide that; this function will retry whatever it is handed.
 """
 
 from __future__ import annotations

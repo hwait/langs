@@ -478,6 +478,14 @@ def test_an_unparseable_run_identifier_is_a_routing_miss(running: RunningServer)
 def test_a_body_field_of_the_wrong_type_is_refused_rather_than_guessed(
     running: RunningServer,
 ) -> None:
+    """`score: "high"` is not a number, and guessing what it meant is a mark nobody computed.
+
+    Refused as `invalid_contract` rather than `invalid_arguments`: the published schema is now
+    enforced and catches this first, which is the more precise of the two answers -- the body
+    does not match the document the caller was given. The per-field type checks in
+    `routes.Request` stay as the second line, for anything a schema does not constrain.
+    """
+
     opened = running.request("POST", "/runs", body={})
     run_id = opened.payload["data"]["run_id"]
     served = running.request("POST", f"/runs/{run_id}/tasks", body={})
@@ -489,7 +497,9 @@ def test_a_body_field_of_the_wrong_type_is_refused_rather_than_guessed(
     )
 
     assert answer.status == 400
-    assert answer.payload["error"]["code"] == "invalid_arguments"
+    assert answer.payload["error"]["code"] == "invalid_contract"
+    # The failing field by name, not merely that something failed.
+    assert [detail["field"] for detail in answer.payload["error"]["details"]] == ["score"]
 
 
 def test_every_refusal_the_transport_can_raise_is_classified_as_one(running: RunningServer) -> None:
@@ -669,3 +679,237 @@ def test_a_chunked_body_is_refused_rather_than_silently_read_as_empty(
     assert answer.status == 400
     assert payload["error"]["code"] == "invalid_contract"
     assert "length" in payload["error"]["message"].lower()
+
+
+# --- findings from independent review ---------------------------------------------------
+
+
+def test_an_idle_connection_does_not_monopolize_the_server(running: RunningServer) -> None:
+    """A single-threaded server plus keep-alive is one client holding the whole surface.
+
+    The first connection stays open waiting for a second request that never comes, and every
+    other connection waits behind it. Serializing requests was the decision; serializing
+    *clients* was not.
+    """
+
+    first = http.client.HTTPConnection("127.0.0.1", running.client.port, timeout=5)
+    second = http.client.HTTPConnection("127.0.0.1", running.client.port, timeout=5)
+    try:
+        headers = {server_module.TOKEN_HEADER: running.client.token}
+        first.request("GET", "/health", headers=headers)
+        answered = first.getresponse()
+        assert answered.status == 200
+        answered.read()
+
+        second.request("GET", "/health", headers=headers)
+
+        assert second.getresponse().status == 200
+    finally:
+        first.close()
+        second.close()
+
+
+def test_headers_are_matched_without_regard_to_capitalization(
+    running: RunningServer,
+) -> None:
+    """HTTP header names are case-insensitive, and a client is entitled to lowercase them."""
+
+    connection = http.client.HTTPConnection("127.0.0.1", running.client.port, timeout=10)
+    try:
+        connection.putrequest("GET", "/health", skip_host=True, skip_accept_encoding=True)
+        connection.putheader("host", f"127.0.0.1:{running.client.port}")
+        connection.putheader(server_module.TOKEN_HEADER.lower(), running.client.token)
+        connection.endheaders()
+        answer = connection.getresponse()
+        payload = json.loads(answer.read() or b"{}")
+    finally:
+        connection.close()
+
+    assert answer.status == 200, payload
+
+
+def test_a_keyless_mutation_is_not_retried_by_the_transport(
+    polish_workspace: PolishWorkspace, running: RunningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the read's own retries are exhausted, the mutation still runs exactly once.
+
+    This is the backstop: the transport does not retry a keyless mutation, because a retryable
+    refusal does not say whether anything was written before it.
+    """
+
+    def always_busy(*args: Any, **kwargs: Any) -> Any:
+        raise LinguaWikiError("database_busy", "held", retryable=True)
+
+    monkeypatch.setattr(assessment_service, "report", always_busy)
+
+    answer = running.request("POST", "/runs", body={})
+
+    from linguawiki.db.connection import open_reader
+
+    with open_reader(polish_workspace.paths) as database:
+        runs = int(database.scalar("SELECT count(*) FROM assessment_runs"))
+    assert runs == 1
+    assert answer.status == 503
+    assert answer.payload["error"]["retryable"] is True
+
+
+def test_a_retryable_failure_after_a_mutation_committed_does_not_repeat_it(
+    polish_workspace: PolishWorkspace, running: RunningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transport retried the whole handler, including mutations that had already landed.
+
+    `start` commits, releases its writer, and *then* opens a reader for its report. A
+    `database_busy` on that read is retryable and comes from a call that already wrote, so
+    retrying it opened a second run and answered 200 -- the learner's workspace gained a run
+    nobody asked for.
+    """
+
+    original = assessment_service.report
+    calls = {"count": 0}
+
+    def busy_once(*args: Any, **kwargs: Any) -> Any:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise LinguaWikiError("database_busy", "held", retryable=True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(assessment_service, "report", busy_once)
+
+    answer = running.request("POST", "/runs", body={})
+
+    from linguawiki.db.connection import open_reader
+
+    with open_reader(polish_workspace.paths) as database:
+        runs = int(database.scalar("SELECT count(*) FROM assessment_runs"))
+    assert runs == 1, "a committed mutation was repeated by the retry"
+    # And it succeeds: the command retries its own trailing *read*, so brief contention no
+    # longer reports a mutation that has already landed as one that failed.
+    assert answer.status == 200, answer.payload
+    assert answer.payload["data"]["run_id"]
+
+
+def test_a_keyed_mutation_is_still_retried_because_a_second_attempt_replays(
+    polish_workspace: PolishWorkspace, running: RunningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is exactly what makes a second attempt safe, so a keyed call keeps its retry."""
+
+    original = assessment_service.report
+    calls = {"count": 0}
+
+    def busy_once(*args: Any, **kwargs: Any) -> Any:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise LinguaWikiError("database_busy", "held", retryable=True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(assessment_service, "report", busy_once)
+
+    answer = running.request("POST", "/runs", body={"idempotency_key": "keyed-start"})
+
+    from linguawiki.db.connection import open_reader
+
+    with open_reader(polish_workspace.paths) as database:
+        runs = int(database.scalar("SELECT count(*) FROM assessment_runs"))
+    assert answer.status == 200, answer.payload
+    assert runs == 1
+
+
+def test_a_body_field_the_published_schema_forbids_is_refused(running: RunningServer) -> None:
+    """The document declared `additionalProperties: false` and nothing enforced it.
+
+    A mistyped `idempotency_keey` created a run with no key at all, so the caller believed
+    its retries were safe and every one of them opened another run.
+    """
+
+    answer = running.request("POST", "/runs", body={"idempotency_keey": "typo"})
+
+    assert answer.status == 400
+    assert answer.payload["error"]["code"] == "invalid_contract"
+    assert "idempotency_keey" in json.dumps(answer.payload["error"])
+
+
+def test_a_body_value_the_published_schema_forbids_is_refused(running: RunningServer) -> None:
+    answer = running.request("POST", "/runs", body={"run_type": "not-a-run-type"})
+
+    assert answer.status == 400
+    assert answer.payload["error"]["code"] == "invalid_contract"
+
+
+def test_every_http_mutation_is_audited_as_the_client(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """§3's rule is about every mutation, not the two that had no audit row at all."""
+
+    from linguawiki.db.connection import open_reader
+
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+    assert (
+        running.request("POST", f"/runs/{run_id}/status", body={"status": "paused"}).status == 200
+    )
+    assert running.request("POST", f"/runs/{run_id}/finalization", body={}).status == 200
+
+    with open_reader(polish_workspace.paths) as database:
+        rows = sorted(
+            (str(command), str(actor))
+            for command, actor in database.query(
+                "SELECT command, actor FROM audit_log WHERE command LIKE 'assessment.%'"
+            )
+        )
+
+    assert rows == [
+        ("assessment.finalize", "client"),
+        ("assessment.start", "client"),
+        ("assessment.status", "client"),
+    ]
+
+
+def test_starting_a_run_honours_the_key_it_advertises(running: RunningServer) -> None:
+    """The route published a conflict response and delegated to a key-only lookup."""
+
+    first = running.request(
+        "POST", "/runs", body={"idempotency_key": "start-1", "modalities": ["text"]}
+    )
+    assert first.status == 200, first.payload
+
+    changed = running.request(
+        "POST", "/runs", body={"idempotency_key": "start-1", "modalities": ["audio"]}
+    )
+
+    assert changed.status == 409
+    assert changed.payload["error"]["code"] == "idempotency_conflict"
+
+
+def test_retrying_a_start_with_the_same_request_replays_it(running: RunningServer) -> None:
+    body = {"idempotency_key": "start-2", "modalities": ["text"]}
+
+    first = running.request("POST", "/runs", body=body)
+    again = running.request("POST", "/runs", body=body)
+
+    assert again.status == 200, again.payload
+    assert again.payload["data"]["run_id"] == first.payload["data"]["run_id"]
+
+
+def test_finalizing_checks_the_key_before_returning_a_stored_result(
+    running: RunningServer,
+) -> None:
+    """A guard placed after the path it guards is not a guard -- including this one."""
+
+    run_id = running.request("POST", "/runs", body={}).payload["data"]["run_id"]
+    assert (
+        running.request(
+            "POST",
+            f"/runs/{run_id}/finalization",
+            body={"idempotency_key": "close-1", "reason": "one"},
+        ).status
+        == 200
+    )
+
+    reused = running.request(
+        "POST",
+        f"/runs/{run_id}/finalization",
+        body={"idempotency_key": "close-1", "reason": "two"},
+    )
+
+    assert reused.status == 409
+    assert reused.payload["error"]["code"] == "idempotency_conflict"
