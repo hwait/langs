@@ -132,6 +132,127 @@ def _calibrate(paths: object, run_id: str) -> None:
     )
 
 
+LISTENING_KEY = "pl.task.listening.02"
+
+
+def _tone() -> bytes:
+    """A third of a second of a generated tone: a real WAV, and nothing anybody said."""
+
+    import io
+    import math
+    import struct
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(8000)
+        output.writeframes(
+            b"".join(
+                struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / 8000)))
+                for i in range(2400)
+            )
+        )
+    return buffer.getvalue()
+
+
+def _listening(paths: object, *, root: Path) -> None:
+    """A pilot version with one recording, and a play of it recorded the way a page does.
+
+    The pilot ships no recording, so `assessment_task_plays` could not otherwise be
+    reached through the commands that own it. The recording is generated.
+    """
+
+    import shutil
+
+    from linguawiki.contracts import PackManifest
+    from linguawiki.packs.format import directory_digests, pack_content_address
+    from linguawiki.packs.stamp import stamp_pack
+
+    with open_reader(paths, clock=Clock()) as database:  # type: ignore[arg-type]
+        source = Path(str(pack_service.installed_pack(database, PACK_KEY)["source_path"]))
+    pack = root.parent / "pl-pilot-recorded"
+    shutil.copytree(source, pack)
+    (pack / "media").mkdir(exist_ok=True)
+    (pack / "media" / "listening-02.wav").write_bytes(_tone())
+    (pack / "assets").mkdir(exist_ok=True)
+    (pack / "assets" / "pl-a2-audio.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "lingua.pack.assets.v1",
+                "schema_version": 1,
+                "catalog_key": "pl-a2-audio",
+                "assets": [
+                    {
+                        "asset_key": "pl.audio.listening-02",
+                        "path": "media/listening-02.wav",
+                        "media_type": "audio/wav",
+                        "duration_ms": 300,
+                        "transcript": "synthetic tone",
+                        "provenance": {
+                            "origin_profile": "authored-original",
+                            "review_profile": "authored-verified",
+                            "lifecycle": "verified",
+                            "risk_tier": 2,
+                            "content_hash": "a" * 64,
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    form_path = pack / "assessments" / "pl-a2-calibration.json"
+    form = json.loads(form_path.read_text(encoding="utf-8"))
+    for task in form["tasks"]:
+        if task["stable_key"] == LISTENING_KEY:
+            task["presentation"] = {
+                **task["presentation"],
+                "audio": {"asset_key": "pl.audio.listening-02", "replay_allowance": 2},
+            }
+    form_path.write_text(json.dumps(form, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest_path = pack / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    major, minor, _patch = (int(part) for part in manifest["version"].split("."))
+    manifest["version"] = f"{major}.{minor + 1}.0"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    stamp_pack(pack)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"] = directory_digests(pack)
+    manifest["content_address"] = None
+    parsed = PackManifest.model_validate(manifest)
+    manifest["content_address"] = pack_content_address(parsed, dict(parsed.files))
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    pack_service.install(paths, pack, clock=Clock(), allow_update=True)  # type: ignore[arg-type]
+
+    run = assessment_service.start(
+        paths,  # type: ignore[arg-type]
+        dimensions=["listening"],
+        modalities=["audio"],
+        scoring="machine",
+        clock=Clock(),
+    )
+    served = assessment_service.next_task(paths, run=run.run_id, clock=Clock())  # type: ignore[arg-type]
+    assert isinstance(served, assessment_service.NextTaskReport)
+    assessment_service.record_play(
+        paths,  # type: ignore[arg-type]
+        run=run.run_id,
+        content_id=served.content_id,
+        idempotency_key="upgrade-fixture-play",
+        clock=Clock(),
+        actor="client",
+    )
+    assessment_service.record(
+        paths,  # type: ignore[arg-type]
+        run=run.run_id,
+        content_id=served.content_id,
+        response="dziesięć minut",
+        clock=Clock(),
+        actor="client",
+    )
+
+
 def _curriculum(paths: object) -> None:
     curriculum_service.import_curriculum(
         paths,  # type: ignore[arg-type]
@@ -856,6 +977,7 @@ def seed(root: Path) -> None:
     _session(paths)
     _material(paths)
     _spoken(paths, root=root)
+    _listening(paths, root=root)
     _job_row(paths)
 
 
