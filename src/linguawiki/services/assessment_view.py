@@ -65,6 +65,11 @@ class OutstandingTask(ContractModel):
     #: will refuse to compute. Derived from the served task type through the scoring
     #: policy, never re-decided by the client.
     needs_judge: bool = False
+    #: Plays recorded so far, and what a finite allowance has left (`None`: unlimited).
+    #: Read from the play rows, so a reloaded page, a resumed run, and a later sitting all
+    #: show the same number -- nothing about plays lives only in a page.
+    plays_used: int = 0
+    plays_remaining: int | None = None
 
 
 class RunScreen(ContractModel):
@@ -105,6 +110,18 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
     outstanding = []
     for content_id in assessment_service.outstanding_task_ids(database, run_id):
         shown = assessment_service.served_task_report(database, run_id, content_id=content_id)
+        audio = None if shown.presentation is None else shown.presentation.audio
+        used = (
+            0
+            if audio is None
+            else int(
+                database.scalar(
+                    "SELECT count(*) FROM assessment_task_plays "
+                    "WHERE run_id = ? AND content_id = ?",
+                    [run_id, content_id],
+                )
+            )
+        )
         outstanding.append(
             OutstandingTask(
                 content_id=content_id,
@@ -122,7 +139,13 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
                 rubric_version=shown.rubric_version,
                 permitted_help=shown.permitted_help,
                 answer_with=_answer_mode(shown.presentation),
-                plays_audio=shown.presentation is not None and shown.presentation.audio is not None,
+                plays_audio=audio is not None,
+                plays_used=used,
+                plays_remaining=(
+                    None
+                    if audio is None
+                    else assessment_service.plays_remaining(audio.replay_allowance, used)
+                ),
                 needs_judge=shown.task_type not in MACHINE_SCORABLE_TASK_TYPES,
             )
         )

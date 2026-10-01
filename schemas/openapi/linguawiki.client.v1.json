@@ -521,6 +521,23 @@
             "title": "Plays Audio",
             "type": "boolean"
           },
+          "plays_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Plays Remaining"
+          },
+          "plays_used": {
+            "default": 0,
+            "title": "Plays Used",
+            "type": "integer"
+          },
           "presentation": {
             "anyOf": [
               {

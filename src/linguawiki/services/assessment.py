@@ -455,6 +455,7 @@ def _outstanding_dimensions(database: Database, run_id: str) -> Mapping[str, str
 STARTED_EVENT = "assessment.started"
 SERVED_EVENT = "assessment.served"
 RECORDED_EVENT = "assessment.recorded"
+PLAYED_EVENT = "assessment.played"
 FINALIZED_EVENT = "assessment.finalized"
 
 
@@ -464,6 +465,12 @@ FINALIZED_EVENT = "assessment.finalized"
 #: here instead. `cli` is the default because the CLI is the entry point that existed first
 #: and a caller that forgets to say is, in practice, the CLI.
 DEFAULT_ACTOR = "cli"
+
+#: The surfaces that record every play of a recording before it is heard. Only they can
+#: establish a play count -- including zero, which is the claim that the learner answered
+#: without listening -- so `record` stores a count for their results and `NULL` for every
+#: other surface's, which is the truth about a CLI or skill that never saw the plays.
+PLAY_TRACKING_ACTORS: frozenset[str] = frozenset({"client"})
 
 
 #: Why a report names the task it names. `informativeness` is selection having run;
@@ -1582,7 +1589,7 @@ def record(
         served = database.one(
             "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
             "content_family, modality, is_anchor, content_hash, expected_json, "
-            "prompt_snapshot, rubric_json FROM assessment_run_tasks "
+            "prompt_snapshot, rubric_json, asset_identity_json FROM assessment_run_tasks "
             "WHERE run_id = ? AND content_id = ?",
             [run_id, content_id],
         )
@@ -1681,14 +1688,22 @@ def record(
         prior_snapshot = list(state.posterior)
         updated = record_score(state, candidate, score=resolved_score, level_count=len(levels))
         result_id = AssessmentId.new()
+        # Derived from the play rows, never accepted: a caller-supplied count would be one
+        # more place a caller could talk its way into a different claim. Only for a task
+        # that played a recording, and only from a surface that records plays.
+        play_count = (
+            _plays_used(database, run_id, content_id)
+            if served[13] is not None and actor in PLAY_TRACKING_ACTORS
+            else None
+        )
         with database.transaction() as transaction:
             now = transaction.now()
             transaction.execute(
                 "INSERT INTO assessment_results (result_id, run_id, content_id, dimension, "
                 "raw_score, rubric_json, response_excerpt, assessor_kind, assessor, confidence, "
                 "prior_json, posterior_json, difficulty, recorded_at, scoring_policy_version, "
-                "score_source, response_visibility, response_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "score_source, response_visibility, response_hash, play_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     str(result_id),
                     run_id,
@@ -1708,6 +1723,7 @@ def record(
                     score_source,
                     visibility,
                     response_hash,
+                    play_count,
                 ],
             )
             transaction.execute(
@@ -1756,6 +1772,155 @@ def record(
                     idempotency_key=idempotency_key,
                 )
         return _reported(run_report(database, run_id), warnings)
+
+
+class PlayReport(ContractModel):
+    """One play of a task's recording, recorded before it was heard."""
+
+    run_id: str
+    content_id: str
+    #: Plays recorded for this task, this one included.
+    plays_used: int
+    #: The snapshotted allowance, counted in plays: the first hearing is a play. `None` is
+    #: unlimited.
+    replay_allowance: int | None = None
+    #: `None` when the allowance is unlimited, so "none left" and "no limit" cannot be
+    #: confused by a client drawing the count.
+    plays_remaining: int | None = None
+
+
+def _plays_used(database: Database, run_id: str, content_id: str) -> int:
+    return int(
+        database.scalar(
+            "SELECT count(*) FROM assessment_task_plays WHERE run_id = ? AND content_id = ?",
+            [run_id, content_id],
+        )
+    )
+
+
+def plays_remaining(allowance: int | None, used: int) -> int | None:
+    """What a finite allowance has left. One answer, for the play path and the screen."""
+
+    return None if allowance is None else max(allowance - used, 0)
+
+
+def record_play(
+    paths: WorkspacePaths,
+    *,
+    content_id: str,
+    idempotency_key: str,
+    run: str | None = None,
+    track: str | None = None,
+    clock: Clock | None = None,
+    command: str = "assessment.play",
+    actor: str = DEFAULT_ACTOR,
+) -> PlayReport:
+    """Record that the learner is about to play a served task's recording.
+
+    Called *before* playback, and playback starts only when it succeeds: a play recorded
+    after the fact can be lost with the response, and a play past the allowance has to be
+    refused while it is still unheard.
+
+    The key is required. Plays accumulate, so a keyless retry would be a second play --
+    there is no state a retry could converge on, which is why `/status` may go keyless
+    and this may not.
+    """
+
+    active_clock = clock or SystemClock()
+    if not idempotency_key or not idempotency_key.strip():
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "a play needs an idempotency key, because plays accumulate and a retry without "
+            "one would count a second hearing",
+            details=(ErrorDetail(field="idempotency_key", reason="absent"),),
+        )
+    with open_writer(paths, command=command, clock=active_clock) as database:
+        track_id = None if track is None else learner_service.resolve_track(database, track)
+        run_id = resolve_run(database, run, track_id=track_id)
+        row = _run_row(database, run_id)
+        fingerprint = idempotency.request_hash(
+            operation=PLAYED_EVENT, run_id=run_id, content_id=content_id
+        )
+        # Before every guard: a retry of a play that landed is answered with that play,
+        # whatever the run or the task has become since.
+        replay = idempotency.resolve(
+            database, key=idempotency_key, event_type=PLAYED_EVENT, request_hash=fingerprint
+        )
+        if replay is not None:
+            allowance = replay.get("replay_allowance")
+            used = int(replay["plays_used"])
+            return PlayReport(
+                run_id=run_id,
+                content_id=content_id,
+                plays_used=used,
+                replay_allowance=None if allowance is None else int(allowance),
+                plays_remaining=plays_remaining(
+                    None if allowance is None else int(allowance), used
+                ),
+            )
+        _assert_running(run_id, status=str(row[4]), action="play a recording")
+        # Read from the record of the serving, which also proves the recording is still the
+        # one the task was served with: a replaced recording is a different question, and
+        # playing it would credit the learner's answer to the wrong one.
+        shown = served_task_report(database, run_id, content_id=content_id)
+        if shown.status != "served":
+            raise LinguaWikiError(
+                "assessment_task_settled",
+                f"{content_id} is {shown.status}, so its recording is no longer part of an "
+                "open question",
+                details=(ErrorDetail(field="content_id", reason=f"task is {shown.status}"),),
+            )
+        if shown.presentation is None or shown.presentation.audio is None or shown.asset is None:
+            raise LinguaWikiError(
+                "assessment_task_plays_nothing",
+                f"{content_id} was served with no recording, so there is nothing to play",
+                details=(ErrorDetail(field="content_id", reason="no recording"),),
+            )
+        allowance = shown.presentation.audio.replay_allowance
+        used = _plays_used(database, run_id, content_id)
+        if allowance is not None and used >= allowance:
+            raise LinguaWikiError(
+                "assessment_replays_exhausted",
+                f"{content_id} may be played {allowance} time(s), and has been",
+                details=(ErrorDetail(field="content_id", reason=f"allowance {allowance}"),),
+            )
+        with database.transaction() as transaction:
+            now = transaction.now()
+            transaction.execute(
+                "INSERT INTO assessment_task_plays (play_id, run_id, content_id, "
+                "idempotency_key, played_at) VALUES (?, ?, ?, ?, ?)",
+                [str(AssessmentId.new()), run_id, content_id, idempotency_key, now],
+            )
+            migration_module.record_audit_entry(
+                transaction,
+                command=command,
+                correlation_id=EventId.new(),
+                outcome="succeeded",
+                actor=actor,
+                affected_records_json=json.dumps([run_id, content_id], sort_keys=True),
+                after_summary=f"played {content_id} ({used + 1} of {allowance or 'unlimited'})",
+            )
+            migration_module.record_domain_event(
+                transaction,
+                event_type=PLAYED_EVENT,
+                aggregate_type="assessment_run",
+                aggregate_id=run_id,
+                correlation_id=EventId.new(),
+                payload_json=idempotency.payload(
+                    fingerprint,
+                    content_id=content_id,
+                    plays_used=used + 1,
+                    replay_allowance=allowance,
+                ),
+                idempotency_key=idempotency_key,
+            )
+        return PlayReport(
+            run_id=run_id,
+            content_id=content_id,
+            plays_used=used + 1,
+            replay_allowance=allowance,
+            plays_remaining=plays_remaining(allowance, used + 1),
+        )
 
 
 def set_status(
@@ -2361,9 +2526,12 @@ __all__ = [
     "AssessmentRunReport",
     "DimensionReport",
     "NextTaskReport",
+    "PlayReport",
     "finalize",
     "next_task",
+    "plays_remaining",
     "record",
+    "record_play",
     "report",
     "seed_declared_estimates",
     "set_status",

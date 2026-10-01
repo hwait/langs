@@ -20,7 +20,7 @@ from tests.support.clocks import AdvancingClock, FixedClock
 MANIFEST = "linguawiki.backup-manifest.v1"
 #: Every retained export shape. Each must still restore; only the one for this release's
 #: head is expected to match the *current* export shape.
-RETAINED_SCHEMA_VERSIONS = (7, 22, 23, 26, 29, 30, 31, 32)
+RETAINED_SCHEMA_VERSIONS = (7, 22, 23, 26, 29, 30, 31, 32, 33)
 HEAD_SCHEMA_VERSION = migration_module.head_version()
 
 

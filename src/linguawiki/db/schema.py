@@ -55,6 +55,7 @@ TABLE_ORDER: tuple[str, ...] = (
     "assessment_runs",
     "assessment_run_tasks",
     "assessment_results",
+    "assessment_task_plays",
     "assessment_item_exposures",
     "placement_dimension_state",
     "skill_estimates",
