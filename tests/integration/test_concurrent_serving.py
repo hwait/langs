@@ -803,3 +803,102 @@ def test_a_refused_hand_back_does_not_consume_its_key(
             )
         )
     assert claimed == 0
+
+
+def test_a_historical_key_whose_request_was_never_recorded_is_refused(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """`start` had a fallback that contradicted the rule two lines above it.
+
+    `idempotency.resolve` refuses a key whose recorded request is unknown, because sameness
+    that cannot be established must not be called a retry. The `assessment_runs` fallback then
+    returned the run anyway, so a caller asking for different dimensions under a key from an
+    older release was answered with the old run and told nothing.
+    """
+
+    import json
+
+    import pytest
+
+    from linguawiki.errors import LinguaWikiError
+
+    opened = assessment_service.start(
+        polish_workspace.paths,
+        modalities=["text"],
+        idempotency_key="legacy-start",
+        clock=polish_workspace.clock,
+    )
+    # The event shape the previous release wrote: the synthetic key, and no request hash.
+    with (
+        open_writer(polish_workspace.paths, command="test.legacy") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE domain_events SET idempotency_key = ?, payload_json = ? "
+            "WHERE idempotency_key = ?",
+            [
+                f"assessment.started:{opened.run_id}",
+                json.dumps({"run_type": "pilot-calibration"}),
+                "legacy-start",
+            ],
+        )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.start(
+            polish_workspace.paths,
+            modalities=["audio"],
+            idempotency_key="legacy-start",
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "idempotency_conflict"
+    assert opened.run_id in failure.value.payload.message
+
+
+def test_a_finalization_that_had_nothing_to_do_still_reserves_its_key(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A key whose operation succeeded as a no-op has still been spent on that operation.
+
+    Left unbound, it was indistinguishable from a key nobody had used, and could go on to open
+    a run -- so one key named two operations.
+    """
+
+    import pytest
+
+    from linguawiki.errors import LinguaWikiError
+
+    first = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    assessment_service.finalize(
+        polish_workspace.paths,
+        run=first.run_id,
+        idempotency_key="close-original",
+        clock=polish_workspace.clock,
+    )
+    settled = assessment_service.finalize(
+        polish_workspace.paths,
+        run=first.run_id,
+        idempotency_key="close-second",
+        clock=polish_workspace.clock,
+    )
+    assert settled.status == "finalized"
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.start(
+            polish_workspace.paths,
+            idempotency_key="close-second",
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "idempotency_conflict"
+    assert "assessment.finalized" in failure.value.payload.message
+    # And a retry of the no-op itself still replays rather than conflicting with itself.
+    assert (
+        assessment_service.finalize(
+            polish_workspace.paths,
+            run=first.run_id,
+            idempotency_key="close-second",
+            clock=polish_workspace.clock,
+        ).status
+        == "finalized"
+    )

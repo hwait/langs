@@ -139,6 +139,32 @@ deciding that two identical keyless `POST /runs` calls are one run — and openi
 calibrations for one track is something a learner may legitimately do. The trailing-read fix
 makes their assertion pass honestly instead.
 
+## Review round three — 2026-10-01
+
+Three gaps left by round two's fixes, all reproduced before fixing. Release gate: **2370
+passed, 1 skipped**, 93.50%.
+
+- **[P1] An exhausted post-commit read still advertised an unsafe retry.** Round two retried
+  the trailing report read, which closed the common case and left the tail: when those retries
+  ran out, a keyless `start` that had already committed answered 503 with `retryable: true`
+  *and* a `Retry-After` header — advice that creates a second run if followed. The right fix
+  was the one AGENTS.md already prescribes and I had not applied: a command reports through the
+  connection it already holds. `run_report(database, run_id)` inside the writer removes the
+  post-commit read entirely, so there is no retryable failure left to advertise, and
+  `_report_after_writing` and its retry are gone. The reviewer's fix was better than mine.
+- **[P2] A legacy `start` key bypassed request verification.** `idempotency.resolve` refuses a
+  key whose recorded request is unknown, because sameness that cannot be established must not
+  be called a retry — and the `assessment_runs` fallback I added two lines below it returned
+  the run anyway. A pre-upgrade key reused with different modalities answered 200. It refuses
+  now, naming the run so the caller can ask for it by id.
+- **[P2] A no-op finalization did not reserve its key.** Finalizing an already-finalized run
+  returned early without recording the key, so a key whose operation had *succeeded* was
+  indistinguishable from one nobody had used and could go on to open a run. One key, two
+  operations. The no-op now records its request identity, and a retry of it still replays.
+
+The common thread in all three is the same as round two's: a rule written down in this plan,
+then not applied at one of the places it governs.
+
 **Goal.** A loopback HTTP server exposing the read model and the calibration mutations,
 described by a generated OpenAPI 3.1 document. No UI; verified by contract tests and curl.
 

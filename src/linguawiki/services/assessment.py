@@ -75,7 +75,6 @@ from linguawiki.placement import (
     unavailable_reason,
 )
 from linguawiki.provenance import PROMOTED_LIFECYCLES
-from linguawiki.retrying import with_retry
 from linguawiki.services import estimates as estimate_service
 from linguawiki.services import evidence as evidence_service
 from linguawiki.services import learners as learner_service
@@ -384,22 +383,9 @@ def outstanding_task_ids(database: Database, run_id: str) -> tuple[str, ...]:
     )
 
 
-def _report_after_writing(
-    paths: WorkspacePaths, run_id: str, clock: Clock, warnings: Sequence[str] = ()
-) -> AssessmentRunReport:
-    """Report on a run whose writer has just closed, retrying a refusal of the *read*.
+def _reported(result: AssessmentRunReport, warnings: Sequence[str]) -> AssessmentRunReport:
+    """A run report carrying the warnings the command collected on its way to writing."""
 
-    These commands commit, release the writer, and only then open a reader -- because DuckDB
-    serves one connection per file and a writer that calls its own report deadlocks on its own
-    lock. That leaves a gap: another process can take the file in between, and the read is
-    refused with the retryable `database_busy`. Reported straight through, a mutation that had
-    already landed looked like a mutation that had failed, and any caller that retried it on
-    that basis performed it twice -- which is exactly how one `POST /runs` became two runs.
-
-    Only the read is retried here. The write is already done and is not repeated.
-    """
-
-    result = with_retry(lambda: report(paths, run=run_id, clock=clock))
     return result.model_copy(update={"warnings": (*result.warnings, *warnings)})
 
 
@@ -732,11 +718,25 @@ def start(
                 [idempotency_key],
             )
             if existing is not None:
-                # A run opened before the key carried a request hash. `resolve` found no
-                # event for it, so sameness cannot be established and this is the old
-                # behaviour, kept rather than turned into a refusal: the run exists and is
-                # the one the key names.
-                return run_report(database, str(existing[0]))
+                # A run opened before the key carried a request hash. Nothing records what
+                # that call asked for, so this one cannot be shown to be a retry of it --
+                # and `idempotency.resolve` refuses exactly this case, so returning the run
+                # here instead contradicted the rule two lines above it. A caller asking for
+                # different dimensions under a historical key was answered with the old run
+                # and told nothing.
+                raise LinguaWikiError(
+                    "idempotency_conflict",
+                    f"idempotency key {idempotency_key} already opened run {existing[0]}, "
+                    "but what it was asked for was not recorded, so this call cannot be "
+                    "shown to be a retry of it; use a new key, or ask for that run by id",
+                    details=(
+                        ErrorDetail(
+                            field="idempotency_key",
+                            reason="recorded request is unknown",
+                            context={"run_id": str(existing[0])},
+                        ),
+                    ),
+                )
         kinds = _dimension_kinds(pack_row["manifest_json"])
         requested = tuple(dimensions) if dimensions else tuple(kinds)
         unknown = sorted(set(requested) - set(kinds))
@@ -853,7 +853,7 @@ def start(
                 # one otherwise, which is what has always kept this event unique per run.
                 idempotency_key=idempotency_key or f"assessment.started:{run_id}",
             )
-    return _report_after_writing(paths, str(run_id), active_clock, warnings)
+        return _reported(run_report(database, str(run_id)), warnings)
 
 
 def _dimension_states(
@@ -1245,7 +1245,7 @@ def next_task(
                 )
         if handed is not None:
             return handed.model_copy(update={"warnings": tuple(warnings)})
-    return _report_after_writing(paths, run_id, active_clock, warnings)
+        return _reported(run_report(database, run_id), warnings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1696,7 +1696,7 @@ def record(
                     ),
                     idempotency_key=idempotency_key,
                 )
-    return _report_after_writing(paths, run_id, active_clock, warnings)
+        return _reported(run_report(database, run_id), warnings)
 
 
 def set_status(
@@ -1736,7 +1736,7 @@ def set_status(
                 before_summary=str(current[4]),
                 after_summary=status,
             )
-    return _report_after_writing(paths, run_id, active_clock)
+        return run_report(database, run_id)
 
 
 def finalize(
@@ -1777,6 +1777,24 @@ def finalize(
         ):
             return run_report(database, run_id)
         if str(row[4]) == "finalized":
+            # The run is already closed, so there is nothing to do -- but the key this call
+            # was made under still has to be reserved. Left unbound, a key that successfully
+            # "finalized" a run was indistinguishable from one nobody had used, and could go
+            # on to open a run instead: an idempotency key identifies one operation, and a
+            # key whose operation succeeded as a no-op has still been spent on it.
+            if idempotency_key is not None:
+                with database.transaction() as transaction:
+                    migration_module.record_domain_event(
+                        transaction,
+                        event_type=FINALIZED_EVENT,
+                        aggregate_type="assessment_run",
+                        aggregate_id=run_id,
+                        correlation_id=EventId.new(),
+                        payload_json=idempotency.payload(
+                            closing_fingerprint, reason=reason, already_finalized=True
+                        ),
+                        idempotency_key=idempotency_key,
+                    )
             return run_report(database, run_id)
         _assert_transition(run_id, current=str(row[4]), target="finalized")
         conditions = json.loads(str(row[6]))
@@ -1833,7 +1851,7 @@ def finalize(
                 payload_json=idempotency.payload(closing_fingerprint, reason=reason),
                 idempotency_key=idempotency_key or f"assessment.finalized:{run_id}",
             )
-    return _report_after_writing(paths, run_id, active_clock)
+        return run_report(database, run_id)
 
 
 def seed_declared_estimates(

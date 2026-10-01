@@ -728,13 +728,16 @@ def test_headers_are_matched_without_regard_to_capitalization(
     assert answer.status == 200, payload
 
 
-def test_a_keyless_mutation_is_not_retried_by_the_transport(
+def test_a_mutation_never_advertises_a_retry_that_would_repeat_it(
     polish_workspace: PolishWorkspace, running: RunningServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the read's own retries are exhausted, the mutation still runs exactly once.
+    """A keyless mutation that committed must not come back as retryable at all.
 
-    This is the backstop: the transport does not retry a keyless mutation, because a retryable
-    refusal does not say whether anything was written before it.
+    The first fix retried the trailing read and surfaced 503 when that budget ran out -- which
+    is advice that creates a second run if followed, and the `Retry-After` header made it
+    advice rather than a mere status. The report is now built through the connection the
+    command already holds, so there is no post-commit read to fail and nothing to advertise.
+    `report` is broken here to prove the mutation no longer depends on it.
     """
 
     def always_busy(*args: Any, **kwargs: Any) -> Any:
@@ -748,9 +751,9 @@ def test_a_keyless_mutation_is_not_retried_by_the_transport(
 
     with open_reader(polish_workspace.paths) as database:
         runs = int(database.scalar("SELECT count(*) FROM assessment_runs"))
+    assert answer.status == 200, answer.payload
     assert runs == 1
-    assert answer.status == 503
-    assert answer.payload["error"]["retryable"] is True
+    assert "Retry-After" not in answer.headers
 
 
 def test_a_retryable_failure_after_a_mutation_committed_does_not_repeat_it(
@@ -782,8 +785,7 @@ def test_a_retryable_failure_after_a_mutation_committed_does_not_repeat_it(
     with open_reader(polish_workspace.paths) as database:
         runs = int(database.scalar("SELECT count(*) FROM assessment_runs"))
     assert runs == 1, "a committed mutation was repeated by the retry"
-    # And it succeeds: the command retries its own trailing *read*, so brief contention no
-    # longer reports a mutation that has already landed as one that failed.
+    # And it succeeds, because the report no longer comes from a second connection at all.
     assert answer.status == 200, answer.payload
     assert answer.payload["data"]["run_id"]
 
