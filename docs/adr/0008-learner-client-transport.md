@@ -4,7 +4,13 @@ Status: accepted for the learner client (C1-C7), sequenced before Stage 8
 
 ## Decision
 
-The learner client is a local, single-user browser application served over HTTP on loopback. Its server ships in the core repository behind an optional dependency extra (`linguawiki[client]`), uses only `http.server` from the standard library, and imports the service layer directly rather than subprocessing the CLI.
+The learner client is a local, single-user browser application served over HTTP on loopback. Its server ships in the core repository, uses only `http.server` from the standard library, and imports the service layer directly rather than subprocessing the CLI.
+
+**Amended during C3:** the optional dependency extra (`linguawiki[client]`) this decision originally named is **not** declared. Because the server is stdlib-only, the extra would carry no dependencies: `pip install linguawiki` already ships the client, so `linguawiki[client]` would read as a boundary nothing enforces. The stdlib-only decision stands; it is expressed by the absence of a seventh runtime dependency rather than by a no-op extra.
+
+**Amended during C3:** the server is **single-threaded**. Measured against the pinned `duckdb==1.5.5`, a second read-only connection in the *same* process beside a held writer is refused with `ConnectionException`, which `_connect` reports as the retryable `database_busy` -- a retry that can never succeed, because the holder is this process. DuckDB does not refuse a second writer in one process at all; the application `flock` does, between two open file descriptions. A threaded server would therefore manufacture its own contention and spend the retry budget on it. Serializing requests is correct for one learner and is what makes a busy state mean something.
+
+**Decided during C3:** of the two relocation strategies below, the generator **hoists and rewrites** -- each snapshot's `$defs` lift into `components/schemas` under a namespaced name and every `#/$defs/...` pointer is rewritten. The document is self-contained, and a test asserts no `#/$defs/` reference survives assembly.
 
 The server is a **transport, not a second implementation**. Task selection, scoring, the posterior update, the stop rule, and every refusal stay in Python where ADR 0003 already puts them. The server adds routing, presentation assembly, and nothing else.
 
@@ -45,7 +51,8 @@ An assessment claim may not outlive the evidence it rests on. Results carrying a
 
 ## Enforced invariants
 
-- `scripts/generate_openapi.py --check` runs in `scripts/verify.py`; a stale committed document fails the gate, as `generate_schemas.py --check` already does.
+- `scripts/generate_openapi.py --check` runs in `scripts/verify.py`; a stale committed document fails the gate, as `generate_schemas.py --check` already does. The document is committed at `schemas/openapi/linguawiki.client.v1.json` -- a subdirectory, because the contract tests glob `schemas/*.json` and hold every date-time node to a rule written for JSON Schema snapshots.
+- An audit row for a mutation is written in the **service layer**, not in the server, so both entry points produce it. `actor` names the surface (`cli` or `client`); the command name does not differ between them.
 - The OpenAPI document reuses the committed `schemas/*.json` snapshots as components and does not redefine them;
   their internal `$defs` pointers are relocated or re-identified on assembly, and a nested `$ref` is asserted to
   resolve through the assembled document.

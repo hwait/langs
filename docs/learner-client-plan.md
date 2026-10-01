@@ -2,7 +2,7 @@
 title: "Learner Client Delivery Plan"
 status: draft
 project: lingua-wiki
-last_updated: 2026-09-29
+last_updated: 2026-10-01
 ---
 
 # Learner Client Delivery Plan
@@ -224,15 +224,22 @@ generated OpenAPI 3.1 document. No UI yet; verified by contract tests.
 **Depends on.** C1, C2a, C2b.
 
 **Work.**
-- Server in this repository behind `linguawiki[client]`, stdlib `http.server`, importing the
-  service layer directly. No business logic.
-- Bind loopback only, on a port recorded in the workspace.
+- Server in this repository, stdlib `http.server` only, importing the service layer
+  directly. No business logic, and **single-threaded**: in one process a second reader
+  beside a held writer is refused by DuckDB itself, so a threaded server would spend its
+  retry budget on contention it created. The `linguawiki[client]` extra is **not** declared
+  — with no dependencies to install it would be a boundary nothing enforces.
+- Bind loopback only, on a port recorded in `data/client-runtime.json`. The launch token is
+  never written to disk; it reaches the page through the URL fragment.
 - **Browser-origin protection**: `Host` allowlist, `Origin` validation on every mutation, and
   an ephemeral launch token minted per server start. Loopback is not a security boundary and
   DNS rebinding is a documented attack on local servers.
 - One reader per read, one writer per mutation, neither held across requests. Bounded retry on
   `writer_locked` and `database_busy`, surfaced honestly when exhausted.
-- A `command` name into the audit row for every mutation.
+- A `command` name into the audit row for every mutation, **written in the service layer**:
+  `next_task` and `record` write no audit row at all today, and adding one in the server
+  would give the server a better trail than the CLI. `actor` distinguishes the surface; the
+  command name stays the same.
 - **Operation-scoped idempotency keys bound to a canonical request hash**, for serving as well
   as recording. `next_task` takes no key today, so a retried serve consumes another task and
   burns its exposure. A same-payload retry replays the original result; a changed-payload
@@ -241,16 +248,21 @@ generated OpenAPI 3.1 document. No UI yet; verified by contract tests.
   server, and not deferred to C6. From C3 onward a browser and a CLI are live at once, so two
   serve calls with different idempotency keys could otherwise select two tasks in the same
   dimension before either answer moves the posterior. This is the guard that makes concurrent
-  use safe, so it ships with the first concurrent surface.
+  use safe, so it ships with the first concurrent surface. When no open dimension is free the
+  outstanding task is **re-served from its snapshot**, writing nothing — which needs one
+  migration, because `permitted_help` is the last thing a client reads that the served
+  snapshot does not keep.
 - Read model: one call per screen, assembled from `open_reader`.
 - `scripts/generate_openapi.py`, document committed, `--check` in the gate, sharing the CLI's
   error payload schema.
-- **Reference relocation for the reused schemas.** 17 of the committed snapshots contain
-  `#/$defs/...` pointers. `#` is the *document* root, so embedding them unchanged under
+- **Reference relocation for the reused schemas.** Most of the committed snapshots contain
+  `#/$defs/...` pointers — 18 of 21 at the time of writing, and the count is derived from
+  `SCHEMA_MODELS` rather than quoted, because an earlier draft of this line said 17 and was
+  stale within one stage. `#` is the *document* root, so embedding them unchanged under
   `components/schemas` makes those pointers resolve against the OpenAPI document and fail.
-  Either rewrite them to `#/components/schemas/...` on assembly, or embed each snapshot as a
-  separately identified schema resource with its own `$id`. Pick one and test nested
-  references through the assembled document.
+  Decided: **hoist and rewrite** — `$defs` lift into `components/schemas` under a
+  namespaced name and every pointer is rewritten. A test asserts no `#/$defs/` survives and
+  that a nested reference resolves through the assembled document.
 
 **Verification.**
 - Server and CLI run concurrently: reads *and* writes may fail with `database_busy` or
