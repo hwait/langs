@@ -151,3 +151,201 @@ def test_a_row_served_before_the_column_existed_is_not_damage(
     check = _checks(polish_workspace)["served_help_allowance_wellformed"]
 
     assert check.status == "ok", check.message  # type: ignore[attr-defined]
+
+
+def _exposure(workspace: PolishWorkspace, content_id: str) -> tuple[int, int, object]:
+    with open_reader(workspace.paths) as database:
+        row = database.one(
+            "SELECT exposure_count, answered_count, last_exposed_at "
+            "FROM assessment_item_exposures WHERE content_id = ?",
+            [content_id],
+        )
+    assert row is not None
+    return int(row[0]), int(row[1]), row[2]
+
+
+def _row_count(workspace: PolishWorkspace, run_id: str) -> int:
+    with open_reader(workspace.paths) as database:
+        return int(
+            database.scalar("SELECT count(*) FROM assessment_run_tasks WHERE run_id = ?", [run_id])
+        )
+
+
+def test_a_dimension_holding_an_unanswered_task_is_not_served_another(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """Two serves with no answer between them probed one dimension twice."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    first = _serve_one(polish_workspace, run.run_id)
+    second = _serve_one(polish_workspace, run.run_id)
+
+    assert second.dimension != first.dimension
+    assert not second.served_again
+
+
+def test_when_every_open_dimension_is_outstanding_the_task_is_handed_back(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A screen with unanswered work on it still has work on it."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    fresh: list[assessment_service.NextTaskReport] = []
+    while True:
+        served = _serve_one(polish_workspace, run.run_id)
+        if served.served_again:
+            break
+        fresh.append(served)
+        assert len(fresh) < 20, "the guard never engaged"
+
+    assert len({report.dimension for report in fresh}) == len(fresh), "a dimension repeated"
+    assert served.content_id in {report.content_id for report in fresh}
+    # The least-progressed open dimension, which with nothing answered is the first by
+    # name -- the order `next_task` already sorts by, not a second rule.
+    assert served.dimension == min(report.dimension for report in fresh)
+    assert served.selection_reason == "outstanding"
+
+
+def test_handing_a_task_back_writes_nothing(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """The exposure was recorded when it was first served.
+
+    Counting it twice pushes the item out of the six-month reuse window on the strength of
+    a task the learner never answered once.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    outstanding: list[str] = []
+    while True:
+        served = _serve_one(polish_workspace, run.run_id)
+        if served.served_again:
+            break
+        outstanding.append(served.content_id)
+
+    rows_before = _row_count(polish_workspace, run.run_id)
+    exposure_before = _exposure(polish_workspace, served.content_id)
+
+    again = _serve_one(polish_workspace, run.run_id)
+
+    assert again.served_again
+    assert again.content_id == served.content_id
+    assert _row_count(polish_workspace, run.run_id) == rows_before
+    assert _exposure(polish_workspace, served.content_id) == exposure_before
+
+
+def test_a_task_handed_back_is_the_one_that_was_served_not_the_one_the_pack_now_holds(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    while True:
+        served = _serve_one(polish_workspace, run.run_id)
+        if served.served_again:
+            break
+    _rewrite_bank_help(polish_workspace, served.content_id, CONSTRAINED_HELP)
+
+    again = _serve_one(polish_workspace, run.run_id)
+
+    assert again.content_id == served.content_id
+    assert again.permitted_help == served.permitted_help != CONSTRAINED_HELP
+    assert again.prompt == served.prompt
+    assert again.rubric == served.rubric
+    assert again.presentation == served.presentation
+
+
+def test_a_damaged_snapshot_refuses_rather_than_serving_a_different_dimension(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """Falling through would hide the damage behind a task that happens to work."""
+
+    import pytest
+
+    from linguawiki.errors import LinguaWikiError
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    while True:
+        served = _serve_one(polish_workspace, run.run_id)
+        if served.served_again:
+            break
+    with (
+        open_writer(polish_workspace.paths, command="test.damage") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE assessment_run_tasks SET presentation_json = ? "
+            "WHERE run_id = ? AND content_id = ?",
+            ['{"kind": "unheard-of"}', run.run_id, served.content_id],
+        )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.next_task(
+            polish_workspace.paths, run=run.run_id, clock=polish_workspace.clock
+        )
+
+    assert failure.value.payload.code == "assessment_presentation_malformed"
+
+
+def _cli_next(workspace: PolishWorkspace, run_id: str) -> dict[str, object]:
+    """Serve through a real second process, which is the only honest form of this test.
+
+    One caller invoked twice passes against an in-process cache; two processes is what a
+    browser beside a CLI actually is.
+    """
+
+    import json
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "linguawiki",
+            "assessment",
+            "next",
+            "--run",
+            run_id,
+            "--workspace",
+            str(workspace.root),
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload: dict[str, object] = json.loads(result.stdout)
+    assert payload["ok"] is True, payload
+    data: dict[str, object] = payload["data"]  # type: ignore[assignment]
+    return data
+
+
+def test_two_independent_callers_cannot_hold_two_tasks_in_one_dimension(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_one(polish_workspace, run.run_id)
+
+    through_the_cli = _cli_next(polish_workspace, run.run_id)
+
+    assert through_the_cli["dimension"] != served.dimension
+    assert through_the_cli["content_id"] != served.content_id
+
+
+def test_the_cli_is_handed_back_the_task_the_service_call_left_open(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """The guard and the hand-back are one rule, so both processes see the same one."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    while True:
+        served = _serve_one(polish_workspace, run.run_id)
+        if served.served_again:
+            break
+
+    through_the_cli = _cli_next(polish_workspace, run.run_id)
+
+    assert through_the_cli["served_again"] is True
+    assert through_the_cli["content_id"] == served.content_id
+    assert through_the_cli["selection_reason"] == "outstanding"

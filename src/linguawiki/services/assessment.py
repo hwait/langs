@@ -124,10 +124,18 @@ class NextTaskReport(ContractModel):
     asset: ServedAsset | None = None
     rubric: dict[str, object] = Field(default_factory=dict)
     rubric_version: int = 1
-    permitted_help: str = "none"
+    #: `None` only when this report hands back a task served before migration 0032, whose
+    #: snapshot holds no allowance. A fresh serve always names one. Absence is reported as
+    #: absence rather than as `"none"`, which would be a claim that help was refused.
+    permitted_help: str | None = "none"
     selection_reason: str = "informativeness"
     remaining_open_dimensions: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: True when this is the task the run was already holding, handed back rather than
+    #: selected. Nothing was written, no exposure was counted, and the posterior has not
+    #: moved -- a caller that treated it as a new task would be crediting the learner with
+    #: having faced two.
+    served_again: bool = False
 
 
 class AssessmentRunReport(ContractModel):
@@ -348,6 +356,34 @@ def _excluded_task_ids(
         )
     }
     return tuple(sorted(served | recent))
+
+
+def _outstanding_dimensions(database: Database, run_id: str) -> Mapping[str, str]:
+    """Dimensions holding a task that was served and never settled, to their task.
+
+    `_excluded_task_ids` excludes served *content*; nothing excluded the *dimension*, so
+    two serves with different idempotency keys selected two tasks in one dimension before
+    either answer moved the posterior -- and `select_task` probes the boundary of the
+    current posterior, so both probed the same place and one of them was wasted exposure.
+
+    `skipped` and `answered` are settled. Only `served` is outstanding.
+    """
+
+    return {
+        str(dimension): str(content_id)
+        for dimension, content_id in database.query(
+            "SELECT dimension, content_id FROM assessment_run_tasks "
+            "WHERE run_id = ? AND status = 'served' ORDER BY sequence",
+            [run_id],
+        )
+    }
+
+
+#: Why a report names the task it names. `informativeness` is selection having run;
+#: `outstanding` is the run handing back what it was already holding, which is not a
+#: selection at all -- letting the default stand would credit the report to a computation
+#: nobody performed.
+HANDED_BACK = "outstanding"
 
 
 #: Which run statuses each status may become. A closed run is closed: `finalized` is the
@@ -762,6 +798,60 @@ def _serve_presentation(
     return shown.model_copy(update={"choices": tuple(order), "order": "fixed"})
 
 
+def _hand_back(
+    database: Database, run_id: str, *, content_id: str, open_dimensions: Sequence[str]
+) -> NextTaskReport:
+    """The task this run is already holding, read from the record of its serving.
+
+    Not from the bank, and not through `select_task`: selection would probe the boundary of
+    a posterior no answer has moved and propose a *different* task, under a report that
+    claimed the learner was being asked the one they already have open.
+
+    Nothing is written. The exposure row was created when the task was first served, and
+    incrementing it would push the item out of the six-month reuse window on the strength
+    of a task the learner never answered once.
+    """
+
+    shown = served_task_report(database, run_id, content_id=content_id)
+    if shown.prompt is None:
+        # A row served before 0030 kept no prompt, so there is nothing to put the learner
+        # in front of. Refusing names the run that cannot answer for itself; falling back
+        # to the bank would ask a question this sitting has no record of having asked.
+        raise LinguaWikiError(
+            "assessment_task_unrecorded",
+            f"run {run_id} recorded no prompt for the task it is holding, so it cannot be "
+            "shown again; abandon the run and start a new one",
+            details=(ErrorDetail(field="content_id", reason="served facts are missing"),),
+        )
+    stable_key = database.scalar(
+        "SELECT stable_key FROM content_records WHERE content_id = ?", [content_id]
+    )
+    return NextTaskReport(
+        run_id=run_id,
+        dimension=shown.dimension,
+        sequence=shown.sequence,
+        content_id=content_id,
+        # Read live, and correctly so: a content ID is derived from
+        # `(pack_key, kind, stable_key)`, so the key cannot change without changing the ID
+        # this row names. It is identity, not content, and does not belong in a snapshot.
+        stable_key=str(stable_key),
+        task_type=shown.task_type,
+        modality=shown.modality,
+        level_code=shown.level_code,
+        difficulty=shown.difficulty,
+        content_family=shown.content_family,
+        prompt=shown.prompt,
+        presentation=shown.presentation,
+        asset=shown.asset,
+        rubric=shown.rubric,
+        rubric_version=shown.rubric_version,
+        permitted_help=shown.permitted_help,
+        selection_reason=HANDED_BACK,
+        remaining_open_dimensions=tuple(open_dimensions),
+        served_again=True,
+    )
+
+
 def next_task(
     paths: WorkspacePaths,
     *,
@@ -795,8 +885,13 @@ def next_task(
         # Serve the least-progressed open dimension first, so a run that stops early has
         # spread its evidence rather than finishing one dimension and testing no other.
         open_states.sort(key=lambda state: (state.tasks_used, state.dimension))
+        # A dimension holding an unanswered task is not eligible for another. The order
+        # among the rest is unchanged, so the spread rule above still decides which of the
+        # *free* dimensions goes first.
+        outstanding = _outstanding_dimensions(database, run_id)
+        free_states = [state for state in open_states if state.dimension not in outstanding]
         warnings: list[str] = []
-        for state in open_states:
+        for state in free_states:
             selection = select_task(
                 state, candidates, available_modalities=available, excluded=excluded
             )
@@ -948,6 +1043,19 @@ def next_task(
                 ),
                 warnings=tuple(warnings),
             )
+        # Nothing fresh could be served. An open dimension still holding an unanswered
+        # task has work on it, so the run is not finished and must not report as though it
+        # were: hand that task back instead. The states are already sorted, so this is
+        # the least-progressed one.
+        held = [state for state in open_states if state.dimension in outstanding]
+        if held:
+            handed = _hand_back(
+                database,
+                run_id,
+                content_id=outstanding[held[0].dimension],
+                open_dimensions=[state.dimension for state in held],
+            )
+            return handed.model_copy(update={"warnings": tuple(warnings)})
     result = report(paths, run=run_id, clock=active_clock)
     return result.model_copy(update={"warnings": (*result.warnings, *warnings)})
 
