@@ -253,3 +253,99 @@ def test_a_caller_cannot_supply_a_play_count(client: Client) -> None:
     )
 
     assert answer.code == "invalid_contract"
+
+
+# --- discovery -----------------------------------------------------------------------
+
+
+@pytest.fixture
+def plain(polish_workspace: PolishWorkspace) -> Iterator[Client]:
+    with serving(polish_workspace.paths, polish_workspace.clock) as running:
+        yield running
+
+
+def _open(client: Client, **extra: Any) -> str:
+    return str(client.post("/runs", {"idempotency_key": key(), **extra}).data["run_id"])
+
+
+def test_a_fresh_page_finds_the_runs_it_can_resume_newest_first(plain: Client) -> None:
+    older = _open(plain)
+    paused = _open(plain, scoring="machine")
+    plain.post(f"/runs/{paused}/status", {"status": "paused"})
+    closed = _open(plain)
+    plain.post(f"/runs/{closed}/status", {"status": "abandoned"})
+
+    listed = plain.get("/runs").data
+
+    assert [run["run_id"] for run in listed["runs"]] == [paused, older]
+    assert [run["status"] for run in listed["runs"]] == ["paused", "in-progress"]
+    assert listed["runs"][0]["scoring"] == "machine"
+    assert listed["omitted"] == 0
+
+
+def test_discovery_filters_by_status(plain: Client) -> None:
+    _open(plain)
+    paused = _open(plain)
+    plain.post(f"/runs/{paused}/status", {"status": "paused"})
+
+    listed = plain.get("/runs?status=paused").data
+
+    assert [run["run_id"] for run in listed["runs"]] == [paused]
+
+
+def test_discovery_lists_only_resumable_runs(plain: Client) -> None:
+    answer = plain.get("/runs?status=finalized")
+
+    assert answer.code == "invalid_contract"
+
+
+def test_discovery_refuses_a_query_it_does_not_publish(plain: Client) -> None:
+    answer = plain.get("/runs?limit=5")
+
+    assert answer.code == "invalid_contract"
+
+
+def test_discovery_names_the_track_it_was_asked_about(
+    polish_workspace: PolishWorkspace, plain: Client
+) -> None:
+    _open(plain)
+
+    mine = plain.get(f"/runs?track={polish_workspace.track_id}").data
+    nobody = plain.get("/runs?track=trk_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+
+    assert len(mine["runs"]) == 1
+    assert mine["track_id"] == polish_workspace.track_id
+    assert nobody.status == 404
+
+
+def test_a_query_string_does_not_hide_a_route(plain: Client) -> None:
+    """Routing reads the path; a query on a route that takes none is refused by name."""
+
+    run_id = _open(plain)
+
+    assert plain.get(f"/runs/{run_id}/screen?x=1").code == "invalid_contract"
+    assert plain.get("/health?x=1").status == 200
+
+
+def test_the_launch_url_can_carry_a_run_reference(polish_workspace: PolishWorkspace) -> None:
+    from linguawiki.client import server as server_module
+
+    run_id = "asm_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    server = server_module.build_server(
+        polish_workspace.paths, clock=polish_workspace.clock, run=run_id
+    )
+    try:
+        assert server.launch_url.endswith(f"#token={server.token}&run={run_id}")
+    finally:
+        server.close()
+
+
+def test_a_launch_reference_that_is_not_a_run_is_refused_before_binding(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    from linguawiki.client import server as server_module
+    from linguawiki.errors import LinguaWikiError
+
+    with pytest.raises(LinguaWikiError) as refused:
+        server_module.build_server(polish_workspace.paths, run="not-a-run")
+    assert refused.value.payload.code == "invalid_arguments"

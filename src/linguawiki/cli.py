@@ -527,6 +527,10 @@ def _client_parser(subcommands: Any) -> None:
         action="store_true",
         help="print the launch URL instead of opening a browser",
     )
+    serve.add_argument(
+        "--run",
+        help="open this run in the page; without it the page offers the newest resumable run",
+    )
     _add_workspace(serve)
 
 
@@ -2406,7 +2410,7 @@ def _run_client(args: argparse.Namespace, clock: Clock, command: str) -> int:
     from linguawiki.client import server as client_server
 
     paths = _pack_workspace(args)
-    client = client_server.build_server(paths, port=args.port, clock=clock)
+    client = client_server.build_server(paths, port=args.port, clock=clock, run=args.run)
     # On stderr, so `--format json` output on stdout stays a single parseable document.
     print(f"LinguaWiki client listening on {client.origin}", file=sys.stderr)
     print(f"open {client.launch_url}", file=sys.stderr)

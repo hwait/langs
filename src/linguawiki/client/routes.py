@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel
@@ -69,6 +69,9 @@ class Request:
     body: Mapping[str, Any]
     clock: Clock
     paths: WorkspacePaths
+    #: The query string, one value per name. Only a route that publishes a query schema
+    #: receives one; every other route refuses a query rather than ignoring it.
+    query: Mapping[str, str] = field(default_factory=dict)
 
     def optional(self, name: str, kind: type[Any]) -> Any:
         """A body field of the expected type, or `None` when it is absent.
@@ -136,6 +139,9 @@ class Route:
     #: an envelope. Its handler returns an object carrying `media_type` and `data`; a
     #: refusal is still the JSON error envelope, so a client reads failures one way.
     binary: str | None = None
+    #: The query parameters this route reads, as a JSON Schema object over string values.
+    #: Validated like a body: a parameter the document does not publish is refused.
+    query_schema: Mapping[str, Any] | None = None
 
 
 def _start(request: Request) -> Any:
@@ -207,6 +213,16 @@ def _finalize(request: Request) -> Any:
     )
 
 
+def _discover(request: Request) -> Any:
+    status = request.query.get("status")
+    return assessment_service.resumable_runs(
+        request.paths,
+        track=request.query.get("track"),
+        statuses=None if status is None else status.split(","),
+        clock=request.clock,
+    )
+
+
 def _recording(request: Request) -> Any:
     return assessment_service.served_recording(
         request.paths,
@@ -259,6 +275,25 @@ ROUTES: tuple[Route, ...] = (
             }
         ),
         response_models=(assessment_service.AssessmentRunReport,),
+    ),
+    Route(
+        "GET",
+        re.compile(r"^/runs$"),
+        "assessment.discover",
+        _discover,
+        mutates=False,
+        summary="The runs a page holding only its launch token can resume, newest first",
+        query_schema=_body(
+            {
+                "track": {"type": "string", "minLength": 1},
+                "status": {
+                    "type": "string",
+                    "pattern": "^(in-progress|paused)(,(in-progress|paused))*$",
+                    "description": "Comma-separated; resumable statuses only.",
+                },
+            }
+        ),
+        response_models=(assessment_service.RunListReport,),
     ),
     Route(
         "GET",

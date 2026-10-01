@@ -278,6 +278,11 @@ def document(schema_directory: Path) -> dict[str, Any]:
             parameters.append(RUN_ID_PARAMETER)
         if "{content_id}" in template:
             parameters.append(CONTENT_ID_PARAMETER)
+        if route.query_schema is not None:
+            parameters.extend(
+                {"name": name, "in": "query", "required": False, "schema": dict(schema)}
+                for name, schema in route.query_schema["properties"].items()
+            )
         if route.mutates:
             parameters.append(ORIGIN_PARAMETER)
         if parameters:

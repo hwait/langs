@@ -671,6 +671,34 @@
         "title": "PresentationChoice",
         "type": "object"
       },
+      "RunListReport": {
+        "additionalProperties": false,
+        "description": "The runs a fresh page could resume, newest first, for one track.",
+        "properties": {
+          "omitted": {
+            "default": 0,
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "runs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AssessmentRunReport"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track_id"
+        ],
+        "title": "RunListReport",
+        "type": "object"
+      },
       "RunScreen": {
         "additionalProperties": false,
         "description": "The whole state of one run, in one read.",
@@ -1121,6 +1149,141 @@
       }
     },
     "/runs": {
+      "get": {
+        "operationId": "assessment_discover",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "track",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "description": "Comma-separated; resumable statuses only.",
+              "pattern": "^(in-progress|paused)(,(in-progress|paused))*$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/RunListReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The runs a page holding only its launch token can resume, newest first"
+      },
       "post": {
         "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
         "operationId": "assessment_start",

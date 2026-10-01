@@ -23,6 +23,7 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
+from urllib.parse import parse_qsl
 
 from jsonschema import Draft202012Validator
 
@@ -159,11 +160,12 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 security.assert_single_valued(repeated)
                 security.assert_host(headers, port=int(client["port"]))
                 security.assert_token(headers, expected=str(client["token"]))
-                if self.path == "/health" and method == "GET":
+                path, query = _split_target(self.path)
+                if path == "/health" and method == "GET":
                     command = "client.health"
                     self._respond(200, responses.success(command, _health(), clock))
                     return
-                found = routes.match(method, self.path)
+                found = routes.match(method, path)
                 if found is None:
                     self._route_miss(method)
                     return
@@ -173,7 +175,10 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                     security.assert_origin(headers, origin=str(client["origin"]))
                 body = self._read_body()
                 _assert_declared_shape(body, route)
-                request = routes.Request(path_values=values, body=body, clock=clock, paths=paths)
+                _assert_declared_query(query, route)
+                request = routes.Request(
+                    path_values=values, body=body, clock=clock, paths=paths, query=query
+                )
                 # One reader per read, one writer per mutation, neither held across
                 # requests: the service call opens and closes its own connection inside
                 # this block, and the response is written after it has closed.
@@ -220,7 +225,7 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 )
 
         def _route_miss(self, method: str) -> None:
-            allowed = routes.methods_for(self.path)
+            allowed = routes.methods_for(_split_target(self.path)[0])
             if allowed:
                 # "Wrong verb" and "no such thing" send a caller to different places.
                 self._refuse(
@@ -387,6 +392,54 @@ def _assert_declared_shape(body: dict[str, Any], route: routes.Route) -> None:
             for failure in failures
         ),
     )
+
+
+def _split_target(target: str) -> tuple[str, dict[str, str]]:
+    """The path a request names, and its query as one value per name.
+
+    Routing reads the path alone, so a query never hides a route. A name sent twice is
+    refused rather than resolved, for the reason a repeated header is: two readers would
+    pick different values.
+    """
+
+    path, _, raw = target.partition("?")
+    pairs = parse_qsl(raw, keep_blank_values=True)
+    names = [name for name, _ in pairs]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise LinguaWikiError(
+            "invalid_contract",
+            f"query parameter {', '.join(repeated)} was sent more than once",
+            details=(ErrorDetail(field="query", reason="repeated"),),
+        )
+    return path, dict(pairs)
+
+
+def _assert_declared_query(query: dict[str, str], route: routes.Route) -> None:
+    """A query is validated like a body, and a route that publishes none refuses one."""
+
+    if route.query_schema is None:
+        if query:
+            raise LinguaWikiError(
+                "invalid_contract",
+                f"{route.command} takes no query parameters, and {sorted(query)} were sent",
+                details=(ErrorDetail(field="query", reason="not published"),),
+            )
+        return
+    failures = list(Draft202012Validator(dict(route.query_schema)).iter_errors(query))
+    if failures:
+        raise LinguaWikiError(
+            "invalid_contract",
+            f"the query does not match the published schema for {route.command}: "
+            f"{failures[0].message}",
+            details=tuple(
+                ErrorDetail(
+                    field=".".join(str(part) for part in failure.path) or "query",
+                    reason=failure.message,
+                )
+                for failure in failures
+            ),
+        )
 
 
 def _too_large() -> LinguaWikiError:

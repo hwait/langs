@@ -2529,6 +2529,65 @@ def _assert_no_presentation_was_lost(
     )
 
 
+#: The statuses a run can be resumed from. Discovery lists nothing else, because a page
+#: offering a finalized or abandoned run would be offering work that cannot be done.
+RESUMABLE_STATUSES: tuple[str, ...] = ("in-progress", "paused")
+#: How many runs one discovery answer carries. A learner has a handful of open runs; the
+#: bound exists so the answer has one, and what it leaves out is counted in `omitted`.
+DISCOVERY_LIMIT = 20
+
+
+class RunListReport(ContractModel):
+    """The runs a fresh page could resume, newest first, for one track."""
+
+    track_id: str
+    runs: tuple[AssessmentRunReport, ...] = ()
+    #: Resumable runs beyond the bound. Half a list looks exactly like a short one, so the
+    #: count of what was left out travels with what was kept.
+    omitted: int = 0
+
+
+def resumable_runs(
+    paths: WorkspacePaths,
+    *,
+    track: str | None = None,
+    statuses: Sequence[str] | None = None,
+    clock: Clock | None = None,
+) -> RunListReport:
+    """The runs a page that holds only a launch token can find and offer to resume.
+
+    Every read route needs a run identifier and the launch URL carries only the token, so
+    without this a fresh page cannot find the run it should resume. The track resolves
+    exactly as it does for every other command -- the workspace's only active track when
+    none is named -- so a run is never offered to the wrong learner's page.
+    """
+
+    wanted = tuple(statuses) if statuses else RESUMABLE_STATUSES
+    unknown = sorted(set(wanted) - set(RESUMABLE_STATUSES))
+    if unknown:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            f"only resumable runs can be discovered; {unknown} is not one of "
+            f"{list(RESUMABLE_STATUSES)}",
+            details=(ErrorDetail(field="status", reason="not resumable"),),
+        )
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        track_id = learner_service.resolve_track(database, track)
+        placeholders = ", ".join("?" for _ in wanted)
+        rows = database.query(
+            "SELECT run_id FROM assessment_runs "
+            f"WHERE track_id = ? AND status IN ({placeholders}) "
+            "ORDER BY started_at DESC, run_id DESC",
+            [track_id, *wanted],
+        )
+        kept = rows[:DISCOVERY_LIMIT]
+        return RunListReport(
+            track_id=track_id,
+            runs=tuple(run_report(database, str(row[0])) for row in kept),
+            omitted=len(rows) - len(kept),
+        )
+
+
 def report(
     paths: WorkspacePaths,
     *,
@@ -2626,12 +2685,14 @@ __all__ = [
     "DimensionReport",
     "NextTaskReport",
     "PlayReport",
+    "RunListReport",
     "finalize",
     "next_task",
     "plays_remaining",
     "record",
     "record_play",
     "report",
+    "resumable_runs",
     "seed_declared_estimates",
     "served_recording",
     "set_status",
