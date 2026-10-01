@@ -349,3 +349,80 @@ def test_the_cli_is_handed_back_the_task_the_service_call_left_open(
     assert through_the_cli["served_again"] is True
     assert through_the_cli["content_id"] == served.content_id
     assert through_the_cli["selection_reason"] == "outstanding"
+
+
+def _audit(workspace: PolishWorkspace) -> list[tuple[str, str, str]]:
+    with open_reader(workspace.paths) as database:
+        return [
+            (str(actor), str(command), str(affected))
+            for actor, command, affected in database.query(
+                "SELECT actor, command, affected_records_json FROM audit_log "
+                "ORDER BY recorded_at, audit_id"
+            )
+        ]
+
+
+def test_serving_and_scoring_each_leave_an_audit_row(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """The two mutations the client loop runs constantly wrote no audit row at all."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_one(polish_workspace, run.run_id)
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        score=1.0,
+        clock=polish_workspace.clock,
+    )
+
+    commands = [command for _, command, _ in _audit(polish_workspace)]
+
+    assert commands.count("assessment.next") == 1
+    assert commands.count("assessment.record") == 1
+    served_row = next(row for row in _audit(polish_workspace) if row[1] == "assessment.next")
+    assert served.content_id in served_row[2]
+    assert run.run_id in served_row[2]
+
+
+def test_the_audit_row_names_the_surface_without_renaming_the_command(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """`actor` is the one honest difference; a per-surface command name is not.
+
+    A different command per entry point would make every audit query ask twice, and
+    ADR 0008 requires the trail to read as a CLI-driven one.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_one(polish_workspace, run.run_id)
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        score=1.0,
+        actor="client",
+        clock=polish_workspace.clock,
+    )
+
+    rows = _audit(polish_workspace)
+
+    assert [actor for actor, command, _ in rows if command == "assessment.next"] == ["cli"]
+    assert [actor for actor, command, _ in rows if command == "assessment.record"] == ["client"]
+
+
+def test_handing_a_task_back_leaves_no_audit_row(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """Nothing was mutated, and an audit row for a read records something that did not happen."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    while True:
+        if _serve_one(polish_workspace, run.run_id).served_again:
+            break
+    before = len(_audit(polish_workspace))
+
+    _serve_one(polish_workspace, run.run_id)
+
+    assert len(_audit(polish_workspace)) == before

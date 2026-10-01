@@ -379,6 +379,14 @@ def _outstanding_dimensions(database: Database, run_id: str) -> Mapping[str, str
     }
 
 
+#: Who drove a mutation, for `audit_log.actor`. The *command* name stays the same across
+#: entry points -- ADR 0008 requires the trail to read as a CLI-driven one, and a different
+#: name per surface would make every audit query ask twice -- so the surface is recorded
+#: here instead. `cli` is the default because the CLI is the entry point that existed first
+#: and a caller that forgets to say is, in practice, the CLI.
+DEFAULT_ACTOR = "cli"
+
+
 #: Why a report names the task it names. `informativeness` is selection having run;
 #: `outstanding` is the run handing back what it was already holding, which is not a
 #: selection at all -- letting the default stand would credit the report to a computation
@@ -859,6 +867,7 @@ def next_task(
     track: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.next",
+    actor: str = DEFAULT_ACTOR,
 ) -> NextTaskReport | AssessmentRunReport:
     """Serve the next task, or report the run when no dimension is still open."""
 
@@ -1019,6 +1028,24 @@ def next_task(
                     purpose=str(row[3]),
                     is_anchor=selection.candidate.is_anchor,
                     now=now,
+                )
+                # Serving is a mutation -- it writes a run task and spends an exposure --
+                # and it wrote no audit row until C3. Putting it here rather than in the
+                # server is what keeps the two entry points' trails identical: a guard or
+                # a record the server owns is one the CLI does not have.
+                migration_module.record_audit_entry(
+                    transaction,
+                    command=command,
+                    correlation_id=EventId.new(),
+                    outcome="succeeded",
+                    actor=actor,
+                    affected_records_json=json.dumps(
+                        [run_id, selection.candidate.content_id], sort_keys=True
+                    ),
+                    after_summary=(
+                        f"served {selection.candidate.content_id} as {state.dimension} "
+                        f"task {sequence}"
+                    ),
                 )
             return NextTaskReport(
                 run_id=run_id,
@@ -1247,6 +1274,7 @@ def record(
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.record",
+    actor: str = DEFAULT_ACTOR,
 ) -> AssessmentRunReport:
     """Score one served task and fold it into its dimension's posterior.
 
@@ -1437,6 +1465,17 @@ def record(
             _write_state(transaction, run_id=run_id, state=updated, levels=levels, insert=False)
             transaction.execute(
                 "UPDATE assessment_runs SET updated_at = ? WHERE run_id = ?", [now, run_id]
+            )
+            migration_module.record_audit_entry(
+                transaction,
+                command=command,
+                correlation_id=EventId.new(),
+                outcome="succeeded",
+                actor=actor,
+                affected_records_json=json.dumps([run_id, str(result_id)], sort_keys=True),
+                after_summary=(
+                    f"scored {content_id} in {dimension} at {resolved_score} ({score_source})"
+                ),
             )
             if idempotency_key is not None:
                 migration_module.record_domain_event(
