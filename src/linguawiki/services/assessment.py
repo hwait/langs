@@ -876,8 +876,8 @@ def next_task(
                     "status, served_at, task_type, level_code, difficulty, content_family, "
                     "modality, is_anchor, rubric_version, content_hash, target_refs_json, "
                     "expected_json, prompt_snapshot, rubric_json, presentation_json, "
-                    "asset_identity_json) "
-                    "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "asset_identity_json, permitted_help) "
+                    "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         run_id,
                         sequence,
@@ -906,6 +906,12 @@ def next_task(
                         else json.dumps(
                             played.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
                         ),
+                        # The allowance the learner was held to, from the same row the
+                        # report hands back -- so the stored value and the reported one
+                        # cannot disagree. Snapshotted for the same reason as the prompt:
+                        # a second serve of this task must not read it from a pack that
+                        # has been edited since.
+                        str(task[4]),
                     ],
                 )
                 # The learner has now seen it, whether or not they answer. Recording the
@@ -1522,6 +1528,32 @@ class ServedTaskReport(ContractModel):
     presentation: TaskPresentation | None = None
     asset: ServedAsset | None = None
     rubric_version: int = 1
+    #: The rubric *body*, not only the version naming it. 0030 has snapshotted it since
+    #: the stage that added it, and reporting the version alone named a document this
+    #: report did not hand over -- so a caller that needed it had to go back to the
+    #: mutable bank, which is the one thing a served snapshot exists to prevent.
+    rubric: dict[str, object] = Field(default_factory=dict)
+    #: `None` for a row served before 0032, which is truthful: no snapshot held it. Not
+    #: `"none"`, which is a claim that help was refused rather than an absence of record.
+    permitted_help: str | None = None
+
+
+def _stored_rubric(raw: object) -> dict[str, object]:
+    """A snapshotted rubric body, or an empty one when it cannot be read.
+
+    `rubric_json` carries no `json_valid`, so this is the second place it is parsed and
+    the first that must not raise: `served_task_report` answers "what was the learner
+    shown", and a damaged rubric does not change that answer. `served_answer_key_wellformed`
+    is what reports the damage.
+    """
+
+    if raw is None:
+        return {}
+    try:
+        document = json.loads(str(raw))
+    except (ValueError, RecursionError):
+        return {}
+    return document if isinstance(document, dict) else {}
 
 
 def _refuse_presentation(code: str, message: str, reason: str) -> LinguaWikiError:
@@ -1693,8 +1725,8 @@ def served_task_report(database: Database, run_id: str, *, content_id: str) -> S
     row = database.one(
         "SELECT sequence, status, dimension, task_type, level_code, difficulty, "
         "content_family, modality, rubric_version, prompt_snapshot, presentation_json, "
-        "asset_identity_json, content_hash FROM assessment_run_tasks "
-        "WHERE run_id = ? AND content_id = ?",
+        "asset_identity_json, content_hash, rubric_json, permitted_help "
+        "FROM assessment_run_tasks WHERE run_id = ? AND content_id = ?",
         [run_id, content_id],
     )
     if row is None:
@@ -1736,6 +1768,11 @@ def served_task_report(database: Database, run_id: str, *, content_id: str) -> S
         modality=str(row[7]),
         rubric_version=int(row[8]),
         prompt=None if row[9] is None else str(row[9]),
+        # Parsed defensively: the column is a round trip through JSON and 0030 could not
+        # put a `json_valid` on it, so a damaged body is reported as absent rather than
+        # taking down a reader that only wanted to know what was shown.
+        rubric=_stored_rubric(row[13]),
+        permitted_help=None if row[14] is None else str(row[14]),
         presentation=shown,
         asset=None
         if identity is None
