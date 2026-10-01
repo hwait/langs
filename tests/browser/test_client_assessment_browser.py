@@ -128,15 +128,25 @@ def _answer_current(page: Any) -> list[str]:
     else:
         page.fill("input[name=response]", "nie wiem")
         page.click("[data-role=submit]")
-    page.wait_for_function(
-        """(previous) => {
-            const task = document.querySelector('section.task');
-            return !task || task.dataset.content !== previous;
-        }""",
-        arg=current,
-        timeout=20000,
-    )
+    _wait_for_next(page, current)
     return offered
+
+
+NEXT_WORK = """(previous) => {
+    const task = document.querySelector('section.task');
+    if (task) return task.dataset.content !== previous;
+    return [...document.querySelectorAll('button')].some((b) => b.textContent === 'FINISH');
+}""".replace("FINISH", FINISH)
+
+
+def _wait_for_next(page: Any, previous: str | None) -> None:
+    """Wait until a *different* task, or the finish button, is on screen.
+
+    Not "the current task is gone": a page between states -- loading, retrying, choosing --
+    shows no task at all, and a wait satisfied by that proves nothing.
+    """
+
+    page.wait_for_function(NEXT_WORK, arg=previous, timeout=20000)
 
 
 def _start(page: Any, served: Served) -> None:
@@ -232,11 +242,7 @@ def test_two_clicks_are_one_answer(page: Any, served: Served, recorded: PolishWo
     content_id = page.locator("section.task").get_attribute("data-content")
 
     page.locator(".choices button").first.dblclick()
-    page.wait_for_function(
-        "(previous) => document.querySelector('section.task')?.dataset.content !== previous",
-        arg=content_id,
-        timeout=20000,
-    )
+    _wait_for_next(page, content_id)
 
     count = _scalar(
         recorded, "SELECT count(*) FROM assessment_results WHERE content_id = ?", [content_id]
@@ -276,11 +282,7 @@ def test_another_process_holding_the_database_is_a_visible_wait(
         assert "Another LinguaWiki command" in page.inner_text("#status")
     finally:
         holder.wait(timeout=20)
-    page.wait_for_function(
-        "(previous) => document.querySelector('section.task')?.dataset.content !== previous",
-        arg=first,
-        timeout=20000,
-    )
+    _wait_for_next(page, first)
     assert page.locator("#status").is_hidden()
 
 
@@ -327,50 +329,60 @@ def test_a_reload_after_a_lost_answer_resends_it_rather_than_answering_twice(
 ) -> None:
     """The answer lands, its response is lost, and the learner reloads.
 
-    The pending operation was written to sessionStorage before it was sent, so the
-    reloaded page resends it -- same key, same body -- and the server answers with the
-    first result instead of recording a second.
+    A *real* reload: the old document's own retry loop is blocked until the new document
+    is up, so the only way the answer can be resent is the boot path reading the pending
+    operation from sessionStorage -- and the token has to survive the reload for that boot
+    to authenticate at all.
     """
 
     _start(page, served)
     content_id = _wait_for_work(page)
+    phase = {"now": "lose"}
     keys: list[str] = []
+    passed: list[str] = []
 
-    def lose_the_response(route: Any) -> None:
-        keys.append(json.loads(route.request.post_data)["idempotency_key"])
-        route.fetch()  # it reaches the server and lands...
-        route.abort()  # ...and the page never hears back
+    def handle(route: Any) -> None:
+        key = json.loads(route.request.post_data)["idempotency_key"]
+        if phase["now"] == "lose":
+            keys.append(key)
+            phase["now"] = "block"
+            route.fetch()  # it reaches the server and lands...
+            route.abort()  # ...and the page never hears back
+        elif phase["now"] == "block":
+            route.abort()  # the old document's retries go nowhere
+        else:
+            passed.append(key)
+            route.continue_()
 
-    page.route("**/results", lose_the_response)
+    page.route("**/results", handle)
     with page.expect_event("requestfailed"):
         if page.locator(".choices button").count():
             page.locator(".choices button").first.click()
         else:
             page.fill("input[name=response]", "nie wiem")
             page.click("[data-role=submit]")
-    page.unroute("**/results")
-    # What survives the reload: the operation, unchanged, recorded before it was sent.
-    pending = json.loads(page.evaluate("sessionStorage.getItem('linguawiki.pending')"))
-    assert pending["body"]["idempotency_key"] == keys[0]
-    resent: list[str] = []
-    page.on(
-        "request",
-        lambda request: resent.append(json.loads(request.post_data)["idempotency_key"])
-        if request.method == "POST" and request.url.endswith("/results")
-        else None,
-    )
-    page.goto(served.server.launch_url)
-    page.wait_for_function(
-        "(previous) => document.querySelector('section.task')?.dataset.content !== previous",
-        arg=content_id,
-        timeout=20000,
-    )
+    page.evaluate("window.__before_reload = true")
+    page.reload()
+    assert page.evaluate("window.__before_reload === undefined"), "the page did not reload"
+    assert "#" not in page.url
+    phase["now"] = "open"  # only the reloaded document is left to send anything
+    _wait_for_next(page, content_id)
 
-    assert keys and resent and resent[0] == keys[0]
+    assert keys and passed and passed[0] == keys[0]
     count = _scalar(
         recorded, "SELECT count(*) FROM assessment_results WHERE content_id = ?", [content_id]
     )
     assert count == 1
+
+
+def test_a_plain_reload_keeps_the_page_working(page: Any, served: Served) -> None:
+    _start(page, served)
+    content_id = _wait_for_work(page)
+
+    page.reload()
+
+    assert _wait_for_work(page) == content_id
+    assert "#" not in page.url
 
 
 def test_a_run_opened_elsewhere_is_never_served_by_the_page(

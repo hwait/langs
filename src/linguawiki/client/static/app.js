@@ -16,6 +16,12 @@
 
 const TOKEN_HEADER = "X-LinguaWiki-Token";
 const PENDING_KEY = "linguawiki.pending";
+// The launch token and the run on screen, kept per tab so a reload can carry on. Not in
+// the URL, which reaches history; sessionStorage is this origin's, this tab's, and goes
+// when the tab does. A token from a newer launch URL replaces it, and a refused one is
+// dropped.
+const TOKEN_KEY = "linguawiki.token";
+const RUN_KEY = "linguawiki.run";
 const STALE_TOKEN = new Set(["client_token_required", "client_token_invalid"]);
 const MACHINE_RUN = { scoring: "machine", modalities: ["text", "audio"] };
 
@@ -32,11 +38,35 @@ const state = {
 
 // --- the fragment ----------------------------------------------------------------------
 
+function stored(name) {
+  try {
+    return sessionStorage.getItem(name);
+  } catch {
+    return null;
+  }
+}
+
+function store(name, value) {
+  try {
+    if (value === null) sessionStorage.removeItem(name);
+    else sessionStorage.setItem(name, value);
+  } catch {
+    // No storage: the page still works, it just cannot survive a reload.
+  }
+}
+
 function readFragment() {
   const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-  state.token = params.get("token");
-  const run = params.get("run");
-  // Out of the address bar and out of history: the token is in memory from here on.
+  const launched = params.get("token");
+  if (launched) {
+    store(TOKEN_KEY, launched);
+    // A new launch is a new start: what this tab was showing belonged to the old one
+    // unless the launch names it again.
+    store(RUN_KEY, null);
+  }
+  state.token = launched || stored(TOKEN_KEY);
+  const run = params.get("run") || stored(RUN_KEY);
+  // Out of the address bar and out of history.
   history.replaceState(null, "", location.pathname);
   return run;
 }
@@ -130,6 +160,7 @@ async function request(method, path, body, { binary = false } = {}) {
     const error = envelope.error || { code: "client_unreadable", message: "The server's answer could not be read." };
     if (STALE_TOKEN.has(error.code)) {
       state.stale = true;
+      store(TOKEN_KEY, null);
       setStatus("");
       throw new Refusal(response.status, error);
     }
@@ -476,6 +507,7 @@ function results(screen) {
 
 async function draw(options = {}) {
   if (state.stale) return drawStale();
+  store(RUN_KEY, state.run);
   if (!state.run || !state.screen) return drawPicker();
   const screen = state.screen;
   let content;
