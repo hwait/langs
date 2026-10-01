@@ -1,1 +1,214 @@
-/* placeholder */
+/* A study tool, not a dashboard: one column, readable at a small window size. */
+
+:root {
+  --bg: #fbfaf7;
+  --surface: #ffffff;
+  --ink: #1f2328;
+  --muted: #5d636b;
+  --line: #d9d6cf;
+  --accent: #2f5d8a;
+  --accent-ink: #ffffff;
+  --warn-bg: #fff4d6;
+  --warn-ink: #5c4400;
+  --error-bg: #fde8e6;
+  --error-ink: #7a1d14;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a;
+    --surface: #1d2024;
+    --ink: #e7e9ec;
+    --muted: #a3a9b1;
+    --line: #353a40;
+    --accent: #8ab4e0;
+    --accent-ink: #10161d;
+    --warn-bg: #3a3014;
+    --warn-ink: #f3dc99;
+    --error-bg: #3d1d1a;
+    --error-ink: #f6b8b0;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+#app {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+header h1 {
+  font-size: 1.1rem;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+#status {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+}
+
+.error {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--error-bg);
+  color: var(--error-ink);
+}
+
+.panel,
+.task,
+.progress {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 0 0 12px;
+}
+
+.progress ul,
+.runs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.progress li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.9rem;
+}
+
+.progress li:last-child {
+  border-bottom: 0;
+}
+
+.progress progress {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 6px;
+  accent-color: var(--accent);
+}
+
+.progress .reason,
+.progress .confidence,
+.progress .count {
+  color: var(--muted);
+}
+
+.progress .reason {
+  grid-column: 1 / -1;
+}
+
+.dimension {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.prompt {
+  font-size: 1.15rem;
+  margin: 0 0 16px;
+  white-space: pre-wrap;
+}
+
+.listen {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 16px;
+}
+
+.plays {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.choices {
+  display: grid;
+  gap: 8px;
+}
+
+.written {
+  display: grid;
+  gap: 8px;
+}
+
+.shape {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+input[type="text"] {
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+button {
+  font: inherit;
+  padding: 10px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.choices button {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.choices button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.actions.secondary button {
+  background: transparent;
+  color: var(--accent);
+}
+
+.runs li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}

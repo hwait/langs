@@ -26,6 +26,7 @@ linguawiki = "linguawiki.cli:main"
 dev = [
   "hatchling==1.27.0",
   "mypy==1.17.1",
+  "playwright==1.58.0",
   "pytest==8.4.1",
   "pytest-cov==6.2.1",
   "pytest-xdist==3.8.0",

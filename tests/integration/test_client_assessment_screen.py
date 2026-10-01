@@ -432,3 +432,265 @@ def test_the_shell_ships_in_the_package_not_the_workspace(
     for name in ("index.html", "app.js", "app.css"):
         assert (static / name).is_file(), name
     assert not (polish_workspace.root / "static").exists()
+
+
+# --- a whole calibration, scored by the server -------------------------------------------
+
+
+def _answers_key(workspace: PolishWorkspace, run_id: str, content_id: str) -> list[str]:
+    import json
+
+    with open_reader(workspace.paths) as database:
+        raw = database.scalar(
+            "SELECT expected_json FROM assessment_run_tasks WHERE run_id = ? AND content_id = ?",
+            [run_id, content_id],
+        )
+    answers: list[str] = json.loads(str(raw))["answers"]
+    return answers
+
+
+def _response(task: dict[str, Any], answers: list[str], *, correct: bool) -> str:
+    """What a learner pressing a button or typing would send, chosen by the server's scorer.
+
+    For a choice task the response is one of the choice *values* -- the button the learner
+    pressed -- never an index or the display text.
+    """
+
+    from linguawiki.placement import score_response
+
+    choices = (task.get("presentation") or {}).get("choices") or []
+    if choices:
+        values = [choice["value"] for choice in choices]
+        scored = {
+            value: score_response(task_type=task["task_type"], answers=answers, response=value)
+            for value in values
+        }
+        wanted = [value for value in values if (scored[value] == 1.0) == correct]
+        return wanted[0] if wanted else values[0]
+    return answers[0] if correct else "zupełnie nie to"
+
+
+def _calibrate_over_http(
+    workspace: PolishWorkspace, client: Client
+) -> tuple[str, list[tuple[str, str]]]:
+    run_id = _open(client, scoring="machine", modalities=["text", "audio"])
+    given: list[tuple[str, str]] = []
+    for step in range(200):
+        screen = client.get(f"/runs/{run_id}/screen").data
+        task = next((each for each in screen["outstanding"] if not each["needs_judge"]), None)
+        if task is None:
+            if not any(each["status"] == "open" for each in screen["dimensions"]):
+                break
+            client.post(f"/runs/{run_id}/tasks", {"idempotency_key": key()})
+            continue
+        if task["plays_audio"]:
+            client.post(
+                f"/runs/{run_id}/tasks/{task['content_id']}/plays", {"idempotency_key": key()}
+            )
+        response = _response(
+            task,
+            _answers_key(workspace, run_id, task["content_id"]),
+            correct=step % 3 != 2,
+        )
+        given.append((task["content_id"], response))
+        recorded = client.post(
+            f"/runs/{run_id}/results",
+            {"content_id": task["content_id"], "response": response, "idempotency_key": key()},
+        )
+        assert recorded.status == 200, recorded.payload
+    else:  # pragma: no cover - a run that never stops is the failure under test
+        raise AssertionError("the calibration did not finish")
+    finalized = client.post(
+        f"/runs/{run_id}/finalization", {"reason": "completed", "idempotency_key": key()}
+    )
+    assert finalized.data["status"] == "finalized"
+    return run_id, given
+
+
+@pytest.fixture
+def no_model(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """No model credentials, and any connection off this machine fails the test."""
+
+    import socket
+
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "CODEX_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    attempted: list[str] = []
+    connect = socket.socket.connect
+
+    def guarded(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else str(address)
+        if isinstance(address, tuple) and host not in ("127.0.0.1", "::1", "localhost"):
+            attempted.append(str(host))
+            raise AssertionError(f"a calibration reached off this machine: {host}")
+        return connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded)
+    return attempted
+
+
+def test_a_machine_calibration_completes_scored_by_the_server_alone(
+    recorded: PolishWorkspace, client: Client, no_model: list[str]
+) -> None:
+    run_id, given = _calibrate_over_http(recorded, client)
+
+    results_sent = [body for method, path, body in client.sent if path.endswith("/results")]
+    assert results_sent, "nothing was answered"
+    for body in results_sent:
+        assert body is not None
+        assert set(body) == {"content_id", "response", "idempotency_key"}, body
+    with open_reader(recorded.paths) as database:
+        rows = database.query(
+            "SELECT assessor_kind, score_source, scoring_policy_version, play_count, "
+            "task.modality FROM assessment_results result "
+            "JOIN assessment_run_tasks task USING (run_id, content_id) "
+            "WHERE result.run_id = ?",
+            [run_id],
+        )
+    from linguawiki.placement import SCORING_POLICY_VERSION
+
+    assert len(rows) == len(given)
+    assert {(row[0], row[1], row[2]) for row in rows} == {
+        ("deterministic", "computed", SCORING_POLICY_VERSION)
+    }
+    # Listening was tested, from recordings, and every listening result knows its plays.
+    audio = [row for row in rows if row[4] == "audio"]
+    assert audio, "no listening task was served"
+    assert {row[3] for row in audio} == {1}
+    assert no_model == []
+
+
+def test_the_estimates_are_the_ones_the_cli_reaches_from_the_same_answers(
+    recorded: PolishWorkspace, client: Client, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+    import shutil
+
+    from linguawiki.cli import run as cli
+
+    # The same workspace, before anything was answered: the CLI replays the page's answers.
+    twin = tmp_path / "twin"
+    shutil.copytree(recorded.root, twin)
+    run_id, given = _calibrate_over_http(recorded, client)
+    answers = dict(given)
+
+    def call(*arguments: str) -> dict[str, Any]:
+        code = cli([*arguments, "--workspace", str(twin), "--format", "json"], clock=recorded.clock)
+        out = capsys.readouterr().out
+        assert code == 0, out
+        document: dict[str, Any] = json.loads(out)["data"]
+        return document
+
+    twin_run = call(
+        "assessment", "start", "--scoring", "machine", "--modality", "text", "--modality", "audio"
+    )["run_id"]
+    replayed: list[str] = []
+    while True:
+        served = call("assessment", "next", "--run", twin_run)
+        if "content_id" not in served:
+            break
+        replayed.append(served["content_id"])
+        call(
+            "assessment",
+            "record",
+            "--run",
+            twin_run,
+            "--content",
+            served["content_id"],
+            "--response",
+            answers[served["content_id"]],
+        )
+    call("assessment", "finalize", "--run", twin_run)
+
+    assert replayed == [content_id for content_id, _ in given]
+    page = client.get(f"/runs/{run_id}").data
+    command_line = call("assessment", "report", "--run", twin_run)
+    fields = (
+        "dimension",
+        "status",
+        "tasks_used",
+        "confidence",
+        "estimated_level",
+        "credible_low",
+        "credible_high",
+        "posterior_mean",
+        "uncertainty",
+        "unavailable_reason",
+    )
+    assert [{name: entry[name] for name in fields} for entry in page["dimensions"]] == [
+        {name: entry[name] for name in fields} for entry in command_line["dimensions"]
+    ]
+
+
+def _counts(workspace: PolishWorkspace) -> tuple[int, ...]:
+    with open_reader(workspace.paths) as database:
+        return tuple(
+            int(database.scalar(f"SELECT count(*) FROM {table}"))
+            for table in (
+                "assessment_runs",
+                "assessment_run_tasks",
+                "assessment_results",
+                "assessment_task_plays",
+            )
+        )
+
+
+def test_every_keyed_operation_retried_with_its_key_is_one_operation(
+    recorded: PolishWorkspace, client: Client
+) -> None:
+    """A lost response is retried with the same key and body, and nothing is done twice."""
+
+    def twice(path: str, body: dict[str, Any]) -> dict[str, Any]:
+        first = client.post(path, body)
+        before = _counts(recorded)
+        again = client.post(path, body)
+        assert _counts(recorded) == before, path
+        assert again.status == first.status == 200, again.payload
+        for volatile in ("warnings",):
+            first.data.pop(volatile, None)
+            again.data.pop(volatile, None)
+        if "content_id" in first.data:
+            # A replayed serve is the same task, said to be handed back.
+            assert again.data["content_id"] == first.data["content_id"]
+        else:
+            assert again.data == first.data, path
+        return first.data
+
+    start = {"dimensions": ["listening"], "modalities": ["audio"], "scoring": "machine"}
+    run_id = twice("/runs", {**start, "idempotency_key": key()})["run_id"]
+    task = twice(f"/runs/{run_id}/tasks", {"idempotency_key": key()})
+    twice(f"/runs/{run_id}/tasks/{task['content_id']}/plays", {"idempotency_key": key()})
+    choices = (task["presentation"] or {}).get("choices") or [{"value": "x"}]
+    twice(
+        f"/runs/{run_id}/results",
+        {
+            "content_id": task["content_id"],
+            "response": choices[0]["value"],
+            "idempotency_key": key(),
+        },
+    )
+    twice(f"/runs/{run_id}/finalization", {"reason": "completed", "idempotency_key": key()})
+
+
+def test_a_replayed_serve_whose_task_was_answered_says_so(
+    recorded: PolishWorkspace, client: Client
+) -> None:
+    """Otherwise the page would put an answered question back in front of the learner."""
+
+    run_id = _start_listening(client)
+    serve_key = key()
+    task = client.post(f"/runs/{run_id}/tasks", {"idempotency_key": serve_key}).data
+    choices = (task["presentation"] or {}).get("choices") or [{"value": "x"}]
+    client.post(
+        f"/runs/{run_id}/results",
+        {
+            "content_id": task["content_id"],
+            "response": choices[0]["value"],
+            "idempotency_key": key(),
+        },
+    )
+
+    replayed = client.post(f"/runs/{run_id}/tasks", {"idempotency_key": serve_key}).data
+
+    assert replayed["content_id"] == task["content_id"]
+    assert replayed["status"] == "answered"
