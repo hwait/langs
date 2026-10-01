@@ -12,11 +12,15 @@ Parent: [Learner Client Delivery Plan](../learner-client-plan.md) · Decisions: 
 ## Shipped — 2026-10-01
 
 Implemented on `c3-server-and-contract`. Release gate `scripts/verify.py`: **2351 passed, 1
-skipped**, branch coverage 93.46% against a 90% floor, wheel and distribution checks clean.
+skipped**, branch coverage 93.46% against a 90% floor, wheel and distribution checks clean. The
+review pass that followed added three tests and their fixes; stage gate after it: **2354
+passed, 1 skipped**.
 Run as the release gate rather than `--fast` because the change touched a migration, a
 published contract, and the wheel's contents.
 
-Nine things went differently, and six of them are findings rather than preferences.
+Twelve things went differently, and nine of them are findings rather than preferences. The
+last three came out of the whole-branch review after the gate was already green, which is
+what that review is for.
 
 - **§10's check shipped inside §1.** An unconstrained column with no named check is a state
   AGENTS.md forbids, so splitting them would have left one commit in it. §10 added no further
@@ -52,6 +56,21 @@ Nine things went differently, and six of them are findings rather than preferenc
   `urllib.request.Request.host` retargets the *connection* rather than overriding the header,
   so a forged-`Host` test written with urllib goes off to resolve the forged name instead of
   reaching the server under test. It hung rather than failing, which is worse.
+
+Three more from the final review, each with a test that failed first:
+
+- **`NextTaskReport` carried no status**, so a hand-back of an outstanding task and a replay
+  of a key whose task had since been scored were the same object. A client would have put an
+  answered question back in front of the learner. It now reports the snapshot's status.
+- **A hand-back recorded nothing at all under its idempotency key**, on the reading that it
+  "writes nothing". It writes nothing about the *learner* — no run task, no exposure, no
+  dimension state — but an event saying which task the key was answered with is bookkeeping
+  about the request, and without it a retry after that task was scored went on to serve a
+  *different* task under the same key. Verified: it did.
+- **A body with no `Content-Length` was read as empty.** The cap is enforced against the
+  declared length, so a chunked request was silently dropped and came back as "content_id is
+  required" — sending a client to the wrong field entirely. It is now refused by name, saying
+  that this server does not read chunked bodies and why.
 
 Two renames the plan did not mention: `_run_report`/`_resolve_run` became public, because the
 read model asks the same two questions and a private copy would be a second answer; and

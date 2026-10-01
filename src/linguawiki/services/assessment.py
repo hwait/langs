@@ -137,6 +137,11 @@ class NextTaskReport(ContractModel):
     #: moved -- a caller that treated it as a new task would be crediting the learner with
     #: having faced two.
     served_again: bool = False
+    #: Whether this task is still awaiting an answer. Always `served` on a fresh serve, and
+    #: read from the snapshot on a hand-back -- including the replay of a key whose task has
+    #: since been scored, which otherwise looked exactly like fresh work and would have put
+    #: an answered question back in front of the learner.
+    status: str = "served"
 
 
 class AssessmentRunReport(ContractModel):
@@ -886,6 +891,7 @@ def _hand_back(
         selection_reason=HANDED_BACK,
         remaining_open_dimensions=tuple(open_dimensions),
         served_again=True,
+        status=shown.status,
     )
 
 
@@ -1152,11 +1158,16 @@ def next_task(
         # task has work on it, so the run is not finished and must not report as though it
         # were: hand that task back instead. The states are already sorted, so this is
         # the least-progressed one.
-        if idempotency_key is not None and not any(
-            state.dimension in outstanding for state in open_states
-        ):
-            # This call served nothing and closed what it could. Recording that under the
-            # key is what stops a retry from serving a task the first call did not.
+        held = [state for state in open_states if state.dimension in outstanding]
+        handed_content_id = outstanding[held[0].dimension] if held else None
+        if idempotency_key is not None:
+            # Whatever this call did -- handed a task back, or closed the last dimension and
+            # served nothing -- it is the one operation this key performed, and recording it
+            # is what stops a retry from doing something else. A hand-back writes nothing
+            # about the *learner*: no run task, no exposure, no dimension state. An event
+            # saying which task this key was answered with is bookkeeping about the request,
+            # and without it a retry after the task was scored went on to serve a different
+            # one under the same key.
             with database.transaction() as transaction:
                 migration_module.record_domain_event(
                     transaction,
@@ -1164,15 +1175,14 @@ def next_task(
                     aggregate_type="assessment_run",
                     aggregate_id=run_id,
                     correlation_id=EventId.new(),
-                    payload_json=idempotency.payload(fingerprint, content_id=None),
+                    payload_json=idempotency.payload(fingerprint, content_id=handed_content_id),
                     idempotency_key=idempotency_key,
                 )
-        held = [state for state in open_states if state.dimension in outstanding]
         if held:
             handed = _hand_back(
                 database,
                 run_id,
-                content_id=outstanding[held[0].dimension],
+                content_id=str(handed_content_id),
                 open_dimensions=[state.dimension for state in held],
             )
             return handed.model_copy(update={"warnings": tuple(warnings)})

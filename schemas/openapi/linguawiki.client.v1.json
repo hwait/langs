@@ -412,6 +412,11 @@
             "title": "Stable Key",
             "type": "string"
           },
+          "status": {
+            "default": "served",
+            "title": "Status",
+            "type": "string"
+          },
           "task_type": {
             "title": "Task Type",
             "type": "string"

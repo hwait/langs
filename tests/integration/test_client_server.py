@@ -640,3 +640,32 @@ def test_health_does_not_report_a_busy_database_because_it_never_asks(
         answer = running.request("GET", "/health")
 
     assert answer.status == 200
+
+
+def test_a_chunked_body_is_refused_rather_than_silently_read_as_empty(
+    running: RunningServer,
+) -> None:
+    """`Content-Length` is how the body is bounded, so a body without one is not read.
+
+    Dropping it silently turned a correct chunked request into "content_id is required",
+    which sends a client looking at the wrong field entirely.
+    """
+
+    connection = http.client.HTTPConnection("127.0.0.1", running.client.port, timeout=10)
+    try:
+        connection.putrequest("POST", "/runs", skip_host=True, skip_accept_encoding=True)
+        connection.putheader("Host", f"127.0.0.1:{running.client.port}")
+        connection.putheader(server_module.TOKEN_HEADER, running.client.token)
+        connection.putheader("Origin", running.origin)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Transfer-Encoding", "chunked")
+        connection.endheaders()
+        connection.send(b"2\r\n{}\r\n0\r\n\r\n")
+        answer = connection.getresponse()
+        payload = json.loads(answer.read() or b"{}")
+    finally:
+        connection.close()
+
+    assert answer.status == 400
+    assert payload["error"]["code"] == "invalid_contract"
+    assert "length" in payload["error"]["message"].lower()

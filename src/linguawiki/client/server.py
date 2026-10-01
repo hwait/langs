@@ -210,6 +210,17 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
             """
 
             declared = self.headers.get("Content-Length")
+            if declared is None and self.headers.get("Transfer-Encoding") is not None:
+                # The cap is enforced against `Content-Length`, so a body that does not
+                # declare one is not read at all. Dropping it silently turned a correct
+                # chunked request into "content_id is required", which sends a client
+                # looking at the wrong field entirely.
+                raise LinguaWikiError(
+                    "invalid_contract",
+                    "a request body must declare its Content-Length; this server does not "
+                    "read chunked bodies, because the size cap is what bounds the read",
+                    details=(ErrorDetail(field="body", reason="no Content-Length"),),
+                )
             length = int(declared) if declared is not None and declared.isdigit() else 0
             if length > MAXIMUM_BODY_BYTES:
                 raise _too_large()

@@ -645,3 +645,84 @@ def test_the_cli_can_retry_a_serve_without_consuming_a_second_task(
     assert again["data"]["content_id"] == first["data"]["content_id"]
     assert again["data"]["served_again"] is True
     assert _row_count(polish_workspace, run.run_id) == 1
+
+
+def test_a_report_says_whether_the_task_it_names_is_still_awaiting_an_answer(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A replay of a serve whose task has since been answered looked like fresh work.
+
+    `NextTaskReport` carried no status, so a hand-back of an outstanding task and a replay of
+    a key whose task is settled were the same object -- and a client would have put an
+    answered question back in front of the learner.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = assessment_service.next_task(
+        polish_workspace.paths,
+        run=run.run_id,
+        idempotency_key="serve-1",
+        clock=polish_workspace.clock,
+    )
+    assert isinstance(served, assessment_service.NextTaskReport)
+    assert served.status == "served"
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=served.content_id,
+        score=1.0,
+        clock=polish_workspace.clock,
+    )
+
+    replayed = assessment_service.next_task(
+        polish_workspace.paths,
+        run=run.run_id,
+        idempotency_key="serve-1",
+        clock=polish_workspace.clock,
+    )
+
+    assert isinstance(replayed, assessment_service.NextTaskReport)
+    assert replayed.content_id == served.content_id
+    assert replayed.served_again
+    assert replayed.status == "answered"
+
+
+def test_a_key_that_handed_a_task_back_cannot_later_serve_a_different_one(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A hand-back is still one operation, and a key names one operation.
+
+    The hand-back wrote nothing at all, so a retry after the task had been answered found no
+    record of the key and went on to serve a *different* task under it.
+    """
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    while True:
+        if _serve_one(polish_workspace, run.run_id).served_again:
+            break
+    handed = assessment_service.next_task(
+        polish_workspace.paths,
+        run=run.run_id,
+        idempotency_key="handback-1",
+        clock=polish_workspace.clock,
+    )
+    assert isinstance(handed, assessment_service.NextTaskReport)
+    assert handed.served_again
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=handed.content_id,
+        score=1.0,
+        clock=polish_workspace.clock,
+    )
+
+    again = assessment_service.next_task(
+        polish_workspace.paths,
+        run=run.run_id,
+        idempotency_key="handback-1",
+        clock=polish_workspace.clock,
+    )
+
+    assert isinstance(again, assessment_service.NextTaskReport)
+    assert again.content_id == handed.content_id
+    assert again.status == "answered"
