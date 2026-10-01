@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from linguawiki import __version__
 from linguawiki.client import responses as client_responses
 from linguawiki.client import routes as client_routes
+from linguawiki.client import shell as client_shell
 from linguawiki.client.security import TOKEN_HEADER
 
 #: Where the generated document is committed. A subdirectory of `schemas/`, not beside the
@@ -259,6 +260,24 @@ def document(schema_directory: Path) -> dict[str, Any]:
             }
         }
     }
+    for target, (_name, media) in client_shell.SHELL_FILES.items():
+        # The only operations with no security requirement, and declared as such: the first
+        # navigation cannot carry the token, which arrives in a fragment the browser never
+        # sends. `Host` is still enforced on them.
+        paths[target] = {
+            "get": {
+                "operationId": "shell_" + (target.strip("/").replace(".", "_") or "index"),
+                "summary": "The page shell, served from the installed package",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "A static file of the page shell.",
+                        "content": {media.split(";")[0]: {"schema": {"type": "string"}}},
+                    },
+                    "403": COMMON_RESPONSES["403"],
+                },
+            }
+        }
     for route in client_routes.ROUTES:
         template = _path_template(route.pattern.pattern)
         operation: dict[str, Any] = {

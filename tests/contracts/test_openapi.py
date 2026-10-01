@@ -164,7 +164,7 @@ def test_every_operation_that_reaches_the_database_declares_the_retryable_respon
 
     for template, path in whole["paths"].items():
         for method, operation in path.items():
-            if template == "/health":
+            if template == "/health" or operation.get("security") == []:
                 assert "503" not in operation["responses"]
                 continue
             assert "503" in operation["responses"], f"{method} {template}"
@@ -220,6 +220,14 @@ def test_the_token_is_required_by_the_document_not_only_by_the_server() -> None:
     assert whole["security"] == [{"launchToken": []}]
     assert scheme["launchToken"]["in"] == "header"
     assert scheme["launchToken"]["name"] == "X-LinguaWiki-Token"
+    # Exactly the shell opts out, and nothing else does.
+    public = sorted(
+        template
+        for template, path in whole["paths"].items()
+        for operation in path.values()
+        if operation.get("security") == []
+    )
+    assert public == ["/", "/app.css", "/app.js"]
 
 
 def test_the_document_says_it_describes_shapes_rather_than_sequences() -> None:

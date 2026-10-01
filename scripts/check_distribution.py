@@ -31,6 +31,12 @@ WHEEL_RESOURCES = {
     # this gate, and `client serve` would fail only once a learner ran it.
     "linguawiki/client/server.py",
     "linguawiki/client/security.py",
+    # The page itself. It is served from the package and never from the workspace, so a
+    # wheel without it would serve a token check where the learner expects a calibration.
+    "linguawiki/client/shell.py",
+    "linguawiki/client/static/index.html",
+    "linguawiki/client/static/app.js",
+    "linguawiki/client/static/app.css",
 }
 
 

@@ -28,7 +28,7 @@ from urllib.parse import parse_qsl
 from jsonschema import Draft202012Validator
 
 from linguawiki import __version__
-from linguawiki.client import responses, routes, runtime, security
+from linguawiki.client import responses, routes, runtime, security, shell
 from linguawiki.client.security import TOKEN_HEADER
 from linguawiki.clock import Clock, SystemClock
 from linguawiki.db import migrations as migration_module
@@ -159,6 +159,16 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 headers, repeated = _headers(self)
                 security.assert_single_valued(repeated)
                 security.assert_host(headers, port=int(client["port"]))
+                # The shell, and only the shell, before the token: the first navigation
+                # cannot carry a header, and the token arrives in a fragment the browser
+                # never sends. Matched on the raw target, so no other spelling is the shell.
+                public = shell.shell_file(self.path) if method == "GET" else None
+                if public is not None:
+                    command = "client.shell"
+                    self._respond(
+                        200, public[0], content_type=public[1], extra_headers=shell.HEADERS
+                    )
+                    return
                 security.assert_token(headers, expected=str(client["token"]))
                 path, query = _split_target(self.path)
                 if path == "/health" and method == "GET":

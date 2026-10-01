@@ -1110,6 +1110,93 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/": {
+      "get": {
+        "operationId": "shell_index",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
+      }
+    },
+    "/app.css": {
+      "get": {
+        "operationId": "shell_app_css",
+        "responses": {
+          "200": {
+            "content": {
+              "text/css": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
+      }
+    },
+    "/app.js": {
+      "get": {
+        "operationId": "shell_app_js",
+        "responses": {
+          "200": {
+            "content": {
+              "text/javascript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
+      }
+    },
     "/health": {
       "get": {
         "operationId": "health",

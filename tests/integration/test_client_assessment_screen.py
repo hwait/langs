@@ -349,3 +349,86 @@ def test_a_launch_reference_that_is_not_a_run_is_refused_before_binding(
     with pytest.raises(LinguaWikiError) as refused:
         server_module.build_server(polish_workspace.paths, run="not-a-run")
     assert refused.value.payload.code == "invalid_arguments"
+
+
+# --- the public shell ------------------------------------------------------------------
+
+SHELL = {
+    "/": "text/html; charset=utf-8",
+    "/app.js": "text/javascript; charset=utf-8",
+    "/app.css": "text/css; charset=utf-8",
+}
+
+
+@pytest.mark.parametrize(("path", "media"), sorted(SHELL.items()))
+def test_the_shell_answers_without_a_token(plain: Client, path: str, media: str) -> None:
+    """The first navigation cannot carry a header, and the fragment never reaches us."""
+
+    answer = plain.get(path, token=None)
+
+    assert answer.status == 200
+    assert answer.headers["content-type"] == media
+    assert answer.headers["cache-control"] == "no-store"
+    assert answer.headers["x-content-type-options"] == "nosniff"
+    assert answer.headers["referrer-policy"] == "no-referrer"
+    policy = answer.headers["content-security-policy"]
+    assert "default-src 'self'" in policy
+    assert "'unsafe-inline'" not in policy
+
+
+def test_the_shell_loads_its_script_as_a_module_and_inlines_nothing(plain: Client) -> None:
+    page = plain.get("/", token=None).body.decode()
+
+    assert '<script type="module" src="/app.js"></script>' in page
+    assert "<script>" not in page
+    assert "style=" not in page
+
+
+def test_the_shell_is_still_behind_the_host_allowlist(plain: Client) -> None:
+    """DNS rebinding is the same attack whether the answer is a page or a run."""
+
+    answer = plain.get("/", token=None, host="linguawiki.example.com")
+
+    assert answer.status == 403
+    assert answer.code == "client_host_denied"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/index.html",
+        "/static/app.js",
+        "/../data/linguawiki.duckdb",
+        "/static/../app.js",
+        "/%2e%2e/data/linguawiki.duckdb",
+        "/app.js/../../data",
+        "/data/linguawiki.duckdb",
+        "/linguawiki.toml",
+        "/app.js?x=1",
+        "/app.js/",
+        "/APP.JS",
+    ],
+)
+def test_nothing_else_is_reachable_without_the_token(plain: Client, path: str) -> None:
+    answer = plain.get(path, token=None)
+
+    assert answer.status == 403
+    assert answer.code == "client_token_required"
+
+
+def test_the_shell_is_read_only(plain: Client) -> None:
+    answer = plain.post("/", {}, token=None)
+
+    assert answer.status == 403
+    assert answer.code == "client_token_required"
+
+
+def test_the_shell_ships_in_the_package_not_the_workspace(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    from importlib.resources import files
+
+    static = files("linguawiki.client") / "static"
+    for name in ("index.html", "app.js", "app.css"):
+        assert (static / name).is_file(), name
+    assert not (polish_workspace.root / "static").exists()
