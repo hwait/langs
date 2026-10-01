@@ -1698,9 +1698,7 @@ def record(
         # zero from one that records plays, unknown (`NULL`) from one that cannot know.
         plays = _plays_used(database, run_id, content_id) if served[13] is not None else 0
         play_count = (
-            plays
-            if served[13] is not None and (plays or actor in PLAY_TRACKING_ACTORS)
-            else None
+            plays if served[13] is not None and (plays or actor in PLAY_TRACKING_ACTORS) else None
         )
         with database.transaction() as transaction:
             now = transaction.now()

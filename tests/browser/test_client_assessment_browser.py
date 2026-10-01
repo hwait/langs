@@ -371,3 +371,24 @@ def test_a_reload_after_a_lost_answer_resends_it_rather_than_answering_twice(
         recorded, "SELECT count(*) FROM assessment_results WHERE content_id = ?", [content_id]
     )
     assert count == 1
+
+
+def test_a_run_opened_elsewhere_is_never_served_by_the_page(
+    page: Any, served: Served, recorded: PolishWorkspace
+) -> None:
+    """Under `any` the next task can need a judge or a recording; the page serves none."""
+
+    from linguawiki.services import assessment as assessment_service
+
+    run = assessment_service.start(recorded.paths, clock=recorded.clock)
+
+    page.goto(served.server.launch_url)
+    page.wait_for_selector(f"[data-run='{run.run_id}']")
+    assert "assess skill" in page.inner_text("ul.runs")
+    page.click(f"[data-run='{run.run_id}']")
+    page.wait_for_selector("text=opened outside this page")
+
+    served_count = _scalar(
+        recorded, "SELECT count(*) FROM assessment_run_tasks WHERE run_id = ?", [run.run_id]
+    )
+    assert served_count == 0

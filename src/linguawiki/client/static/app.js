@@ -372,7 +372,12 @@ async function drawPicker() {
     h(
       "li",
       {},
-      h("span", {}, `${run.calibration_label} · ${run.status} · started ${run.started_at.slice(0, 10)}`),
+      h(
+        "span",
+        {},
+        `${run.calibration_label} · ${run.status} · started ${run.started_at.slice(0, 10)}`,
+        run.scoring === "machine" ? "" : " · opened elsewhere: continue it with the assess skill",
+      ),
       button(run.status === "paused" ? "Resume" : "Continue", () => resumeRun(run.run_id), {
         dataset: { run: run.run_id },
       }),
@@ -474,8 +479,13 @@ async function draw(options = {}) {
   if (!state.run || !state.screen) return drawPicker();
   const screen = state.screen;
   let content;
-  const answerable = screen.outstanding.find((task) => !task.needs_judge);
-  const judged = screen.outstanding.find((task) => task.needs_judge);
+  // Answerable here: scored by the server, and -- when heard -- with something to hear.
+  const answerable = screen.outstanding.find((task) => !task.needs_judge && !task.missing_recording);
+  const judged = screen.outstanding.find((task) => task.needs_judge || task.missing_recording);
+  // Only a run opened for machine scoring is served from this page. Under `any` the next
+  // task can need a judge or a recording this page does not have, and serving it would
+  // spend an exposure on a question the learner cannot answer here.
+  const servable = screen.scoring === "machine";
   if (screen.status === "paused") {
     content = message("This calibration is paused.", button("Resume", () => resumeRun(screen.run_id)));
   } else if (screen.status !== "in-progress") {
@@ -488,7 +498,14 @@ async function draw(options = {}) {
     }
   } else if (judged) {
     content = message(
-      "The next task in this run needs a judge to mark it, which this page cannot do. Continue it with the assess skill, or pause it here.",
+      judged.needs_judge
+        ? "The next task in this run needs a judge to mark it, which this page cannot do. Continue it with the assess skill, or pause it here."
+        : "The next task in this run is a listening task with no recording, which this page cannot play. Continue it with the assess skill, or pause it here.",
+      button("Pause", () => setRunStatus("paused")),
+    );
+  } else if (!servable && screen.dimensions.some((dimension) => dimension.status === "open")) {
+    content = message(
+      "This calibration was opened outside this page, so its next task may need a judge or a recording this page does not have. Continue it with the assess skill, or pause it here.",
       button("Pause", () => setRunStatus("paused")),
     );
   } else if (screen.dimensions.some((dimension) => dimension.status === "open")) {

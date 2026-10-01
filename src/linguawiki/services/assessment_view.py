@@ -21,7 +21,7 @@ from linguawiki.contracts import ServedAsset, TaskPresentation
 from linguawiki.db.connection import Database, open_reader
 from linguawiki.models import ContractModel
 from linguawiki.paths import WorkspacePaths
-from linguawiki.placement import DEFAULT_SCORING, MACHINE_SCORABLE_TASK_TYPES
+from linguawiki.placement import DEFAULT_SCORING, MACHINE_SCORABLE_TASK_TYPES, PLAYED_MODALITY
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import learners as learner_service
 
@@ -65,6 +65,11 @@ class OutstandingTask(ContractModel):
     #: will refuse to compute. Derived from the served task type through the scoring
     #: policy, never re-decided by the client.
     needs_judge: bool = False
+    #: Whether this task is heard and was served with nothing to play. A run opened under
+    #: `any` can hold one: it is machine-scorable, so `needs_judge` is false, and drawing
+    #: its prompt instead would turn a listening task into a reading one. A client must not
+    #: offer it.
+    missing_recording: bool = False
     #: Plays recorded so far, and what a finite allowance has left (`None`: unlimited).
     #: Read from the play rows, so a reloaded page, a resumed run, and a later sitting all
     #: show the same number -- nothing about plays lives only in a page.
@@ -147,6 +152,7 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
                     else assessment_service.plays_remaining(audio.replay_allowance, used)
                 ),
                 needs_judge=shown.task_type not in MACHINE_SCORABLE_TASK_TYPES,
+                missing_recording=shown.modality == PLAYED_MODALITY and audio is None,
             )
         )
     # No bound and no `omissions`, and this is the place to say why: the guard in the serve

@@ -197,3 +197,26 @@ def test_the_cli_opens_a_machine_run(
 
     assert code == 0
     assert json.loads(capsys.readouterr().out)["data"]["scoring"] == "machine"
+
+
+def test_the_screen_says_which_heard_task_has_no_recording(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A run opened under `any` can hold a listening task the pilot cannot play.
+
+    It is machine-scorable, so `needs_judge` is false -- and drawing its prompt would turn a
+    listening task into a reading one. The screen says so, so a page does not offer it.
+    """
+
+    from linguawiki.services import assessment_view as view_service
+
+    run = assessment_service.start(
+        polish_workspace.paths, dimensions=["listening"], clock=polish_workspace.clock
+    )
+    assessment_service.next_task(
+        polish_workspace.paths, run=run.run_id, clock=polish_workspace.clock
+    )
+
+    (task,) = view_service.run_screen(polish_workspace.paths, run=run.run_id).outstanding
+    assert (task.modality, task.needs_judge, task.plays_audio) == ("audio", False, False)
+    assert task.missing_recording is True
