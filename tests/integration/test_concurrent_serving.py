@@ -426,3 +426,222 @@ def test_handing_a_task_back_leaves_no_audit_row(
     _serve_one(polish_workspace, run.run_id)
 
     assert len(_audit(polish_workspace)) == before
+
+
+def test_a_retried_serve_returns_the_task_it_first_served(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """`next_task` took no key, so a retry consumed another task and burned its exposure."""
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    first = assessment_service.next_task(
+        polish_workspace.paths,
+        run=run.run_id,
+        idempotency_key="serve-1",
+        clock=polish_workspace.clock,
+    )
+    assert isinstance(first, assessment_service.NextTaskReport)
+    rows_before = _row_count(polish_workspace, run.run_id)
+
+    again = assessment_service.next_task(
+        polish_workspace.paths,
+        run=run.run_id,
+        idempotency_key="serve-1",
+        clock=polish_workspace.clock,
+    )
+
+    assert isinstance(again, assessment_service.NextTaskReport)
+    assert again.content_id == first.content_id
+    assert again.served_again
+    assert _row_count(polish_workspace, run.run_id) == rows_before
+    assert _exposure(polish_workspace, first.content_id)[0] == 1
+
+
+def test_a_serve_key_reused_for_another_run_is_a_conflict(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    import pytest
+
+    from linguawiki.errors import LinguaWikiError
+
+    first_run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    assessment_service.next_task(
+        polish_workspace.paths,
+        run=first_run.run_id,
+        idempotency_key="serve-1",
+        clock=polish_workspace.clock,
+    )
+    assessment_service.finalize(
+        polish_workspace.paths, run=first_run.run_id, clock=polish_workspace.clock
+    )
+    second_run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.next_task(
+            polish_workspace.paths,
+            run=second_run.run_id,
+            idempotency_key="serve-1",
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "idempotency_conflict"
+    assert first_run.run_id in failure.value.payload.message
+
+
+def test_a_record_key_reused_with_a_different_score_is_a_conflict_not_a_crash(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """The unique index on `domain_events.idempotency_key` had no preflight at all.
+
+    A reused key died on a raw `ConstraintException`, surfaced as `internal_error`, after
+    every refusal `record` carefully places before its transaction.
+    """
+
+    import pytest
+
+    from linguawiki.errors import LinguaWikiError
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    first = _serve_one(polish_workspace, run.run_id)
+    second = _serve_one(polish_workspace, run.run_id)
+    assessment_service.record(
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=first.content_id,
+        score=1.0,
+        idempotency_key="score-1",
+        clock=polish_workspace.clock,
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=second.content_id,
+            score=0.0,
+            idempotency_key="score-1",
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "idempotency_conflict"
+
+
+def test_a_retried_record_replays_rather_than_scoring_twice(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = _serve_one(polish_workspace, run.run_id)
+    arguments = {
+        "run": run.run_id,
+        "content_id": served.content_id,
+        "score": 1.0,
+        "idempotency_key": "score-1",
+    }
+    first = assessment_service.record(
+        polish_workspace.paths, clock=polish_workspace.clock, **arguments
+    )
+
+    again = assessment_service.record(
+        polish_workspace.paths, clock=polish_workspace.clock, **arguments
+    )
+
+    assert again.tasks_recorded == first.tasks_recorded
+    with open_reader(polish_workspace.paths) as database:
+        results = database.scalar(
+            "SELECT count(*) FROM assessment_results WHERE run_id = ?", [run.run_id]
+        )
+    assert int(results) == 1
+
+
+def test_a_key_belonging_to_another_operation_is_refused_by_name(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """An idempotency key identifies one operation, in both directions."""
+
+    import pytest
+
+    from linguawiki.errors import LinguaWikiError
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    served = assessment_service.next_task(
+        polish_workspace.paths,
+        run=run.run_id,
+        idempotency_key="shared",
+        clock=polish_workspace.clock,
+    )
+    assert isinstance(served, assessment_service.NextTaskReport)
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.record(
+            polish_workspace.paths,
+            run=run.run_id,
+            content_id=served.content_id,
+            score=1.0,
+            idempotency_key="shared",
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "idempotency_conflict"
+    assert "assessment.served" in failure.value.payload.message
+
+
+def test_a_finalize_key_reused_for_another_run_is_a_conflict(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """`finalize` wrote the caller's key into the same index with no preflight either."""
+
+    import pytest
+
+    from linguawiki.errors import LinguaWikiError
+
+    first = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    assessment_service.finalize(
+        polish_workspace.paths,
+        run=first.run_id,
+        idempotency_key="close-1",
+        clock=polish_workspace.clock,
+    )
+    second = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.finalize(
+            polish_workspace.paths,
+            run=second.run_id,
+            idempotency_key="close-1",
+            clock=polish_workspace.clock,
+        )
+
+    assert failure.value.payload.code == "idempotency_conflict"
+    assert first.run_id in failure.value.payload.message
+
+
+def test_the_cli_can_retry_a_serve_without_consuming_a_second_task(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    import json
+    import subprocess
+    import sys
+
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    command = [
+        sys.executable,
+        "-m",
+        "linguawiki",
+        "assessment",
+        "next",
+        "--run",
+        run.run_id,
+        "--idempotency-key",
+        "cli-serve-1",
+        "--workspace",
+        str(polish_workspace.root),
+        "--format",
+        "json",
+    ]
+    first = json.loads(subprocess.run(command, capture_output=True, text=True, check=True).stdout)
+
+    again = json.loads(subprocess.run(command, capture_output=True, text=True, check=True).stdout)
+
+    assert again["data"]["content_id"] == first["data"]["content_id"]
+    assert again["data"]["served_again"] is True
+    assert _row_count(polish_workspace, run.run_id) == 1

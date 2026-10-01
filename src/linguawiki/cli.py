@@ -525,6 +525,9 @@ def _assessment_parser(subcommands: Any) -> None:
     nxt = actions.add_parser("next", help="serve the next task")
     nxt.add_argument("--run")
     _add_track_selector(nxt)
+    # Serving is a mutation: it spends an item's exposure. Without a key a retry after a
+    # lost response consumed a second task and burned a second item.
+    nxt.add_argument("--idempotency-key")
     _add_workspace(nxt)
     record = actions.add_parser("record", help="score one served task")
     record.add_argument("--run")
@@ -2247,7 +2250,12 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
     paths = _pack_workspace(args)
     if args.action == "next":
         outcome = assessment_service.next_task(
-            paths, run=args.run, track=args.track, clock=clock, command=command
+            paths,
+            run=args.run,
+            track=args.track,
+            clock=clock,
+            command=command,
+            idempotency_key=args.idempotency_key,
         )
         if isinstance(outcome, assessment_service.NextTaskReport):
             _print(

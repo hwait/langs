@@ -26,6 +26,7 @@ from typing import Any
 
 from pydantic import Field
 
+from linguawiki import idempotency
 from linguawiki.clock import Clock, SystemClock, aware_utc
 from linguawiki.contracts import (
     SNAPSHOT_ABSENT,
@@ -377,6 +378,15 @@ def _outstanding_dimensions(database: Database, run_id: str) -> Mapping[str, str
             [run_id],
         )
     }
+
+
+#: The event types a keyed assessment operation records. They are the names an
+#: `idempotency_conflict` reports, so a caller can tell "this key already served you a
+#: task" from "this key already scored one" -- which is the whole point of refusing a key
+#: that belongs to another operation.
+SERVED_EVENT = "assessment.served"
+RECORDED_EVENT = "assessment.recorded"
+FINALIZED_EVENT = "assessment.finalized"
 
 
 #: Who drove a mutation, for `audit_log.actor`. The *command* name stays the same across
@@ -868,6 +878,7 @@ def next_task(
     clock: Clock | None = None,
     command: str = "assessment.next",
     actor: str = DEFAULT_ACTOR,
+    idempotency_key: str | None = None,
 ) -> NextTaskReport | AssessmentRunReport:
     """Serve the next task, or report the run when no dimension is still open."""
 
@@ -876,6 +887,39 @@ def next_task(
         track_id = None if track is None else learner_service.resolve_track(database, track)
         run_id = _resolve_run(database, run, track_id=track_id)
         row = _run_row(database, run_id)
+        # Before `_assert_running`, deliberately: a retry of the serve that *closed* the
+        # last dimension must replay rather than being told the run is finished, and a
+        # conflicting key must be refused whatever state the run has reached since.
+        fingerprint = idempotency.request_hash(operation=SERVED_EVENT, run_id=run_id)
+        replay = idempotency.resolve(
+            database,
+            key=idempotency_key,
+            event_type=SERVED_EVENT,
+            request_hash=fingerprint,
+        )
+        if replay is not None:
+            recorded = replay.get("content_id")
+            if recorded is None:
+                # The key recorded a serve that served nothing: the call closed the last
+                # open dimension and returned the run. A retry gets the same answer.
+                return _run_report(database, run_id)
+            return _hand_back(
+                database,
+                run_id,
+                content_id=str(recorded),
+                open_dimensions=[
+                    state.dimension
+                    for state in _dimension_states(
+                        database,
+                        run_id,
+                        {
+                            str(k): str(v)
+                            for k, v in json.loads(str(row[6]))["dimension_kinds"].items()
+                        },
+                    )
+                    if state.status == "open"
+                ],
+            )
         _assert_running(run_id, status=str(row[4]))
         conditions = json.loads(str(row[6]))
         kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
@@ -1047,6 +1091,21 @@ def next_task(
                         f"task {sequence}"
                     ),
                 )
+                if idempotency_key is not None:
+                    migration_module.record_domain_event(
+                        transaction,
+                        event_type=SERVED_EVENT,
+                        aggregate_type="assessment_run",
+                        aggregate_id=run_id,
+                        correlation_id=EventId.new(),
+                        payload_json=idempotency.payload(
+                            fingerprint,
+                            content_id=selection.candidate.content_id,
+                            dimension=state.dimension,
+                            sequence=sequence,
+                        ),
+                        idempotency_key=idempotency_key,
+                    )
             return NextTaskReport(
                 run_id=run_id,
                 dimension=state.dimension,
@@ -1074,6 +1133,21 @@ def next_task(
         # task has work on it, so the run is not finished and must not report as though it
         # were: hand that task back instead. The states are already sorted, so this is
         # the least-progressed one.
+        if idempotency_key is not None and not any(
+            state.dimension in outstanding for state in open_states
+        ):
+            # This call served nothing and closed what it could. Recording that under the
+            # key is what stops a retry from serving a task the first call did not.
+            with database.transaction() as transaction:
+                migration_module.record_domain_event(
+                    transaction,
+                    event_type=SERVED_EVENT,
+                    aggregate_type="assessment_run",
+                    aggregate_id=run_id,
+                    correlation_id=EventId.new(),
+                    payload_json=idempotency.payload(fingerprint, content_id=None),
+                    idempotency_key=idempotency_key,
+                )
         held = [state for state in open_states if state.dimension in outstanding]
         if held:
             handed = _hand_back(
@@ -1331,6 +1405,43 @@ def record(
         conditions = json.loads(str(row[6]))
         kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
         record_track = learner_service.track_context(database, str(row[1]))
+        # The key is checked here, before the transaction, so the unique index on
+        # `domain_events.idempotency_key` is never the thing that refuses: it did, with a
+        # raw `ConstraintException` surfaced as `internal_error`, after every refusal below
+        # had been placed before the transaction precisely to avoid that.
+        #
+        # Every argument a refusal below could turn on is in the fingerprint -- the score,
+        # the visibility, the assessor, the rubric -- which is what makes returning early
+        # on a replay safe: a call that asked for something different conflicts rather than
+        # being handed this one's result. The response text itself is never hashed into the
+        # payload under its own name; `payload_json` is never edited, so a payload written
+        # before the retention rule ran would keep what it kept for the life of the
+        # workspace. Its digest answers the same question and carries nothing.
+        scoring_fingerprint = idempotency.request_hash(
+            operation=RECORDED_EVENT,
+            run_id=run_id,
+            content_id=content_id,
+            score=score,
+            response=None if response is None else idempotency.canonical_hash(response),
+            response_excerpt=None
+            if response_excerpt is None
+            else idempotency.canonical_hash(response_excerpt),
+            response_visibility=response_visibility,
+            assessor_kind=assessor_kind,
+            assessor=assessor,
+            confidence=confidence,
+            rubric=dict(rubric or {}),
+        )
+        if (
+            idempotency.resolve(
+                database,
+                key=idempotency_key,
+                event_type=RECORDED_EVENT,
+                request_hash=scoring_fingerprint,
+            )
+            is not None
+        ):
+            return _run_report(database, run_id)
         # Scored from what was served, never from what the pack now says. Re-reading the
         # installed pack folded a difficulty the learner never faced into their posterior
         # whenever the pack changed mid-run.
@@ -1484,8 +1595,10 @@ def record(
                     aggregate_type="assessment_run",
                     aggregate_id=run_id,
                     correlation_id=EventId.new(),
-                    payload_json=json.dumps(
-                        {"content_id": content_id, "score": resolved_score}, sort_keys=True
+                    payload_json=idempotency.payload(
+                        scoring_fingerprint,
+                        content_id=content_id,
+                        score=resolved_score,
                     ),
                     idempotency_key=idempotency_key,
                 )
@@ -1551,6 +1664,23 @@ def finalize(
         if str(row[4]) == "finalized":
             return _run_report(database, run_id)
         _assert_transition(run_id, current=str(row[4]), target="finalized")
+        # `finalize` writes the caller's key straight into the same unique index, so it had
+        # the same unpreflighted `ConstraintException` as `record`: a key that finalized one
+        # run, reused for another, died as `internal_error`. An already-finalized run
+        # replays above this, so what reaches here is a key being asked for a second run.
+        closing_fingerprint = idempotency.request_hash(
+            operation=FINALIZED_EVENT, run_id=run_id, reason=reason
+        )
+        if (
+            idempotency.resolve(
+                database,
+                key=idempotency_key,
+                event_type=FINALIZED_EVENT,
+                request_hash=closing_fingerprint,
+            )
+            is not None
+        ):
+            return _run_report(database, run_id)
         conditions = json.loads(str(row[6]))
         kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
         record_track = learner_service.track_context(database, str(row[1]))
@@ -1601,7 +1731,7 @@ def finalize(
                 aggregate_type="assessment_run",
                 aggregate_id=run_id,
                 correlation_id=EventId.new(),
-                payload_json=json.dumps({"reason": reason}, sort_keys=True),
+                payload_json=idempotency.payload(closing_fingerprint, reason=reason),
                 idempotency_key=idempotency_key or f"assessment.finalized:{run_id}",
             )
     return report(paths, run=run_id, clock=active_clock)

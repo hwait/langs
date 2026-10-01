@@ -25,7 +25,6 @@ Two things are deliberately not decided here. What an observation *proves* belon
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -49,6 +48,7 @@ from linguawiki.db import migrations as migration_module
 from linguawiki.db.connection import Database, open_reader, open_writer
 from linguawiki.errors import ErrorDetail, LinguaWikiError, validated_contract
 from linguawiki.evidence import STRENGTH_VERSION, assert_known
+from linguawiki.idempotency import canonical_hash
 from linguawiki.ids import (
     ActivityId,
     BatchId,
@@ -322,18 +322,6 @@ def _json_object(raw: object) -> dict[str, Any]:
     except ValueError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
-
-
-def canonical_hash(payload: object) -> str:
-    """Hash a payload by its canonical JSON form, not by the bytes it arrived in.
-
-    Two flushes carrying the same observations are the same flush however the caller
-    serialized them, and a package exported twice is one session. Content-addressing is
-    what makes "retrying is safe" and "ingesting twice does nothing" the same mechanism.
-    """
-
-    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 # --- Reading the facts a plan is made of -------------------------------------------
