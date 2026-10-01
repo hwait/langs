@@ -1,13 +1,62 @@
 ---
 title: "C3 — The local server and its generated contract"
 stage: C3
-status: ready
+status: shipped
 depends_on: [C1, C2a, C2b]
 ---
 
 # C3 — The local server and its generated contract
 
 Parent: [Learner Client Delivery Plan](../learner-client-plan.md) · Decisions: [ADR 0008](../adr/0008-learner-client-transport.md)
+
+## Shipped — 2026-10-01
+
+Implemented on `c3-server-and-contract`. Release gate `scripts/verify.py`: **2351 passed, 1
+skipped**, branch coverage 93.46% against a 90% floor, wheel and distribution checks clean.
+Run as the release gate rather than `--fast` because the change touched a migration, a
+published contract, and the wheel's contents.
+
+Nine things went differently, and six of them are findings rather than preferences.
+
+- **§10's check shipped inside §1.** An unconstrained column with no named check is a state
+  AGENTS.md forbids, so splitting them would have left one commit in it. §10 added no further
+  work.
+- **§4's preflight was extended to `finalize`.** It writes the caller's key straight into the
+  same unique index and had the identical unpreflighted `ConstraintException`, reachable from
+  the same client loop. Leaving it would have fixed the defect in two of the three places it
+  lives.
+- **`ClientServer.close()` had to handle a server that was bound and never served.**
+  `HTTPServer.shutdown` waits on an event only `serve_forever` sets, so closing an unstarted
+  server blocked forever. Binding and serving are separate operations and `close` has to work
+  after either.
+- **A fifth transport refusal: `client_header_repeated`.** Two `Host` headers is one request
+  that two readers resolve differently, which is a smuggling attempt rather than a quirk. Its
+  first version returned 422 because the code was added to the checks and not to the
+  forbidden *class* — the exact failure the by-class mapping exists to prevent — so a test now
+  reads the codes out of `security.py` rather than listing them.
+- **`/health` must *not* declare 503.** It touches no database, which is what makes it the
+  route a page uses to tell "up" from "busy"; declaring a status it cannot return would make
+  that distinction useless. A test holds the writer and asserts it still answers 200.
+- **`/runs/{run_id}/status` takes no idempotency key.** A status transition is idempotent by
+  *state* — `RUN_TRANSITIONS` permits `paused -> paused` — so a retry reaches the state it
+  asked for. Every other mutation accumulates and is keyed. §9's test names the keyed routes
+  rather than counting them.
+- **Request bodies and response models live on the `Route` objects**, not in the generator, so
+  the published contract and the handler honouring it are edited in one place. Path templates
+  are derived from the router's own patterns for the same reason.
+- **The document embeds the two envelope snapshots, not all twenty-one.** ADR 0008 asks for
+  the snapshots it *reuses*; a client API document carrying every pack and session schema is
+  bloat. The relocation machinery is tested over every snapshot in `SCHEMA_MODELS`
+  regardless, which is what the "no `#/$defs/` survives" property needed.
+- **The server's test client is built on `http.client`, not `urllib`.** Setting
+  `urllib.request.Request.host` retargets the *connection* rather than overriding the header,
+  so a forged-`Host` test written with urllib goes off to resolve the forged name instead of
+  reaching the server under test. It hung rather than failing, which is worse.
+
+Two renames the plan did not mention: `_run_report`/`_resolve_run` became public, because the
+read model asks the same two questions and a private copy would be a second answer; and
+`canonical_hash` moved out of `services/sessions.py` into `linguawiki/idempotency.py`, which
+is where it was first needed but not where it belongs.
 
 **Goal.** A loopback HTTP server exposing the read model and the calibration mutations,
 described by a generated OpenAPI 3.1 document. No UI; verified by contract tests and curl.
