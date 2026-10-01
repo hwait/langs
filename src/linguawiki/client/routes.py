@@ -12,9 +12,11 @@ server reads exactly like one written through the CLI. `actor` is what distingui
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from pydantic import BaseModel
 
 from linguawiki.clock import Clock
 from linguawiki.errors import ErrorDetail, LinguaWikiError
@@ -26,6 +28,30 @@ from linguawiki.services import assessment_view as view_service
 #: change between entry points -- that would make every audit query ask twice -- so this is
 #: the one place the surface is named.
 ACTOR = "client"
+
+#: Every mutating route takes one, and it means the same thing on all of them: retrying is
+#: safe, and reusing it for a different request is a conflict rather than a replay.
+IDEMPOTENCY_KEY = {
+    "type": "string",
+    "minLength": 1,
+    "description": (
+        "Operation-scoped key bound to a hash of this request. The same key with the same "
+        "request replays the first call's result; the same key with a different request, or "
+        "one recorded against another operation, is refused with idempotency_conflict."
+    ),
+}
+
+
+def _body(properties: Mapping[str, Any], *, required: Sequence[str] = ()) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": dict(properties),
+    }
+    if required:
+        schema["required"] = list(required)
+    return schema
+
 
 #: A run identifier in a path. Matched narrowly so a path that is not one is a routing miss
 #: rather than a service-layer refusal about an identifier nobody could have meant.
@@ -95,6 +121,14 @@ class Route:
     #: `Origin` check, and whether a writer is taken -- so a route cannot be guarded as a
     #: read and then write.
     mutates: bool
+    #: A short summary for the generated contract.
+    summary: str = ""
+    #: The body this route accepts, as a JSON Schema object, and the reports it can answer
+    #: with. Both live here rather than in the generator so the published contract and the
+    #: handler that honours it are edited in the same place: a document assembled from a
+    #: separate table is a second description of one thing, and the one that goes stale.
+    request_schema: Mapping[str, Any] | None = None
+    response_models: tuple[type[BaseModel], ...] = ()
 
 
 def _start(request: Request) -> Any:
@@ -175,18 +209,81 @@ def _report(request: Request) -> Any:
 
 
 ROUTES: tuple[Route, ...] = (
-    Route("POST", re.compile(r"^/runs$"), "assessment.start", _start, mutates=True),
-    Route("GET", re.compile(rf"^/runs/{RUN_ID}$"), "assessment.report", _report, mutates=False),
     Route(
-        "GET", re.compile(rf"^/runs/{RUN_ID}/screen$"), "assessment.screen", _screen, mutates=False
+        "POST",
+        re.compile(r"^/runs$"),
+        "assessment.start",
+        _start,
+        mutates=True,
+        summary="Open a bounded calibration or placement run",
+        request_schema=_body(
+            {
+                "track": {"type": "string", "minLength": 1},
+                "run_type": {"enum": ["pilot-calibration", "placement"]},
+                "dimensions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "modalities": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "idempotency_key": IDEMPOTENCY_KEY,
+            }
+        ),
+        response_models=(assessment_service.AssessmentRunReport,),
     ),
-    Route("POST", re.compile(rf"^/runs/{RUN_ID}/tasks$"), "assessment.next", _serve, mutates=True),
+    Route(
+        "GET",
+        re.compile(rf"^/runs/{RUN_ID}$"),
+        "assessment.report",
+        _report,
+        mutates=False,
+        summary="A run's per-dimension estimates and budgets",
+        response_models=(assessment_service.AssessmentRunReport,),
+    ),
+    Route(
+        "GET",
+        re.compile(rf"^/runs/{RUN_ID}/screen$"),
+        "assessment.screen",
+        _screen,
+        mutates=False,
+        summary="Everything a client needs to draw the run, in one read",
+        response_models=(view_service.RunScreen,),
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/runs/{RUN_ID}/tasks$"),
+        "assessment.next",
+        _serve,
+        mutates=True,
+        summary="Serve the next task, or hand back the one already outstanding",
+        request_schema=_body({"idempotency_key": IDEMPOTENCY_KEY}),
+        # Two reports, because a serve that closes the last open dimension answers with the
+        # run rather than with a task. A client that assumed a task would read a missing
+        # `content_id` as a malformed answer.
+        response_models=(
+            assessment_service.NextTaskReport,
+            assessment_service.AssessmentRunReport,
+        ),
+    ),
     Route(
         "POST",
         re.compile(rf"^/runs/{RUN_ID}/results$"),
         "assessment.record",
         _record,
         mutates=True,
+        summary="Score one served task and fold it into its dimension's posterior",
+        request_schema=_body(
+            {
+                "content_id": {"type": "string", "minLength": 1},
+                "score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "response": {"type": "string", "minLength": 1},
+                "response_excerpt": {"type": "string", "minLength": 1},
+                "response_visibility": {"enum": ["withheld", "excerpt", "full"]},
+                "rubric": {"type": "object"},
+                "assessor_kind": {"enum": ["deterministic", "ai", "learner", "human"]},
+                "assessor": {"type": "string", "minLength": 1},
+                "confidence": {"enum": ["low", "medium", "high"]},
+                "idempotency_key": IDEMPOTENCY_KEY,
+            },
+            required=["content_id"],
+        ),
+        response_models=(assessment_service.AssessmentRunReport,),
     ),
     Route(
         "POST",
@@ -194,6 +291,11 @@ ROUTES: tuple[Route, ...] = (
         "assessment.status",
         _set_status,
         mutates=True,
+        summary="Pause, resume, or abandon a run",
+        request_schema=_body(
+            {"status": {"enum": ["in-progress", "paused", "abandoned"]}}, required=["status"]
+        ),
+        response_models=(assessment_service.AssessmentRunReport,),
     ),
     Route(
         "POST",
@@ -201,6 +303,14 @@ ROUTES: tuple[Route, ...] = (
         "assessment.finalize",
         _finalize,
         mutates=True,
+        summary="Close a run and write one estimate per tested dimension",
+        request_schema=_body(
+            {
+                "reason": {"type": "string", "minLength": 1},
+                "idempotency_key": IDEMPOTENCY_KEY,
+            }
+        ),
+        response_models=(assessment_service.AssessmentRunReport,),
     ),
 )
 

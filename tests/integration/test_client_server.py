@@ -609,3 +609,34 @@ def test_both_entry_points_build_the_error_payload_from_one_contract(
         answer.payload,
         schema_directory=Path(__file__).resolve().parents[2] / "schemas",
     )
+
+
+def test_repeating_a_status_transition_is_accepted_without_a_key(
+    running: RunningServer,
+) -> None:
+    """Why that route takes no idempotency key: it is idempotent by state.
+
+    `RUN_TRANSITIONS` permits `paused -> paused`, so a retry reaches the state it asked for
+    rather than doing something a second time. Every other mutation accumulates.
+    """
+
+    opened = running.request("POST", "/runs", body={})
+    run_id = opened.payload["data"]["run_id"]
+
+    first = running.request("POST", f"/runs/{run_id}/status", body={"status": "paused"})
+    again = running.request("POST", f"/runs/{run_id}/status", body={"status": "paused"})
+
+    assert first.status == 200
+    assert again.status == 200
+    assert again.payload["data"]["status"] == "paused"
+
+
+def test_health_does_not_report_a_busy_database_because_it_never_asks(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """The route that tells "up" from "busy" has to answer while the database is held."""
+
+    with open_writer(polish_workspace.paths, command="test.hold", clock=polish_workspace.clock):
+        answer = running.request("GET", "/health")
+
+    assert answer.status == 200
