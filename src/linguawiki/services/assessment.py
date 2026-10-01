@@ -286,7 +286,7 @@ def _run_row(database: Database, run_id: str) -> Sequence[Any]:
     return row
 
 
-def _resolve_run(database: Database, run: str | None, *, track_id: str | None = None) -> str:
+def resolve_run(database: Database, run: str | None, *, track_id: str | None = None) -> str:
     if run is not None:
         return str(_run_row(database, run)[0])
     parameters: list[object] = []
@@ -357,6 +357,25 @@ def _excluded_task_ids(
         )
     }
     return tuple(sorted(served | recent))
+
+
+def outstanding_task_ids(database: Database, run_id: str) -> tuple[str, ...]:
+    """Every task this run served and has not settled, in the order it served them.
+
+    Separate from `_outstanding_dimensions`, which answers "may this dimension be served
+    again" and therefore keys by dimension -- collapsing two outstanding tasks in one
+    dimension into one, which is the right answer to *that* question and would silently
+    hide answerable work from a screen. One structure, one question.
+    """
+
+    return tuple(
+        str(content_id)
+        for (content_id,) in database.query(
+            "SELECT content_id FROM assessment_run_tasks "
+            "WHERE run_id = ? AND status = 'served' ORDER BY sequence",
+            [run_id],
+        )
+    )
 
 
 def _outstanding_dimensions(database: Database, run_id: str) -> Mapping[str, str]:
@@ -666,7 +685,7 @@ def start(
                 [idempotency_key],
             )
             if existing is not None:
-                return _run_report(database, str(existing[0]))
+                return run_report(database, str(existing[0]))
         kinds = _dimension_kinds(pack_row["manifest_json"])
         requested = tuple(dimensions) if dimensions else tuple(kinds)
         unknown = sorted(set(requested) - set(kinds))
@@ -885,7 +904,7 @@ def next_task(
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
-        run_id = _resolve_run(database, run, track_id=track_id)
+        run_id = resolve_run(database, run, track_id=track_id)
         row = _run_row(database, run_id)
         # Before `_assert_running`, deliberately: a retry of the serve that *closed* the
         # last dimension must replay rather than being told the run is finished, and a
@@ -902,7 +921,7 @@ def next_task(
             if recorded is None:
                 # The key recorded a serve that served nothing: the call closed the last
                 # open dimension and returned the run. A retry gets the same answer.
-                return _run_report(database, run_id)
+                return run_report(database, run_id)
             return _hand_back(
                 database,
                 run_id,
@@ -929,7 +948,7 @@ def next_task(
         states = _dimension_states(database, run_id, kinds)
         open_states = [state for state in states if state.status == "open"]
         if not open_states:
-            return _run_report(database, run_id)
+            return run_report(database, run_id)
         candidates = _candidates(database, pack_row["pack_id"])
         excluded = _excluded_task_ids(
             database, track_id=str(row[1]), run_id=run_id, clock=active_clock
@@ -1386,7 +1405,7 @@ def record(
         )
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
-        run_id = _resolve_run(database, run, track_id=track_id)
+        run_id = resolve_run(database, run, track_id=track_id)
         row = _run_row(database, run_id)
         _assert_running(run_id, status=str(row[4]), action="take further results")
         served = database.one(
@@ -1441,7 +1460,7 @@ def record(
             )
             is not None
         ):
-            return _run_report(database, run_id)
+            return run_report(database, run_id)
         # Scored from what was served, never from what the pack now says. Re-reading the
         # installed pack folded a difficulty the learner never faced into their posterior
         # whenever the pack changed mid-run.
@@ -1521,7 +1540,7 @@ def record(
                 response_hash=response_hash,
                 visibility=visibility,
             )
-            return _run_report(database, run_id)
+            return run_report(database, run_id)
         states = {state.dimension: state for state in _dimension_states(database, run_id, kinds)}
         state = states[dimension]
         levels = _pinned_levels(conditions, fallback=record_track.framework_levels)
@@ -1624,7 +1643,7 @@ def set_status(
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
-        run_id = _resolve_run(database, run, track_id=track_id)
+        run_id = resolve_run(database, run, track_id=track_id)
         current = _run_row(database, run_id)
         _assert_transition(run_id, current=str(current[4]), target=status)
         with database.transaction() as transaction:
@@ -1659,10 +1678,10 @@ def finalize(
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
-        run_id = _resolve_run(database, run, track_id=track_id)
+        run_id = resolve_run(database, run, track_id=track_id)
         row = _run_row(database, run_id)
         if str(row[4]) == "finalized":
-            return _run_report(database, run_id)
+            return run_report(database, run_id)
         _assert_transition(run_id, current=str(row[4]), target="finalized")
         # `finalize` writes the caller's key straight into the same unique index, so it had
         # the same unpreflighted `ConstraintException` as `record`: a key that finalized one
@@ -1680,7 +1699,7 @@ def finalize(
             )
             is not None
         ):
-            return _run_report(database, run_id)
+            return run_report(database, run_id)
         conditions = json.loads(str(row[6]))
         kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
         record_track = learner_service.track_context(database, str(row[1]))
@@ -1992,7 +2011,7 @@ def served_task(
 
     with open_reader(paths, clock=clock or SystemClock()) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
-        resolved_run = _resolve_run(database, run, track_id=track_id)
+        resolved_run = resolve_run(database, run, track_id=track_id)
         return served_task_report(database, resolved_run, content_id=content_id)
 
 
@@ -2100,10 +2119,10 @@ def report(
 
     with open_reader(paths, clock=clock or SystemClock()) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
-        return _run_report(database, _resolve_run(database, run, track_id=track_id))
+        return run_report(database, resolve_run(database, run, track_id=track_id))
 
 
-def _run_report(database: Database, run_id: str) -> AssessmentRunReport:
+def run_report(database: Database, run_id: str) -> AssessmentRunReport:
     """Read a run's state through a caller's connection.
 
     Reports take a `Database` rather than a workspace because DuckDB serves one

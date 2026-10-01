@@ -34,6 +34,7 @@ from linguawiki.packs import stamp as stamp_module
 from linguawiki.paths import require_initialized_workspace, workspace_paths
 from linguawiki.services import artifacts as artifact_service
 from linguawiki.services import assessment as assessment_service
+from linguawiki.services import assessment_view as view_service
 from linguawiki.services import authoring as authoring_service
 from linguawiki.services import context as context_service
 from linguawiki.services import curriculum as curriculum_service
@@ -579,6 +580,13 @@ def _assessment_parser(subcommands: Any) -> None:
     report.add_argument("--run")
     _add_track_selector(report)
     _add_workspace(report)
+    # The read model the browser client draws from, exposed here too: the server and the
+    # CLI have to be answerable to the same cases, and a question only one of them can be
+    # asked cannot be compared.
+    screen = actions.add_parser("screen", help="everything a client needs to draw the run")
+    screen.add_argument("--run")
+    _add_track_selector(screen)
+    _add_workspace(screen)
 
 
 def _knowledge_parser(subcommands: Any) -> None:
@@ -2147,6 +2155,30 @@ def _run_curriculum_audit(args: argparse.Namespace, clock: Clock, command: str) 
     return 0
 
 
+def _screen_lines(screen: view_service.RunScreen) -> str:
+    lines = [
+        f"{screen.run_id} {screen.calibration_label} ({screen.status}) against "
+        f"{screen.pack_key} {screen.pack_version}; "
+        f"{screen.tasks_recorded} of {screen.tasks_served} served task(s) scored"
+    ]
+    lines.extend(
+        f"  {dimension.dimension} ({dimension.dimension_kind}): {dimension.status}, "
+        f"{dimension.tasks_used}/{dimension.maximum_tasks} task(s), "
+        f"{dimension.estimated_level or 'no estimate'} ({dimension.confidence})"
+        for dimension in screen.dimensions
+    )
+    # The tasks by name, not a count: an operator comparing this against the browser needs
+    # to know which task is waiting, not how many are.
+    lines.extend(
+        f"  awaiting {task.content_id} in {task.dimension}: answer by {task.answer_with}"
+        + (" with audio" if task.plays_audio else "")
+        for task in screen.outstanding
+    )
+    if not screen.outstanding:
+        lines.append("  nothing is awaiting an answer")
+    return "\n".join(lines)
+
+
 def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
     lines = [
         f"{report.run_id} {report.calibration_label} ({report.status}) against "
@@ -2321,6 +2353,14 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             clock=clock,
             command=command,
         )
+    elif args.action == "screen":
+        screen = view_service.run_screen(paths, run=args.run, track=args.track, clock=clock)
+        _print(
+            _envelope(command, screen, clock, screen.warnings),
+            _screen_lines(screen),
+            args.format,
+        )
+        return 0
     else:
         report = assessment_service.report(paths, run=args.run, track=args.track, clock=clock)
     _print(
