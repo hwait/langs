@@ -18,6 +18,7 @@ everything else comes from the service layer unchanged.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -49,6 +50,8 @@ MAXIMUM_BODY_BYTES = 256 * 1024
 #: What the launch command opens. The token rides in the **fragment**: a fragment is never
 #: sent to a server, so it reaches no access log, no `Referer`, and no proxy.
 LAUNCH_FRAGMENT = "token="
+#: The optional launch-time run reference, after the token in the same fragment.
+LAUNCH_RUN = "run="
 
 
 def _health() -> dict[str, object]:
@@ -75,6 +78,10 @@ class ClientServer:
     server: HTTPServer
     paths: WorkspacePaths
     token: str
+    #: A run the launch command asked the page to open, carried in the fragment beside the
+    #: token. Without it a fresh page uses discovery; with it, the page opens this run or
+    #: says by name why it cannot.
+    run: str | None = None
     serving: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -87,7 +94,8 @@ class ClientServer:
 
     @property
     def launch_url(self) -> str:
-        return f"{self.origin}/#{LAUNCH_FRAGMENT}{self.token}"
+        reference = "" if self.run is None else f"&{LAUNCH_RUN}{self.run}"
+        return f"{self.origin}/#{LAUNCH_FRAGMENT}{self.token}{reference}"
 
     def serve_forever(self) -> None:
         """Serve until `close`, recording that `shutdown` is now safe to call."""
@@ -188,6 +196,9 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                     else 1
                 )
                 report = with_retry(lambda: route.handler(request), attempts=attempts)
+                if route.binary is not None:
+                    self._respond(200, report.data, content_type=report.media_type)
+                    return
                 warnings = tuple(getattr(report, "warnings", ()) or ())
                 self._respond(
                     200,
@@ -296,7 +307,12 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
             )
 
         def _respond(
-            self, status: int, body: bytes, *, extra_headers: dict[str, str] | None = None
+            self,
+            status: int,
+            body: bytes,
+            *,
+            extra_headers: dict[str, str] | None = None,
+            content_type: str = "application/json; charset=utf-8",
         ) -> None:
             # One request per connection. HTTP/1.1 keeps a connection alive by default, and
             # this server handles one at a time: the first client's idle socket then sat in
@@ -308,7 +324,7 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
             self.close_connection = True
             self.send_response(status)
             self.send_header("Connection", "close")
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             # A local page, and nothing else, may read these answers. `Access-Control-*` is
             # deliberately absent: granting a cross-origin read would undo the origin check.
@@ -382,7 +398,11 @@ def _too_large() -> LinguaWikiError:
 
 
 def build_server(
-    paths: WorkspacePaths, *, port: int = 0, clock: Clock | None = None
+    paths: WorkspacePaths,
+    *,
+    port: int = 0,
+    clock: Clock | None = None,
+    run: str | None = None,
 ) -> ClientServer:
     """Bind a server on loopback, mint its token, and record where it is listening.
 
@@ -392,6 +412,14 @@ def build_server(
     """
 
     active_clock = clock or SystemClock()
+    if run is not None and re.fullmatch(routes.RUN_ID, run) is None:
+        # Checked before binding: a reference that could never name a run would open a page
+        # that refuses on its first request, after the learner has been sent to it.
+        raise LinguaWikiError(
+            "invalid_arguments",
+            f"{run} is not a run identifier",
+            details=(ErrorDetail(field="run", reason="not a run identifier"),),
+        )
     token = runtime.mint_token()
     state: dict[str, Any] = {"paths": paths, "clock": active_clock, "token": token}
     # `HTTPServer`, not `ThreadingHTTPServer`. See the module docstring: the threaded form
@@ -403,7 +431,7 @@ def build_server(
     state["port"] = bound
     state["origin"] = f"http://127.0.0.1:{bound}"
     runtime.write(paths, port=bound, clock=active_clock)
-    return ClientServer(server=server, paths=paths, token=token)
+    return ClientServer(server=server, paths=paths, token=token, run=run)
 
 
 def serve(
@@ -412,6 +440,7 @@ def serve(
     port: int = 0,
     clock: Clock | None = None,
     open_browser: bool = True,
+    run: str | None = None,
 ) -> ClientServer:
     """Build a server and run it in the foreground until interrupted.
 
@@ -419,7 +448,7 @@ def serve(
     lifecycle nobody asked for and a second way to leave a stale runtime record behind.
     """
 
-    client = build_server(paths, port=port, clock=clock)
+    client = build_server(paths, port=port, clock=clock, run=run)
     if open_browser:
         import webbrowser
 
@@ -435,6 +464,7 @@ def serve(
 
 __all__ = [
     "LAUNCH_FRAGMENT",
+    "LAUNCH_RUN",
     "MAXIMUM_BODY_BYTES",
     "TOKEN_HEADER",
     "ClientServer",

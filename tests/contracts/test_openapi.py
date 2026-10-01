@@ -146,6 +146,7 @@ def test_every_route_the_server_serves_is_declared() -> None:
             route.pattern.pattern.removeprefix("^")
             .removesuffix("$")
             .replace(client_routes.RUN_ID, "{run_id}")
+            .replace(client_routes.CONTENT_ID, "{content_id}")
         )
         assert template in whole["paths"], template
         assert route.method.lower() in whole["paths"][template], template
@@ -190,6 +191,7 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
             route.pattern.pattern.removeprefix("^")
             .removesuffix("$")
             .replace(client_routes.RUN_ID, "{run_id}")
+            .replace(client_routes.CONTENT_ID, "{content_id}")
         )
         operation = whole["paths"][template][route.method.lower()]
         body = operation["requestBody"]["content"]["application/json"]["schema"]
@@ -207,6 +209,7 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
         "/runs/{run_id}/finalization",
         "/runs/{run_id}/results",
         "/runs/{run_id}/tasks",
+        "/runs/{run_id}/tasks/{content_id}/plays",
     ]
 
 
@@ -294,3 +297,15 @@ def test_every_mutating_operation_declares_the_required_origin_header() -> None:
             ]
             assert declared, f"{method} {template} does not declare Origin"
             assert declared[0]["required"] is True, f"{method} {template}"
+
+
+def test_a_binary_route_publishes_its_media_type_rather_than_an_envelope() -> None:
+    whole = read_document()
+
+    operation = whole["paths"]["/runs/{run_id}/tasks/{content_id}/audio"]["get"]
+
+    assert set(operation["responses"]["200"]["content"]) == {"audio/*"}
+    assert [parameter["name"] for parameter in operation["parameters"]] == [
+        "run_id",
+        "content_id",
+    ]

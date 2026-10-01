@@ -178,7 +178,9 @@ def _path_template(pattern: str) -> str:
     """
 
     template = pattern.removeprefix("^").removesuffix("$")
-    return template.replace(client_routes.RUN_ID, "{run_id}")
+    return template.replace(client_routes.RUN_ID, "{run_id}").replace(
+        client_routes.CONTENT_ID, "{content_id}"
+    )
 
 
 #: Declared on every mutating operation, because every one of them refuses its absence. In
@@ -203,6 +205,25 @@ RUN_ID_PARAMETER: dict[str, Any] = {
     "description": "The run this operation acts on.",
     "schema": {"type": "string", "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$"},
 }
+
+
+CONTENT_ID_PARAMETER: dict[str, Any] = {
+    "name": "content_id",
+    "in": "path",
+    "required": True,
+    "description": "A task this run served, by its content identifier.",
+    "schema": {"type": "string", "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$"},
+}
+
+
+def _binary_response(media: str) -> dict[str, Any]:
+    return {
+        "description": (
+            "The exact bytes the snapshot names. A refusal is the JSON error envelope, "
+            "never a partial body."
+        ),
+        "content": {media: {"schema": {"type": "string", "contentMediaType": media}}},
+    }
 
 
 def document(schema_directory: Path) -> dict[str, Any]:
@@ -244,13 +265,19 @@ def document(schema_directory: Path) -> dict[str, Any]:
             "operationId": route.command.replace(".", "_"),
             "summary": route.summary,
             "responses": {
-                "200": _success_response(route.response_models),
+                "200": (
+                    _binary_response(route.binary)
+                    if route.binary is not None
+                    else _success_response(route.response_models)
+                ),
                 **COMMON_RESPONSES,
             },
         }
         parameters: list[dict[str, Any]] = []
         if "{run_id}" in template:
             parameters.append(RUN_ID_PARAMETER)
+        if "{content_id}" in template:
+            parameters.append(CONTENT_ID_PARAMETER)
         if route.mutates:
             parameters.append(ORIGIN_PARAMETER)
         if parameters:

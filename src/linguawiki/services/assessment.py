@@ -17,6 +17,7 @@ Two refusals are the point of this module rather than incidental to it:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from collections.abc import Mapping, Sequence
@@ -2321,6 +2322,104 @@ def _resolve_served_asset(
     return identity
 
 
+#: The most a recording served to the page may be. A listening task plays seconds of
+#: audio; anything near this is not a placement recording, and the single-threaded server
+#: would serve nothing else while it streamed.
+MAXIMUM_RECORDING_BYTES = 32 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class ServedRecording:
+    """The bytes of the recording a served task plays, already proven to be those bytes."""
+
+    content_id: str
+    media_type: str
+    data: bytes
+
+
+def _asset_unavailable(content_id: str, reason: str) -> LinguaWikiError:
+    return LinguaWikiError(
+        "assessment_asset_unavailable",
+        f"the recording {content_id} this task plays cannot be read: {reason}",
+        details=(ErrorDetail(field="asset", reason=reason),),
+    )
+
+
+def served_recording(
+    paths: WorkspacePaths,
+    *,
+    content_id: str,
+    run: str | None = None,
+    clock: Clock | None = None,
+) -> ServedRecording:
+    """The recording an outstanding task was served with, or a refusal naming why not.
+
+    Resolved through the run's own record of the serving, never by re-reading the pack, and
+    hashed as it is read: the bytes handed back are compared with the digest the snapshot
+    holds, so a learner hears the recording the task was served with or none. A file
+    replaced between the pack load and this read is caught by that hash, not trusted
+    because the load was clean.
+
+    Only while the task is outstanding. A settled task's recording is no longer part of an
+    open question, and serving it would let a finished answer be revisited.
+    """
+
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        run_id = resolve_run(database, run)
+        shown = served_task_report(database, run_id, content_id=content_id)
+        if shown.status != "served":
+            raise LinguaWikiError(
+                "assessment_task_settled",
+                f"{content_id} is {shown.status}, so its recording is no longer part of an "
+                "open question",
+                details=(ErrorDetail(field="content_id", reason=f"task is {shown.status}"),),
+            )
+        identity = shown.asset
+        if identity is None:
+            raise LinguaWikiError(
+                "assessment_task_plays_nothing",
+                f"{content_id} was served with no recording, so there is nothing to play",
+                details=(ErrorDetail(field="content_id", reason="no recording"),),
+            )
+        pack = _pack_on_disk(database, _run_pack_key(database, run_id))
+    resolved = (
+        None
+        if pack is None
+        else next(
+            (asset for asset in pack.assets if str(asset.content_id) == identity.content_id),
+            None,
+        )
+    )
+    if pack is None or resolved is None:
+        raise _asset_unavailable(identity.content_id, "the pack no longer holds it")
+    try:
+        root = pack.root.resolve(strict=True)
+        path = (pack.root / resolved.asset.path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        # `RuntimeError` is a symlink loop under Python 3.12, which no handler above this
+        # one would catch.
+        raise _asset_unavailable(identity.content_id, "its path cannot be resolved") from None
+    if not path.is_relative_to(root) or not path.is_file():
+        raise _asset_unavailable(identity.content_id, "its path leaves the pack directory")
+    try:
+        size = path.stat().st_size
+        if size > MAXIMUM_RECORDING_BYTES:
+            raise _asset_unavailable(identity.content_id, f"it is {size} bytes, over the cap")
+        data = path.read_bytes()
+    except OSError:
+        raise _asset_unavailable(identity.content_id, "it cannot be read") from None
+    if hashlib.sha256(data).hexdigest() != identity.sha256:
+        raise LinguaWikiError(
+            "assessment_asset_changed",
+            f"the recording {identity.content_id} has been replaced since it was served; "
+            "a different recording is a different question",
+            details=(ErrorDetail(field="asset", reason=f"served {identity.sha256}"),),
+        )
+    return ServedRecording(
+        content_id=identity.content_id, media_type=resolved.asset.media_type, data=data
+    )
+
+
 def served_task(
     paths: WorkspacePaths,
     *,
@@ -2534,6 +2633,7 @@ __all__ = [
     "record_play",
     "report",
     "seed_declared_estimates",
+    "served_recording",
     "set_status",
     "start",
 ]

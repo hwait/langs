@@ -1,4 +1,4 @@
-"""The route table: eight operations, each one service call wide.
+"""The route table: ten operations, each one service call wide.
 
 A handler resolves its arguments, calls one service function, and returns the report. There
 is no business logic here and there must not be -- selection, scoring, the stop rule, the
@@ -57,6 +57,8 @@ def _body(properties: Mapping[str, Any], *, required: Sequence[str] = ()) -> dic
 #: A run identifier in a path. Matched narrowly so a path that is not one is a routing miss
 #: rather than a service-layer refusal about an identifier nobody could have meant.
 RUN_ID = r"(?P<run_id>asm_[0-9A-HJKMNP-TV-Z]{26})"
+#: A served task's content identifier in a path, matched as narrowly as a run's.
+CONTENT_ID = r"(?P<content_id>cnt_[0-9A-HJKMNP-TV-Z]{26})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +132,10 @@ class Route:
     #: separate table is a second description of one thing, and the one that goes stale.
     request_schema: Mapping[str, Any] | None = None
     response_models: tuple[type[BaseModel], ...] = ()
+    #: The media type family a route answers with when it answers with bytes rather than
+    #: an envelope. Its handler returns an object carrying `media_type` and `data`; a
+    #: refusal is still the JSON error envelope, so a client reads failures one way.
+    binary: str | None = None
 
 
 def _start(request: Request) -> Any:
@@ -201,6 +207,27 @@ def _finalize(request: Request) -> Any:
     )
 
 
+def _recording(request: Request) -> Any:
+    return assessment_service.served_recording(
+        request.paths,
+        run=request.path_values["run_id"],
+        content_id=request.path_values["content_id"],
+        clock=request.clock,
+    )
+
+
+def _play(request: Request) -> Any:
+    return assessment_service.record_play(
+        request.paths,
+        run=request.path_values["run_id"],
+        content_id=request.path_values["content_id"],
+        idempotency_key=request.required("idempotency_key", str),
+        clock=request.clock,
+        command="assessment.play",
+        actor=ACTOR,
+    )
+
+
 def _screen(request: Request) -> Any:
     return view_service.run_screen(
         request.paths, run=request.path_values["run_id"], clock=request.clock
@@ -266,6 +293,25 @@ ROUTES: tuple[Route, ...] = (
             assessment_service.NextTaskReport,
             assessment_service.AssessmentRunReport,
         ),
+    ),
+    Route(
+        "GET",
+        re.compile(rf"^/runs/{RUN_ID}/tasks/{CONTENT_ID}/audio$"),
+        "assessment.recording",
+        _recording,
+        mutates=False,
+        summary="The recording an outstanding task was served with, as those exact bytes",
+        binary="audio/*",
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/runs/{RUN_ID}/tasks/{CONTENT_ID}/plays$"),
+        "assessment.play",
+        _play,
+        mutates=True,
+        summary="Record one play of an outstanding task's recording, before it is heard",
+        request_schema=_body({"idempotency_key": IDEMPOTENCY_KEY}, required=["idempotency_key"]),
+        response_models=(assessment_service.PlayReport,),
     ),
     Route(
         "POST",
