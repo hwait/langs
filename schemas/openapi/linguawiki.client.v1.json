@@ -80,6 +80,11 @@
             "title": "Run Type",
             "type": "string"
           },
+          "scoring": {
+            "default": "any",
+            "title": "Scoring",
+            "type": "string"
+          },
           "started_at": {
             "anyOf": [
               {
@@ -494,6 +499,11 @@
             "title": "Modality",
             "type": "string"
           },
+          "needs_judge": {
+            "default": false,
+            "title": "Needs Judge",
+            "type": "boolean"
+          },
           "permitted_help": {
             "anyOf": [
               {
@@ -653,6 +663,11 @@
           },
           "run_type": {
             "title": "Run Type",
+            "type": "string"
+          },
+          "scoring": {
+            "default": "any",
+            "title": "Scoring",
             "type": "string"
           },
           "screen_version": {
@@ -1084,6 +1099,12 @@
                     "enum": [
                       "pilot-calibration",
                       "placement"
+                    ]
+                  },
+                  "scoring": {
+                    "enum": [
+                      "any",
+                      "machine"
                     ]
                   },
                   "track": {

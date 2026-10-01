@@ -614,15 +614,80 @@ def unavailable_reason(
     return None
 
 
+#: How a run's tasks may be scored, which is a different axis from modality. Modality is
+#: what the learner's equipment allows; scoring is what the server can decide without a
+#: judge. `any` serves whatever the bank holds and leaves judged work to a judge; `machine`
+#: serves only what `score_response` can decide, so a surface with no judge never puts a
+#: question in front of a learner that nobody can mark.
+SCORING_CONDITIONS: tuple[str, ...] = ("any", "machine")
+DEFAULT_SCORING = "any"
+#: Why a machine run closes a dimension. Kept as named values because they are reported to
+#: the learner as the reason a dimension is `not-tested`, and a client may act on them.
+NO_MACHINE_SCORABLE_TASK = "no machine-scorable task"
+LISTENING_UNRECORDED = "its listening tasks ship no recording"
+#: The modality whose tasks are heard. A task in it with no recording to play is not
+#: servable to a machine run: drawing its prompt instead would turn a listening task into
+#: a reading one and credit the result to the wrong dimension.
+PLAYED_MODALITY = "audio"
+
+
+def assert_scoring_condition(scoring: str) -> None:
+    if scoring not in SCORING_CONDITIONS:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            f"scoring must be one of {list(SCORING_CONDITIONS)}, not {scoring!r}",
+            details=(ErrorDetail(field="scoring", reason="unknown condition"),),
+        )
+
+
+def servable_candidate(candidate: Candidate, *, scoring: str, recorded: frozenset[str]) -> bool:
+    """Whether a run opened under `scoring` may serve this candidate at all."""
+
+    if scoring == "any":
+        return True
+    if candidate.task_type not in MACHINE_SCORABLE_TASK_TYPES:
+        return False
+    return candidate.modality != PLAYED_MODALITY or candidate.content_id in recorded
+
+
+def servable_under(
+    candidates: Sequence[Candidate], *, scoring: str, recorded: frozenset[str]
+) -> tuple[tuple[Candidate, ...], str | None]:
+    """The candidates a run's scoring condition allows, and why none are left if none are.
+
+    `recorded` names the tasks whose presentation declares a recording to play. Under
+    `machine`, a task is servable only if its type is machine-scorable and, when it is
+    heard, it has something to be heard. The reason names the filter that emptied the list,
+    so a `not-tested` dimension says which of the two it was.
+    """
+
+    assert_scoring_condition(scoring)
+    allowed = tuple(
+        candidate
+        for candidate in candidates
+        if servable_candidate(candidate, scoring=scoring, recorded=recorded)
+    )
+    if allowed or not candidates:
+        return allowed, None
+    if any(candidate.task_type in MACHINE_SCORABLE_TASK_TYPES for candidate in candidates):
+        return (), LISTENING_UNRECORDED
+    return (), NO_MACHINE_SCORABLE_TASK
+
+
 __all__ = [
     "ALGORITHM_VERSION",
     "BUDGETS",
     "CONNECTED_SPEECH_BUDGET",
+    "DEFAULT_SCORING",
+    "LISTENING_UNRECORDED",
     "MACHINE_SCORABLE_TASK_TYPES",
     "MINIMUM_FAMILIES",
+    "NO_MACHINE_SCORABLE_TASK",
+    "PLAYED_MODALITY",
     "PRECISION_MASS",
     "PRECISION_WIDTH",
     "REUSE_WINDOW_MONTHS",
+    "SCORING_CONDITIONS",
     "SCORING_POLICY_VERSION",
     "TASK_TYPES",
     "Candidate",
@@ -630,6 +695,7 @@ __all__ = [
     "Selection",
     "ability_grid",
     "assert_machine_scorable",
+    "assert_scoring_condition",
     "broad_prior",
     "budget_for",
     "close_dimension",
@@ -646,6 +712,8 @@ __all__ = [
     "score_response",
     "scoring_form",
     "select_task",
+    "servable_candidate",
+    "servable_under",
     "stop_decision",
     "success_probability",
     "unavailable_reason",

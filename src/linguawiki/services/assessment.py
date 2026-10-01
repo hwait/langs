@@ -56,11 +56,13 @@ from linguawiki.packs.format import (
 from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import (
     ALGORITHM_VERSION,
+    DEFAULT_SCORING,
     REUSE_WINDOW_MONTHS,
     SCORING_POLICY_VERSION,
     Candidate,
     DimensionState,
     assert_machine_scorable,
+    assert_scoring_condition,
     budget_for,
     close_dimension,
     confidence_label,
@@ -72,6 +74,8 @@ from linguawiki.placement import (
     record_score,
     score_response,
     select_task,
+    servable_candidate,
+    servable_under,
     unavailable_reason,
 )
 from linguawiki.provenance import PROMOTED_LIFECYCLES
@@ -159,6 +163,9 @@ class AssessmentRunReport(ContractModel):
     declared_level: str | None
     available_modalities: tuple[str, ...]
     dimensions: tuple[DimensionReport, ...]
+    #: `any` or `machine`: which tasks this run may serve, as it was opened. A client reads
+    #: it to know whether a task it is handed can need a judge.
+    scoring: str = DEFAULT_SCORING
     tasks_served: int = 0
     tasks_recorded: int = 0
     stop_reason: str | None = None
@@ -334,6 +341,37 @@ def _candidates(database: Database, pack_id: str) -> tuple[Candidate, ...]:
             [pack_id, *PROMOTED_LIFECYCLES],
         )
     )
+
+
+def _recorded_task_ids(database: Database, pack_id: str) -> frozenset[str]:
+    """The bank tasks whose presentation declares a recording to play.
+
+    Read through the one presentation parser, and a record it refuses counts as *not*
+    recorded rather than raising: this answers "may a machine run serve it", and a task
+    whose presentation cannot be read cannot be served either -- the serve path refuses it
+    by name, which is the better place for the message.
+    """
+
+    recorded: set[str] = set()
+    for content_id, raw in database.query(
+        "SELECT task.content_id, task.presentation_json FROM assessment_tasks task "
+        "JOIN content_records record ON record.content_id = task.content_id "
+        "WHERE record.pack_id = ? AND task.presentation_json IS NOT NULL",
+        [pack_id],
+    ):
+        try:
+            shown = parse_task_presentation(str(raw))
+        except LinguaWikiError:
+            continue
+        if shown is not None and shown.audio is not None:
+            recorded.add(str(content_id))
+    return frozenset(recorded)
+
+
+def _run_scoring(conditions: Mapping[str, Any]) -> str:
+    """The scoring condition a run was opened under. A run older than it is `any`."""
+
+    return str(conditions.get("scoring") or DEFAULT_SCORING)
 
 
 def _excluded_task_ids(
@@ -675,6 +713,7 @@ def start(
     run_type: str = "pilot-calibration",
     dimensions: Sequence[str] | None = None,
     modalities: Sequence[str] | None = None,
+    scoring: str = DEFAULT_SCORING,
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.start",
@@ -687,6 +726,7 @@ def start(
         raise LinguaWikiError(
             "invalid_arguments", "run_type must be pilot-calibration or placement"
         )
+    assert_scoring_condition(scoring)
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = learner_service.resolve_track(database, track)
         record = learner_service.track_context(database, track_id)
@@ -703,6 +743,9 @@ def start(
             run_type=run_type,
             dimensions=sorted(dimensions) if dimensions else None,
             modalities=sorted(modalities) if modalities else None,
+            # Only when it is not the default, so a keyed start made before the condition
+            # existed still hashes to what it hashed to then and its retry stays a retry.
+            **({} if scoring == DEFAULT_SCORING else {"scoring": scoring}),
         )
         replayed = idempotency.resolve(
             database,
@@ -748,6 +791,7 @@ def start(
             )
         available = tuple(modalities) if modalities else _available_modalities(record.preferences)
         candidates = _candidates(database, pack_row["pack_id"])
+        recorded = _recorded_task_ids(database, pack_row["pack_id"])
         levels = record.framework_levels
         declared_index = (
             float(levels.index(record.declared_level)) if record.declared_level in levels else None
@@ -780,6 +824,8 @@ def start(
             servable = [candidate for candidate in bank if candidate.modality in available]
             if reason is None and not servable:
                 reason = "the pack's tasks for this dimension need an unavailable modality"
+            if reason is None:
+                reason = servable_under(servable, scoring=scoring, recorded=recorded)[1]
             if reason is not None:
                 state = close_dimension(state, reason=reason)
                 warnings.append(f"{dimension} is not tested: {reason}")
@@ -812,6 +858,7 @@ def start(
                             # later renames the same distribution to a different band.
                             "framework_levels": list(levels),
                             "available_modalities": list(available),
+                            "scoring": scoring,
                             "declared_level": record.declared_level,
                             "dimension_kinds": {
                                 dimension: kinds[dimension] for dimension in requested
@@ -1006,7 +1053,19 @@ def next_task(
         open_states = [state for state in states if state.status == "open"]
         if not open_states:
             return run_report(database, run_id)
-        candidates = _candidates(database, pack_row["pack_id"])
+        # The run's own condition, never the caller's: a run opened for machine scoring
+        # never serves a task that needs a judge, whatever the bank has come to hold.
+        scoring = _run_scoring(conditions)
+        recorded = (
+            frozenset()
+            if scoring == DEFAULT_SCORING
+            else _recorded_task_ids(database, pack_row["pack_id"])
+        )
+        candidates = tuple(
+            candidate
+            for candidate in _candidates(database, pack_row["pack_id"])
+            if servable_candidate(candidate, scoring=scoring, recorded=recorded)
+        )
         excluded = _excluded_task_ids(
             database, track_id=str(row[1]), run_id=run_id, clock=active_clock
         )
@@ -2286,6 +2345,7 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
         declared_level=conditions.get("declared_level"),
         available_modalities=tuple(str(value) for value in conditions["available_modalities"]),
         dimensions=tuple(reports),
+        scoring=_run_scoring(conditions),
         tasks_served=served,
         tasks_recorded=recorded,
         stop_reason=None if row[7] is None else str(row[7]),

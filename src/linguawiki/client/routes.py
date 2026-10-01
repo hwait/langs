@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from linguawiki.clock import Clock
 from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.paths import WorkspacePaths
+from linguawiki.placement import DEFAULT_SCORING, SCORING_CONDITIONS
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import assessment_view as view_service
 
@@ -138,6 +139,7 @@ def _start(request: Request) -> Any:
         run_type=request.optional("run_type", str) or "pilot-calibration",
         dimensions=request.strings("dimensions") or None,
         modalities=request.strings("modalities") or None,
+        scoring=request.optional("scoring", str) or DEFAULT_SCORING,
         idempotency_key=request.optional("idempotency_key", str),
         clock=request.clock,
         command="assessment.start",
@@ -225,6 +227,7 @@ ROUTES: tuple[Route, ...] = (
                 "run_type": {"enum": ["pilot-calibration", "placement"]},
                 "dimensions": {"type": "array", "items": {"type": "string", "minLength": 1}},
                 "modalities": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "scoring": {"enum": list(SCORING_CONDITIONS)},
                 "idempotency_key": IDEMPOTENCY_KEY,
             }
         ),

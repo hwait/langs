@@ -21,6 +21,7 @@ from linguawiki.contracts import ServedAsset, TaskPresentation
 from linguawiki.db.connection import Database, open_reader
 from linguawiki.models import ContractModel
 from linguawiki.paths import WorkspacePaths
+from linguawiki.placement import DEFAULT_SCORING, MACHINE_SCORABLE_TASK_TYPES
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import learners as learner_service
 
@@ -59,6 +60,11 @@ class OutstandingTask(ContractModel):
     #: Whether the learner has a recording to play. A client needs this before it reads the
     #: presentation, because it decides whether the screen has a player on it at all.
     plays_audio: bool = False
+    #: Whether only a judge can score this task. A run opened under `any` can be holding
+    #: one, and a client with no judge must say so rather than offer an answer the server
+    #: will refuse to compute. Derived from the served task type through the scoring
+    #: policy, never re-decided by the client.
+    needs_judge: bool = False
 
 
 class RunScreen(ContractModel):
@@ -75,6 +81,9 @@ class RunScreen(ContractModel):
     framework_id: str
     framework_levels: tuple[str, ...] = ()
     available_modalities: tuple[str, ...] = ()
+    #: `any` or `machine`, as the run was opened. Under `any` an outstanding task can need a
+    #: judge, which a client without one must not offer to answer.
+    scoring: str = DEFAULT_SCORING
     dimensions: tuple[assessment_service.DimensionReport, ...] = ()
     #: At most one per *open* dimension, after the serve-time guard, and possibly one more
     #: per dimension that closed while holding a task -- which `record` still accepts, so a
@@ -114,6 +123,7 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
                 permitted_help=shown.permitted_help,
                 answer_with=_answer_mode(shown.presentation),
                 plays_audio=shown.presentation is not None and shown.presentation.audio is not None,
+                needs_judge=shown.task_type not in MACHINE_SCORABLE_TASK_TYPES,
             )
         )
     # No bound and no `omissions`, and this is the place to say why: the guard in the serve
@@ -132,6 +142,7 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
         framework_id=run.framework_id,
         framework_levels=run.framework_levels,
         available_modalities=run.available_modalities,
+        scoring=run.scoring,
         dimensions=run.dimensions,
         outstanding=tuple(outstanding),
         tasks_served=run.tasks_served,
