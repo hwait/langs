@@ -11,7 +11,10 @@ WORKSPACE_CONFIG_NAME = "linguawiki.toml"
 WORKSPACE_LOCK_NAME = "linguawiki.lock"
 DEPENDENCY_LOCK_NAME = "uv.lock"
 DATABASE_RELATIVE_PATH = Path("data") / "linguawiki.duckdb"
-PRIVATE_DIRECTORIES = ("data", "artifacts", "imports", "drafts", "exports/anki")
+#: Directories a workspace keeps out of Git. `staging` holds bytes a client created and has
+#: not yet handed to a row that owns them -- browser captures before their registration --
+#: which is the one place a recording can exist before any command accounts for it.
+PRIVATE_DIRECTORIES = ("data", "artifacts", "imports", "drafts", "exports/anki", "staging")
 WIKI_DIRECTORIES = ("wiki", "wiki/learner", "wiki/languages", "wiki/sessions", "wiki/reports")
 SKILL_BUNDLE_RELATIVE_PATH = Path(".agents") / "skills"
 

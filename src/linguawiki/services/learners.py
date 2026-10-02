@@ -29,6 +29,7 @@ from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.ids import EventId, TrackId, UserId
 from linguawiki.models import ContractModel
 from linguawiki.paths import WorkspacePaths
+from linguawiki.placement import recording_permitted
 from linguawiki.services import packs as pack_service
 
 SCRIPT_PATTERN = re.compile(r"^[A-Z][a-z]{3}$")
@@ -1005,8 +1006,57 @@ def track_context(database: Database, track_id: str) -> TrackRecord:
     return _read_track(database, track_id)
 
 
+class RecordingPolicy(ContractModel):
+    """Whether this track lets a learner record an answer for a judge, and for how long
+    the recording is kept.
+
+    `offered` is the gate: equipment *and* consent, never one standing in for the other.
+    The retention policy is reported so a page can say it, and never overridden.
+    """
+
+    offered: bool
+    reason: str | None = None
+    recording_available: bool = False
+    retention_consent: bool = False
+    retention_policy: str = "keep"
+    retention_days: int | None = None
+
+
+def recording_policy(preferences: Mapping[str, object]) -> RecordingPolicy:
+    available = preferences.get("audio_recording_available") is True
+    consented = preferences.get("audio_retention_consent") is True
+    days = preferences.get("audio_retention_days")
+    reason = None
+    if not available and not consented:
+        reason = "this track has not said it can record audio, nor agreed to a recording being kept"
+    elif not available:
+        reason = "this track has not said it can record audio"
+    elif not consented:
+        reason = (
+            "this track has not agreed to a recording being kept, and a judge needs the "
+            "recording to still exist"
+        )
+    return RecordingPolicy(
+        offered=recording_permitted(preferences),
+        reason=reason,
+        recording_available=available,
+        retention_consent=consented,
+        retention_policy=str(preferences.get("audio_retention_policy") or "keep"),
+        retention_days=None if days is None else int(str(days)),
+    )
+
+
+def track_recording_policy(database: Database, track_id: str) -> RecordingPolicy:
+    """The recording gate for one track, from the preferences it holds now."""
+
+    record = track_context(database, track_id)
+    preferences = record.preferences if isinstance(record.preferences, dict) else {}
+    return recording_policy(preferences)
+
+
 __all__ = [
     "CORRECTION_MODES",
+    "RecordingPolicy",
     "TrackPreferences",
     "TrackRecord",
     "UserRecord",
@@ -1014,11 +1064,13 @@ __all__ = [
     "create_user",
     "list_tracks",
     "list_users",
+    "recording_policy",
     "resolve_track",
     "set_track_status",
     "show_track",
     "show_user",
     "track_context",
+    "track_recording_policy",
     "update_track",
     "update_user",
 ]

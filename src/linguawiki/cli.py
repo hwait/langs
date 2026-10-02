@@ -48,6 +48,7 @@ from linguawiki.services import learners as learner_service
 from linguawiki.services import onboarding as onboarding_service
 from linguawiki.services import packs as pack_service
 from linguawiki.services import privacy as privacy_service
+from linguawiki.services import recordings as recording_service
 from linguawiki.services import resources as resource_service
 from linguawiki.services import sessions as session_service
 from linguawiki.services import skills as skills_service
@@ -587,8 +588,21 @@ def _assessment_parser(subcommands: Any) -> None:
     )
     record.add_argument("--assessor")
     record.add_argument("--confidence", choices=("low", "medium", "high"), default="medium")
+    # The recording a judge listened to. A spoken task answered by a recording takes a
+    # verdict only from a judge who names the one the learner submitted.
+    record.add_argument("--audio-artifact")
+    record.add_argument(
+        "--rubric",
+        help="JSON file holding the per-criterion rubric scores, or - to read stdin",
+    )
     record.add_argument("--idempotency-key")
     _add_workspace(record)
+    pending = actions.add_parser(
+        "pending", help="recordings in a run waiting for a judge, with how to reach each"
+    )
+    pending.add_argument("--run")
+    _add_track_selector(pending)
+    _add_workspace(pending)
     for name, help_text, status in (
         ("pause", "pause a run so it can resume later", "paused"),
         ("resume", "resume a paused run", "in-progress"),
@@ -2209,6 +2223,44 @@ def _screen_lines(screen: view_service.RunScreen) -> str:
     return "\n".join(lines)
 
 
+def _pending_lines(report: recording_service.PendingReport) -> str:
+    lines = [
+        f"{report.run_id}: {len(report.pending)} recording(s) waiting for a judge; recording "
+        f"{'offered' if report.recording.offered else 'not offered'}, kept under "
+        f"{report.recording.retention_policy}"
+    ]
+    for entry in report.pending:
+        where = entry.audio_path if entry.judgeable else f"cannot be judged: {entry.problem}"
+        lines.append(
+            f"  {entry.task.content_id} ({entry.task.dimension}, {entry.task.task_type}) "
+            f"recording {entry.submission.artifact_id}: {where}"
+        )
+    return "\n".join(lines)
+
+
+def _assessment_rubric(args: argparse.Namespace) -> Any:
+    """The rubric a judge scored against: `--rubric`, or the older `--input`, not both."""
+
+    if args.rubric is not None and args.input_path is not None:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "pass the rubric once, with --rubric; --input is the older spelling of the same "
+            "payload",
+            details=(ErrorDetail(field="rubric", reason="also passed as --input"),),
+        )
+    reference = args.rubric if args.rubric is not None else args.input_path
+    if reference is None:
+        return None
+    rubric = _read_input(reference)
+    if not isinstance(rubric, dict):
+        raise LinguaWikiError(
+            "invalid_input",
+            "a rubric is a JSON object of criterion scores",
+            details=(ErrorDetail(field="rubric", reason=type(rubric).__name__),),
+        )
+    return rubric
+
+
 def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
     lines = [
         f"{report.run_id} {report.calibration_label} ({report.status}) against "
@@ -2356,15 +2408,24 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             response_visibility=args.response_visibility,
             run=args.run,
             track=args.track,
-            rubric=None if args.input_path is None else _read_input(args.input_path),
+            rubric=_assessment_rubric(args),
             response_excerpt=args.excerpt,
             assessor_kind=args.assessor_kind,
             assessor=args.assessor,
             confidence=args.confidence,
+            audio_artifact=args.audio_artifact,
             idempotency_key=args.idempotency_key,
             clock=clock,
             command=command,
         )
+    elif args.action == "pending":
+        waiting = recording_service.pending(paths, run=args.run, track=args.track, clock=clock)
+        _print(
+            _envelope(command, waiting, clock, waiting.warnings),
+            _pending_lines(waiting),
+            args.format,
+        )
+        return 0
     elif args.action in ("pause", "resume", "abandon"):
         report = assessment_service.set_status(
             paths,
@@ -2412,6 +2473,15 @@ def _run_client(args: argparse.Namespace, clock: Clock, command: str) -> int:
     paths = _pack_workspace(args)
     client = client_server.build_server(paths, port=args.port, clock=clock, run=args.run)
     # On stderr, so `--format json` output on stdout stays a single parseable document.
+    recovery = client.recovery
+    if recovery is not None and recovery.examined:
+        print(
+            f"recovered {recovery.examined} unresolved recording(s): "
+            f"{len(recovery.registered)} registered, {len(recovery.refused)} refused",
+            file=sys.stderr,
+        )
+    for finding in () if recovery is None else recovery.findings:
+        print(f"warning: {finding}", file=sys.stderr)
     print(f"LinguaWiki client listening on {client.origin}", file=sys.stderr)
     print(f"open {client.launch_url}", file=sys.stderr)
     if not args.no_open:

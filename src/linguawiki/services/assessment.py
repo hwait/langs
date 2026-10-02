@@ -23,10 +23,11 @@ import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
+from linguawiki import evidence as evidence_policy
 from linguawiki import idempotency
 from linguawiki.clock import Clock, SystemClock, aware_utc
 from linguawiki.contracts import (
@@ -68,6 +69,7 @@ from linguawiki.placement import (
     posterior_mean,
     posterior_sd,
     record_score,
+    recording_permitted,
     score_response,
     select_task,
     servable_candidate,
@@ -79,6 +81,9 @@ from linguawiki.services import estimates as estimate_service
 from linguawiki.services import evidence as evidence_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import packs as pack_service
+
+if TYPE_CHECKING:
+    from linguawiki.services.recordings import JudgeableAudio
 
 #: Modalities a workspace can always offer, whatever the learner's equipment.
 BASELINE_MODALITIES = ("text", "writing", "audio")
@@ -163,7 +168,10 @@ class AssessmentRunReport(ContractModel):
     #: it to know whether a task it is handed can need a judge.
     scoring: str = DEFAULT_SCORING
     tasks_served: int = 0
+    #: Results that still stand. Invalidated ones -- their recording was purged -- are
+    #: counted separately, never as recorded.
     tasks_recorded: int = 0
+    results_invalidated: int = 0
     stop_reason: str | None = None
     started_at: str | None = None
     finalized_at: str | None = None
@@ -578,6 +586,12 @@ def _assert_running(run_id: str, *, status: str, action: str = "serve another ta
     )
 
 
+def assert_running(run_id: str, *, status: str, action: str) -> None:
+    """Refuse work on a run that is not being worked, by the codes its callers know."""
+
+    _assert_running(run_id, status=status, action=action)
+
+
 def _assert_transition(run_id: str, *, current: str, target: str) -> None:
     allowed = RUN_TRANSITIONS.get(current, frozenset())
     if target in allowed:
@@ -828,7 +842,12 @@ def start(
             if reason is None and not servable:
                 reason = "the pack's tasks for this dimension need an unavailable modality"
             if reason is None:
-                reason = servable_under(servable, scoring=scoring, recorded=recorded)[1]
+                reason = servable_under(
+                    servable,
+                    scoring=scoring,
+                    recorded=recorded,
+                    recording=recording_permitted(record.preferences),
+                )[1]
             if reason is not None:
                 state = close_dimension(state, reason=reason)
                 warnings.append(f"{dimension} is not tested: {reason}")
@@ -1064,10 +1083,15 @@ def next_task(
             if scoring == DEFAULT_SCORING
             else _recorded_task_ids(database, pack_row["pack_id"])
         )
+        # Read now, not from the run: consent withdrawn after the run opened stops the
+        # next spoken task from being served, whatever the run was opened under.
+        recording = recording_permitted(record.preferences)
         candidates = tuple(
             candidate
             for candidate in _candidates(database, pack_row["pack_id"])
-            if servable_candidate(candidate, scoring=scoring, recorded=recorded)
+            if servable_candidate(
+                candidate, scoring=scoring, recorded=recorded, recording=recording
+            )
         )
         excluded = _excluded_task_ids(
             database, track_id=str(row[1]), run_id=run_id, clock=active_clock
@@ -1474,6 +1498,119 @@ def _assert_repeat(
         )
 
 
+def _assert_not_invalidated(database: Database, *, run_id: str, content_id: str) -> None:
+    """A task whose judged result was invalidated stays settled: a fresh measurement belongs
+    to a fresh serve. Refused by its own name, never as a conflicting repeat."""
+
+    invalidated = database.one(
+        "SELECT invalidated_reason FROM assessment_results "
+        "WHERE run_id = ? AND content_id = ? AND invalidated_at IS NOT NULL",
+        [run_id, content_id],
+    )
+    if invalidated is not None:
+        raise LinguaWikiError(
+            "assessment_result_invalidated",
+            f"{content_id} was judged in this run and the result was invalidated "
+            f"({invalidated[0]}); a task is measured once per serve, so a fresh measurement "
+            "belongs to a new run",
+            details=(ErrorDetail(field="content_id", reason=str(invalidated[0])),),
+        )
+
+
+def _assert_not_withdrawn(database: Database, *, run_id: str, content_id: str, status: str) -> None:
+    """Refuse a verdict for a task skipped because its submission was withdrawn.
+
+    The submission says why -- the recording was purged, altered, or its run closed -- and
+    that reason is the refusal, by the code it was withdrawn with.
+    """
+
+    if status != "skipped":
+        return
+    withdrawn = database.one(
+        "SELECT withdrawn_code, withdrawn_reason FROM assessment_submissions "
+        "WHERE run_id = ? AND content_id = ? AND status = 'withdrawn' "
+        "ORDER BY updated_at DESC, submission_id DESC LIMIT 1",
+        [run_id, content_id],
+    )
+    if withdrawn is not None:
+        raise LinguaWikiError(
+            str(withdrawn[0]),
+            f"{content_id} can no longer be judged in this run: {withdrawn[1]}. The "
+            "submission was withdrawn and the task skipped.",
+            details=(ErrorDetail(field="content_id", reason="submission withdrawn"),),
+        )
+    raise LinguaWikiError(
+        "assessment_task_settled",
+        f"{content_id} was skipped in this run, so it takes no result",
+        details=(ErrorDetail(field="content_id", reason="task is skipped"),),
+    )
+
+
+def _judged_recording(
+    paths: WorkspacePaths,
+    database: Database,
+    *,
+    run_id: str,
+    content_id: str,
+    audio_artifact: str | None,
+    assessor_kind: str,
+    answered: bool,
+) -> JudgeableAudio | None:
+    """The submitted recording a verdict rests on, checked now -- or `None` if there is none.
+
+    A task with a recording waiting for a judge takes a verdict only from a judge who names
+    that recording. The check is `recordings.assert_judgeable`, the same one `assessment
+    pending` ran when it handed the recording out, run again inside this writer. When it
+    fails because of the recording itself -- purged, not kept, missing, altered, escaping,
+    unreadable -- no judge can hear it any more, so the submission is withdrawn and the task
+    skipped before the refusal is raised: a refusal has to leave a way forward, and a task
+    holding its dimension for a verdict that can never arrive leaves none.
+    """
+
+    from linguawiki.services import recordings as recording_service
+
+    if answered:
+        return None
+    live = recording_service.live_submission(database, run_id, content_id)
+    if live is None and audio_artifact is None:
+        return None
+    if live is not None and audio_artifact is None:
+        raise LinguaWikiError(
+            "assessment_audio_artifact_required",
+            f"{content_id} is answered by recording {live.artifact_id}; a verdict names the "
+            "recording it was reached from, with --audio-artifact",
+            details=(
+                ErrorDetail(
+                    field="audio_artifact", reason="absent", context={"bound": live.artifact_id}
+                ),
+            ),
+        )
+    if assessor_kind not in evidence_policy.JUDGING_ASSESSORS:
+        raise LinguaWikiError(
+            "assessment_judge_required",
+            f"a recording is judged by an ai or human assessor, not a {assessor_kind} one",
+            details=(ErrorDetail(field="assessor_kind", reason=assessor_kind),),
+        )
+    assert audio_artifact is not None
+    try:
+        return recording_service.assert_judgeable(
+            database,
+            paths.root,
+            artifact_id=audio_artifact,
+            run_id=run_id,
+            content_id=content_id,
+        )
+    except LinguaWikiError as failure:
+        if (
+            live is not None
+            and live.status == "pending"
+            and live.artifact_id == audio_artifact
+            and failure.payload.code in recording_service.RECORDING_FAILURES
+        ):
+            recording_service.withdraw_unjudgeable(database, submission=live, failure=failure)
+        raise
+
+
 def record(
     paths: WorkspacePaths,
     *,
@@ -1488,12 +1625,20 @@ def record(
     assessor_kind: str = "deterministic",
     assessor: str | None = None,
     confidence: str = "medium",
+    audio_artifact: str | None = None,
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.record",
     actor: str = DEFAULT_ACTOR,
 ) -> AssessmentRunReport:
     """Score one served task and fold it into its dimension's posterior.
+
+    A spoken task answered by a recording is scored by a judge who names the recording
+    they heard (`audio_artifact`). It must be the recording the learner submitted, and it
+    is checked again here, inside the writer that stores the verdict, rather than only when
+    the task was handed to the judge: a purge, an altered file, or a retention change while
+    the judge was listening refuses the verdict with the reason, and because a purge takes
+    the same writer, one of the two is first and the other sees its result.
 
     The score is either *computed* here from the key the run snapshotted, or *supplied* by
     a caller who reached its own verdict; `score_source` records which, because
@@ -1564,6 +1709,9 @@ def record(
             assessor=assessor,
             confidence=confidence,
             rubric=dict(rubric or {}),
+            # Only when named, so a keyed verdict recorded before C5 still hashes to what it
+            # hashed to then and its retry stays a retry.
+            **({} if audio_artifact is None else {"audio_artifact": audio_artifact}),
         )
         if (
             idempotency.resolve(
@@ -1575,6 +1723,10 @@ def record(
             is not None
         ):
             return run_report(database, run_id)
+        # Before the run's own state: a judge retrying a verdict for a result whose
+        # recording was purged is told that, whether or not the run has closed since. It is
+        # the more specific truth, and the one that says no retry will ever land.
+        _assert_not_invalidated(database, run_id=run_id, content_id=content_id)
         _assert_running(run_id, status=str(row[4]), action="take further results")
         served = database.one(
             "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
@@ -1597,6 +1749,7 @@ def record(
         # whenever the pack changed mid-run.
         candidate = _served_candidate(run_id, content_id=content_id, served=served)
         dimension = str(served[1])
+        _assert_not_withdrawn(database, run_id=run_id, content_id=content_id, status=str(served[2]))
         # Every refusal below runs before the transaction opens, so a refused call leaves
         # the task still `served` and answerable rather than half-recorded.
         warnings: list[str] = []
@@ -1640,6 +1793,28 @@ def record(
             # against one would be a claim that work nobody did had been done.
             resolved_score = score
             score_source, policy_version = "supplied", None
+        # What a judged score may claim, decided in `evidence.py` and stored with the
+        # result. Nothing held an `ai` verdict to anything before C5.
+        judgement_version = (
+            None
+            if score is None
+            else evidence_policy.assert_judged_claim(
+                dimension_kind=kinds[dimension],
+                modality=candidate.modality,
+                assessor_kind=assessor_kind,
+                assessor=assessor,
+                confidence=confidence,
+            )
+        )
+        bound = _judged_recording(
+            paths,
+            database,
+            run_id=run_id,
+            content_id=content_id,
+            audio_artifact=audio_artifact,
+            assessor_kind=assessor_kind,
+            answered=str(served[2]) == "answered",
+        )
         # The response goes through retention either way. Scoring in the background and
         # discarding the result would make the stored score unexplainable, and a
         # caller-supplied excerpt reaches the column by the same route so that the consent
@@ -1695,8 +1870,9 @@ def record(
                 "INSERT INTO assessment_results (result_id, run_id, content_id, dimension, "
                 "raw_score, rubric_json, response_excerpt, assessor_kind, assessor, confidence, "
                 "prior_json, posterior_json, difficulty, recorded_at, scoring_policy_version, "
-                "score_source, response_visibility, response_hash, play_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "score_source, response_visibility, response_hash, play_count, "
+                "audio_artifact_id, judgement_policy_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     str(result_id),
                     run_id,
@@ -1717,6 +1893,8 @@ def record(
                     visibility,
                     response_hash,
                     play_count,
+                    None if bound is None else bound.artifact_id,
+                    judgement_version,
                 ],
             )
             transaction.execute(
@@ -1724,6 +1902,15 @@ def record(
                 "AND sequence = ?",
                 [run_id, int(served[0])],
             )
+            if bound is not None:
+                # In the result's transaction: a judged submission without its result, or a
+                # result whose submission still waits for a judge, is a state nobody can
+                # explain afterwards.
+                transaction.execute(
+                    "UPDATE assessment_submissions SET status = 'judged', updated_at = ? "
+                    "WHERE submission_id = ?",
+                    [now, bound.submission.submission_id],
+                )
             # The exposure row already exists: `next_task` wrote it when it served this
             # item. Scoring adds the answer, and leaves the exposure count alone.
             _record_exposure(
@@ -2071,6 +2258,49 @@ def finalize(
         return run_report(database, run_id)
 
 
+def declared_estimate(
+    database: Database,
+    *,
+    track_id: str,
+    framework_id: str,
+    levels: Sequence[str],
+    dimension: str,
+    dimension_kind: str,
+    declared_level: str | None,
+    reason: str,
+    factors: Sequence[estimate_service.EstimateFactor] = (),
+) -> estimate_service.EstimateChange:
+    """Write one provisional estimate centred on a declared level -- and no higher.
+
+    A declared level is a hypothesis, so the estimate is `declared-hypothesis` with no
+    evidence behind it. Used to seed a track, and to fall back to when the evidence a
+    dimension had was withdrawn: the learner's own claim is what is left, and it is
+    labelled as one.
+    """
+
+    declared_index = float(levels.index(declared_level)) if declared_level in levels else None
+    state = initial_state(
+        dimension=dimension,
+        dimension_kind=dimension_kind,
+        level_count=len(levels),
+        declared_index=declared_index,
+    )
+    low, high = credible_interval(state.grid, state.prior)
+    return estimate_service.upsert_from_state(
+        database,
+        track_id=track_id,
+        framework_id=framework_id,
+        state=state,
+        level=declared_level,
+        low=levels[max(0, min(len(levels) - 1, int(low)))],
+        high=levels[max(0, min(len(levels) - 1, int(high) + (1 if high % 1 else 0)))],
+        run_id=None,
+        basis="declared-hypothesis",
+        reason=reason,
+        extra_factors=factors,
+    )
+
+
 def seed_declared_estimates(
     database: Database,
     *,
@@ -2086,26 +2316,16 @@ def seed_declared_estimates(
     with no evidence behind it. Nothing here marks knowledge mastered.
     """
 
-    declared_index = float(levels.index(declared_level)) if declared_level in levels else None
     seeded: list[str] = []
     for dimension, kind in sorted(dimension_kinds.items()):
-        state = initial_state(
-            dimension=dimension,
-            dimension_kind=kind,
-            level_count=len(levels),
-            declared_index=declared_index,
-        )
-        low, high = credible_interval(state.grid, state.prior)
-        estimate_service.upsert_from_state(
+        declared_estimate(
             database,
             track_id=track_id,
             framework_id=framework_id,
-            state=state,
-            level=declared_level,
-            low=levels[max(0, min(len(levels) - 1, int(low)))],
-            high=levels[max(0, min(len(levels) - 1, int(high) + (1 if high % 1 else 0)))],
-            run_id=None,
-            basis="declared-hypothesis",
+            levels=levels,
+            dimension=dimension,
+            dimension_kind=kind,
+            declared_level=declared_level,
             reason=(
                 f"seeded from the learner's declared level {declared_level}"
                 if declared_level
@@ -2114,6 +2334,102 @@ def seed_declared_estimates(
         )
         seeded.append(dimension)
     return tuple(seeded)
+
+
+def run_dimension_kinds(database: Database, run_id: str) -> dict[str, str]:
+    """The dimension kinds this run was opened with, as it recorded them."""
+
+    conditions = json.loads(str(_run_row(database, run_id)[6]))
+    return {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
+
+
+def replay_dimension(database: Database, run_id: str, dimension: str) -> DimensionState:
+    """Rebuild one dimension's posterior from the results that still stand, and store it.
+
+    Starts at the prior the run recorded for the dimension -- never a fresh one, which
+    would quietly drop the declared level the run started from -- and folds each surviving
+    result in the order it was recorded, through the same `record_score` the run used and
+    the facts it snapshotted when it served each task. A withdrawn result simply is not
+    there: the posterior becomes the one the run would have had without it.
+
+    A closed run stays closed. A dimension the replay leaves open in a finalized or
+    abandoned run is closed with the reason it originally stopped for; in a run still being
+    worked it stays open, and the next serve can measure it again.
+
+    Writes the state inside the caller's connection, so it belongs in the caller's
+    transaction.
+    """
+
+    row = _run_row(database, run_id)
+    conditions = json.loads(str(row[6]))
+    kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
+    record_track = learner_service.track_context(database, str(row[1]))
+    levels = _pinned_levels(conditions, fallback=record_track.framework_levels)
+    stored = next(
+        state
+        for state in _dimension_states(database, run_id, kinds)
+        if state.dimension == dimension
+    )
+    state = DimensionState(
+        dimension=stored.dimension,
+        dimension_kind=stored.dimension_kind,
+        grid=stored.grid,
+        prior=stored.prior,
+        posterior=stored.prior,
+        minimum_tasks=stored.minimum_tasks,
+        maximum_tasks=stored.maximum_tasks,
+    )
+    for content_id, score in database.query(
+        "SELECT content_id, raw_score FROM assessment_results "
+        "WHERE run_id = ? AND dimension = ? AND invalidated_at IS NULL "
+        "ORDER BY recorded_at, result_id",
+        [run_id, dimension],
+    ):
+        served = database.one(
+            "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
+            "content_family, modality, is_anchor FROM assessment_run_tasks "
+            "WHERE run_id = ? AND content_id = ?",
+            [run_id, str(content_id)],
+        )
+        assert served is not None
+        candidate = _served_candidate(run_id, content_id=str(content_id), served=served)
+        state = record_score(state, candidate, score=float(score), level_count=len(levels))
+    if state.status == "open" and str(row[4]) not in RESUMABLE_STATUSES:
+        state = close_dimension(
+            state, reason=stored.stop_reason or "the evidence it rested on was withdrawn"
+        )
+    _write_state(database, run_id=run_id, state=state, levels=levels, insert=False)
+    return state
+
+
+def run_state(database: Database, run_id: str, dimension: str) -> DimensionState:
+    """One dimension's stored state, for a caller that needs the run's account of it."""
+
+    kinds = run_dimension_kinds(database, run_id)
+    return next(
+        state
+        for state in _dimension_states(database, run_id, kinds)
+        if state.dimension == dimension
+    )
+
+
+def run_levels(database: Database, run_id: str) -> tuple[str, ...]:
+    """The level list this run's estimates are expressed on, as it was pinned."""
+
+    row = _run_row(database, run_id)
+    record_track = learner_service.track_context(database, str(row[1]))
+    return _pinned_levels(json.loads(str(row[6])), fallback=record_track.framework_levels)
+
+
+def run_basis(database: Database, run_id: str) -> str:
+    """`placement` or `calibration`: what an estimate written from this run rests on."""
+
+    conditions = json.loads(str(_run_row(database, run_id)[6]))
+    return (
+        "placement"
+        if conditions["calibration_label"] == "comprehensive-placement"
+        else "calibration"
+    )
 
 
 class ServedTaskReport(ContractModel):
@@ -2541,6 +2857,9 @@ class RunListReport(ContractModel):
     #: Resumable runs beyond the bound. Half a list looks exactly like a short one, so the
     #: count of what was left out travels with what was kept.
     omitted: int = 0
+    #: Whether this track lets a learner record a spoken answer, and how long a recording
+    #: is kept. A page reads it before it has a run, to know which run to offer to start.
+    recording: learner_service.RecordingPolicy | None = None
 
 
 def resumable_runs(
@@ -2581,6 +2900,7 @@ def resumable_runs(
             track_id=track_id,
             runs=tuple(run_report(database, str(row[0])) for row in kept),
             omitted=len(rows) - len(kept),
+            recording=learner_service.track_recording_policy(database, track_id),
         )
 
 
@@ -2646,8 +2966,17 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
     served = int(
         database.scalar("SELECT count(*) FROM assessment_run_tasks WHERE run_id = ?", [run_id])
     )
-    recorded = int(
-        database.scalar("SELECT count(*) FROM assessment_results WHERE run_id = ?", [run_id])
+    # Invalidated results are their own count. They were recorded, and their recording is
+    # gone: reporting them as recorded would credit the run with evidence it no longer has.
+    recorded, invalidated = (
+        int(value)
+        for value in database.one(
+            "SELECT count(*) FILTER (WHERE invalidated_at IS NULL), "
+            "count(*) FILTER (WHERE invalidated_at IS NOT NULL) "
+            "FROM assessment_results WHERE run_id = ?",
+            [run_id],
+        )
+        or (0, 0)
     )
     return AssessmentRunReport(
         run_id=run_id,
@@ -2667,6 +2996,7 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
         scoring=_run_scoring(conditions),
         tasks_served=served,
         tasks_recorded=recorded,
+        results_invalidated=invalidated,
         stop_reason=None if row[7] is None else str(row[7]),
         started_at=str(aware_utc(row[8]).isoformat()),
         finalized_at=None if row[9] is None else str(aware_utc(row[9]).isoformat()),

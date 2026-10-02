@@ -69,6 +69,17 @@ ORPHAN_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
     # `materialized_id` is checked per kind by `_session_checks` because one column
     # points at four different tables depending on what the event became.
     ("session_staged_events", "finalization_id", "session_finalizations", "finalization_id"),
+    # C5. Every column naming an artifact is unenforced, because a purge rewrites the
+    # artifact row; a staging row learns its artifact in the transaction that registers it;
+    # a submission names its successor after both exist; and a result's artifact column
+    # was added after the table, which DuckDB cannot give a foreign key.
+    ("capture_stagings", "artifact_id", "artifacts", "artifact_id"),
+    ("assessment_submissions", "artifact_id", "artifacts", "artifact_id"),
+    ("assessment_submissions", "capture_id", "capture_stagings", "capture_id"),
+    ("assessment_submissions", "superseded_by", "assessment_submissions", "submission_id"),
+    ("assessment_results", "audio_artifact_id", "artifacts", "artifact_id"),
+    ("estimate_annotations", "result_id", "assessment_results", "result_id"),
+    ("estimate_annotations", "artifact_id", "artifacts", "artifact_id"),
 )
 REQUIRED_PROJECTIONS = ("wiki",)
 
@@ -1020,6 +1031,254 @@ def _task_play_checks(database: Database) -> list[CheckResult]:
                 "every recorded play count equals the plays it was derived from",
             )
         )
+    return checks
+
+
+def _named(name: str, problems: list[str], *, failed: str, ok: str, field: str) -> CheckResult:
+    if problems:
+        return _failed(name, failed, **{field: "; ".join(problems[:50])})
+    return _ok(name, ok)
+
+
+def _pack_asset_checks(database: Database) -> list[CheckResult]:
+    """Migration 0034: an installed recording is a file the installed pack verified.
+
+    `pack_assets` is what serving reads a digest from instead of loading the pack, so a
+    row that disagrees with `pack_files` -- the digests the install verified -- would let a
+    serve snapshot a hash nobody checked.
+    """
+
+    disagreeing = [
+        f"{content_id} at {path}"
+        for content_id, path in database.query(
+            "SELECT asset.content_id, asset.path FROM pack_assets asset "
+            "WHERE NOT EXISTS (SELECT 1 FROM pack_files file WHERE file.pack_id = asset.pack_id "
+            "AND file.relative_path = asset.path AND file.sha256 = asset.sha256) ORDER BY 1"
+        )
+    ]
+    return [
+        _named(
+            "pack_assets_match_installed_files",
+            disagreeing,
+            failed="an installed recording's digest is not the digest its pack verified, so a "
+            "serve would snapshot bytes nobody checked",
+            ok="every installed recording matches a file its pack verified",
+            field="assets",
+        )
+    ]
+
+
+def _recorded_judgement_checks(database: Database) -> list[CheckResult]:
+    """Migration 0034: captures, the submissions binding them, and the verdicts on them.
+
+    None of the cross-table rules can be a constraint -- every artifact column is
+    unenforced, `status` is mutable, and the result columns were added after the table --
+    so each is asserted here, over the data, with membership established by `NOT EXISTS`
+    rather than an inner join that would pass every row with no counterpart.
+    """
+
+    checks: list[CheckResult] = []
+    unresolved = [
+        f"{capture_id} ({state})"
+        for capture_id, state in database.query(
+            "SELECT capture_id, state FROM capture_stagings "
+            "WHERE state IN ('staged', 'promoting') ORDER BY 1"
+        )
+    ]
+    if unresolved:
+        checks.append(
+            _warning(
+                "capture_stagings_resolved",
+                "a capture is neither registered nor refused; `client serve` recovers it "
+                "before it accepts a request",
+                captures="; ".join(unresolved[:50]),
+            )
+        )
+    registered = [
+        str(capture_id)
+        for (capture_id,) in database.query(
+            "SELECT staging.capture_id FROM capture_stagings staging "
+            "WHERE staging.state = 'registered' AND ("
+            "  NOT EXISTS (SELECT 1 FROM artifacts artifact "
+            "    WHERE artifact.artifact_id = staging.artifact_id "
+            "    AND artifact.track_id = staging.track_id AND artifact.kind = 'audio' "
+            "    AND artifact.sha256 = staging.sha256) "
+            "  OR NOT EXISTS (SELECT 1 FROM assessment_submissions submission "
+            "    WHERE submission.capture_id = staging.capture_id "
+            "    AND submission.artifact_id = staging.artifact_id "
+            "    AND submission.run_id = staging.run_id "
+            "    AND submission.content_id = staging.content_id)) ORDER BY 1"
+        )
+    ]
+    if not unresolved:
+        checks.append(
+            _named(
+                "capture_stagings_resolved",
+                registered,
+                failed="a capture is recorded as registered, and its artifact or its "
+                "submission does not say so -- the three are written in one transaction, so "
+                "this is damage rather than a crash",
+                ok="every capture is registered with its artifact and submission, or refused",
+                field="captures",
+            )
+        )
+    elif registered:
+        checks.append(
+            _failed(
+                "capture_registrations_agree",
+                "a capture is recorded as registered, and its artifact or its submission does "
+                "not say so",
+                captures="; ".join(registered[:50]),
+            )
+        )
+    doubled = [
+        f"{run_id}/{content_id} ({count})"
+        for run_id, content_id, count in database.query(
+            "SELECT run_id, content_id, count(*) FROM assessment_submissions "
+            "WHERE status <> 'superseded' GROUP BY run_id, content_id HAVING count(*) > 1 "
+            "ORDER BY 1, 2"
+        )
+    ]
+    checks.append(
+        _named(
+            "one_live_submission_per_task",
+            doubled,
+            failed="a served task has more than one submission that is not superseded, so "
+            "which recording answers it cannot be said",
+            ok="every served task has at most one submission that is not superseded",
+            field="tasks",
+        )
+    )
+    unnamed = [
+        str(submission_id)
+        for (submission_id,) in database.query(
+            "SELECT submission.submission_id FROM assessment_submissions submission "
+            "WHERE submission.status = 'superseded' AND NOT EXISTS ("
+            "  SELECT 1 FROM assessment_submissions successor "
+            "  WHERE successor.submission_id = submission.superseded_by "
+            "  AND successor.run_id = submission.run_id "
+            "  AND successor.content_id = submission.content_id "
+            "  AND successor.submission_id <> submission.submission_id) ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "submission_supersession_named",
+            unnamed,
+            failed="a superseded submission does not name a successor answering the same task",
+            ok="every superseded submission names its successor for the same task",
+            field="submissions",
+        )
+    )
+    disagreeing = [
+        f"{submission_id} ({reason})"
+        for submission_id, reason in database.query(
+            "SELECT submission.submission_id, CASE "
+            "  WHEN artifact.artifact_id IS NULL THEN 'names no artifact' "
+            "  WHEN artifact.track_id <> run.track_id THEN 'another track''s recording' "
+            "  WHEN artifact.kind <> 'audio' THEN 'not audio' "
+            "  WHEN submission.status = 'pending' AND (artifact.purged_at IS NOT NULL "
+            "    OR NOT artifact.retained) THEN 'pending on a recording that is gone' "
+            "  WHEN submission.status = 'pending' AND coalesce(task.status, '') <> 'served' "
+            "    THEN 'pending on a task that is not outstanding' "
+            "  WHEN submission.status = 'withdrawn' AND coalesce(task.status, '') = 'served' "
+            "    THEN 'withdrawn while its task is still outstanding' "
+            "  WHEN submission.status = 'judged' AND NOT EXISTS (SELECT 1 FROM "
+            "    assessment_results result WHERE result.run_id = submission.run_id "
+            "    AND result.content_id = submission.content_id "
+            "    AND result.audio_artifact_id = submission.artifact_id) "
+            "    THEN 'judged with no result resting on it' "
+            "  END AS reason "
+            "FROM assessment_submissions submission "
+            "JOIN assessment_runs run ON run.run_id = submission.run_id "
+            "LEFT JOIN artifacts artifact ON artifact.artifact_id = submission.artifact_id "
+            "LEFT JOIN assessment_run_tasks task ON task.run_id = submission.run_id "
+            "  AND task.content_id = submission.content_id "
+            "WHERE reason IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "submission_artifacts_agree",
+            disagreeing,
+            failed="a submission and the recording or task it names disagree",
+            ok="every submission names its own track's recording, in a state its task agrees with",
+            field="submissions",
+        )
+    )
+    outlived = [
+        f"{result_id} ({reason})"
+        for result_id, reason in database.query(
+            "SELECT result.result_id, CASE "
+            "  WHEN artifact.artifact_id IS NULL THEN 'names no artifact' "
+            "  WHEN artifact.track_id <> run.track_id THEN 'another track''s recording' "
+            "  WHEN artifact.kind <> 'audio' THEN 'not audio' "
+            "  WHEN result.invalidated_at IS NULL AND (artifact.purged_at IS NOT NULL "
+            "    OR NOT artifact.retained) THEN 'standing on a recording that is gone' "
+            "  WHEN NOT EXISTS (SELECT 1 FROM assessment_submissions submission "
+            "    WHERE submission.run_id = result.run_id "
+            "    AND submission.content_id = result.content_id "
+            "    AND submission.artifact_id = result.audio_artifact_id "
+            "    AND submission.status = 'judged') THEN 'no judged submission binds it' "
+            "  END AS reason "
+            "FROM assessment_results result "
+            "JOIN assessment_runs run ON run.run_id = result.run_id "
+            "LEFT JOIN artifacts artifact ON artifact.artifact_id = result.audio_artifact_id "
+            "WHERE result.audio_artifact_id IS NOT NULL AND reason IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "results_rest_on_their_recording",
+            outlived,
+            failed="an assessment result outlived, or never had, the recording it rests on",
+            ok="every judged result rests on its own submitted recording, or is invalidated",
+            field="results",
+        )
+    )
+    half = [
+        str(result_id)
+        for (result_id,) in database.query(
+            "SELECT result_id FROM assessment_results "
+            "WHERE (invalidated_at IS NULL) <> (invalidated_reason IS NULL) "
+            "OR (invalidated_at IS NOT NULL AND audio_artifact_id IS NULL) "
+            "OR (invalidated_reason IS NOT NULL AND length(trim(invalidated_reason)) = 0) "
+            "ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "result_invalidation_complete",
+            half,
+            failed="a result is half invalidated -- a moment without a reason, a reason "
+            "without a moment, or invalidated with no recording to have lost",
+            ok="every invalidated result says when and why, and names the recording it lost",
+            field="results",
+        )
+    )
+    unjudged = [
+        f"{result_id} ({reason})"
+        for result_id, reason in database.query(
+            "SELECT result_id, CASE "
+            "  WHEN judgement_policy_version IS NULL THEN 'no judgement policy version' "
+            "  WHEN assessor_kind NOT IN ('ai', 'human') THEN 'not judged by ai or human' "
+            "  WHEN assessor IS NULL OR length(trim(assessor)) = 0 THEN 'judge not named' "
+            "  WHEN assessor_kind = 'ai' AND confidence = 'high' THEN 'ai above medium' "
+            "  END AS reason "
+            "FROM assessment_results WHERE audio_artifact_id IS NOT NULL "
+            "AND reason IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "judged_claims_within_policy",
+            unjudged,
+            failed="a verdict on a recording claims more than its judge may, or does not say "
+            "which rule decided it",
+            ok="every verdict on a recording names its judge and stays within its ceiling",
+            field="results",
+        )
+    )
     return checks
 
 
@@ -2740,6 +2999,17 @@ CHECK_REQUIREMENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("sources", "source_units", "track_source_progress", "comprehension_observations"),
     ),
     ("artifacts", ("artifacts", "pronunciation_observations", "utterances")),
+    ("pack_assets", ("pack_assets", "pack_files")),
+    (
+        "recorded_judgement",
+        (
+            "capture_stagings",
+            "assessment_submissions",
+            "assessment_results",
+            "assessment_run_tasks",
+            "artifacts",
+        ),
+    ),
     (
         "transcripts",
         (
@@ -2882,6 +3152,10 @@ def check_database(
                     ),
                 )
             )
+        if available["pack_assets"]:
+            checks.extend(_pack_asset_checks(database))
+        if available["recorded_judgement"]:
+            checks.extend(_recorded_judgement_checks(database))
         if available["error_model"]:
             checks.extend(_error_model_checks(database))
         if available["estimates"] and any(

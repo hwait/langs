@@ -32,6 +32,7 @@ forbidden_directory_names = [
   "imports",
   "learner-workspaces",
   "recordings",
+  "staging",
 ]
 
 forbidden_path_sequences = [

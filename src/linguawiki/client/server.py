@@ -35,6 +35,7 @@ from linguawiki.db import migrations as migration_module
 from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.paths import WorkspacePaths
 from linguawiki.retrying import DEFAULT_ATTEMPTS, with_retry
+from linguawiki.services import recordings as recording_service
 
 #: How long a connection may be silent before it is dropped. It bounds the wait for the
 #: request line as well as for the body: a socket that connects and says nothing is not
@@ -83,6 +84,8 @@ class ClientServer:
     #: token. Without it a fresh page uses discovery; with it, the page opens this run or
     #: says by name why it cannot.
     run: str | None = None
+    #: What capture recovery did before this server accepted its first request.
+    recovery: recording_service.RecoveryReport | None = None
     serving: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -183,11 +186,22 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 command = route.command
                 if route.mutates:
                     security.assert_origin(headers, origin=str(client["origin"]))
-                body = self._read_body()
-                _assert_declared_shape(body, route)
+                if route.upload is not None:
+                    raw, content_type = self._read_upload(route)
+                    body: dict[str, Any] = {}
+                else:
+                    raw, content_type = b"", ""
+                    body = self._read_body()
+                    _assert_declared_shape(body, route)
                 _assert_declared_query(query, route)
                 request = routes.Request(
-                    path_values=values, body=body, clock=clock, paths=paths, query=query
+                    path_values=values,
+                    body=body,
+                    clock=clock,
+                    paths=paths,
+                    query=query,
+                    raw=raw,
+                    content_type=content_type,
                 )
                 # One reader per read, one writer per mutation, neither held across
                 # requests: the service call opens and closes its own connection inside
@@ -205,9 +219,13 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 # commits and then opens a reader for its report retries that *read* itself,
                 # so brief contention no longer reports a landed mutation as a failure. This
                 # rule is the backstop for when that budget is exhausted.
+                # An upload is keyed by the capture identifier in its path, which is what
+                # makes its retry a replay.
                 attempts = (
                     DEFAULT_ATTEMPTS
-                    if not route.mutates or request.optional("idempotency_key", str) is not None
+                    if not route.mutates
+                    or route.upload is not None
+                    or request.optional("idempotency_key", str) is not None
                     else 1
                 )
                 report = with_retry(lambda: route.handler(request), attempts=attempts)
@@ -301,6 +319,42 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                     details=(ErrorDetail(field="body", reason="not an object"),),
                 )
             return document
+
+        def _read_upload(self, route: routes.Route) -> tuple[bytes, str]:
+            """Read a route's byte body, bounded by the route's own cap while reading.
+
+            The declared type has to be in the route's family: a recording route refuses a
+            JSON body rather than storing it as audio.
+            """
+
+            content_type = str(self.headers.get("Content-Type") or "").strip()
+            family = str(route.upload or "").split("/", 1)[0] + "/"
+            if not content_type.lower().startswith(family):
+                raise LinguaWikiError(
+                    "invalid_contract",
+                    f"{route.command} takes a body of type {route.upload}, and this one is "
+                    f"{content_type or 'undeclared'}",
+                    details=(ErrorDetail(field="Content-Type", reason=content_type or "absent"),),
+                )
+            declared = self.headers.get("Content-Length")
+            if declared is None or not declared.isdigit():
+                raise LinguaWikiError(
+                    "invalid_contract",
+                    "an upload must declare its Content-Length, because the size cap is what "
+                    "bounds the read",
+                    details=(ErrorDetail(field="body", reason="no Content-Length"),),
+                )
+            length = int(declared)
+            if length > route.upload_limit:
+                raise _too_large(route.upload_limit)
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise LinguaWikiError(
+                    "invalid_contract",
+                    f"the upload ended after {len(raw)} of the {length} bytes it declared",
+                    details=(ErrorDetail(field="body", reason="truncated"),),
+                )
+            return raw, content_type
 
         # --- writing ---------------------------------------------------------------
 
@@ -452,10 +506,10 @@ def _assert_declared_query(query: dict[str, str], route: routes.Route) -> None:
         )
 
 
-def _too_large() -> LinguaWikiError:
+def _too_large(limit: int = MAXIMUM_BODY_BYTES) -> LinguaWikiError:
     return LinguaWikiError(
         "client_body_too_large",
-        f"a request body may be at most {MAXIMUM_BODY_BYTES} bytes",
+        f"a request body may be at most {limit} bytes",
         details=(ErrorDetail(field="body", reason="over the cap"),),
     )
 
@@ -466,12 +520,18 @@ def build_server(
     port: int = 0,
     clock: Clock | None = None,
     run: str | None = None,
+    recovery_wait: float = recording_service.RECOVERY_WAIT_SECONDS,
 ) -> ClientServer:
     """Bind a server on loopback, mint its token, and record where it is listening.
 
     `port=0` asks the operating system for a free one, which is what a local client wants:
     a fixed port is one more thing to collide with and nothing depends on it, because the
     port is discoverable from the runtime file.
+
+    Captures a crash left unresolved are recovered first, before anything is bound: a
+    request served over a recording that is neither registered nor refused would be
+    answered from a guess. Recovery needs the writer, waits `recovery_wait` seconds for
+    it, and then refuses to start with `writer_locked`.
     """
 
     active_clock = clock or SystemClock()
@@ -483,6 +543,7 @@ def build_server(
             f"{run} is not a run identifier",
             details=(ErrorDetail(field="run", reason="not a run identifier"),),
         )
+    recovered = recording_service.recover(paths, clock=active_clock, wait_seconds=recovery_wait)
     token = runtime.mint_token()
     state: dict[str, Any] = {"paths": paths, "clock": active_clock, "token": token}
     # `HTTPServer`, not `ThreadingHTTPServer`. See the module docstring: the threaded form
@@ -494,7 +555,7 @@ def build_server(
     state["port"] = bound
     state["origin"] = f"http://127.0.0.1:{bound}"
     runtime.write(paths, port=bound, clock=active_clock)
-    return ClientServer(server=server, paths=paths, token=token, run=run)
+    return ClientServer(server=server, paths=paths, token=token, run=run, recovery=recovered)
 
 
 def serve(
