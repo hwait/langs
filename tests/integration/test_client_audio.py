@@ -206,9 +206,7 @@ def database_check(workspace: PolishWorkspace) -> Any:
 
 def failed_checks(workspace: PolishWorkspace) -> dict[str, Any]:
     return {
-        entry.name: entry
-        for entry in database_check(workspace).checks
-        if entry.status == "failed"
+        entry.name: entry for entry in database_check(workspace).checks if entry.status == "failed"
     }
 
 
@@ -367,7 +365,12 @@ def test_a_verdict_must_name_the_submitted_recording(speaking: PolishWorkspace) 
     )
     assert (
         refused(
-            judge, speaking, run_id, task.content_id, rows_artifact(speaking), assessor_kind="learner"
+            judge,
+            speaking,
+            run_id,
+            task.content_id,
+            rows_artifact(speaking),
+            assessor_kind="learner",
         )
         == "assessment_judge_required"
     )
@@ -390,9 +393,7 @@ def test_a_second_capture_before_the_verdict_supersedes_and_purges_the_first(
 
     assert first.submission is not None and second.submission is not None
     assert second.superseded == (first.submission.submission_id,)
-    statuses = dict(
-        rows(speaking, "SELECT submission_id, status FROM assessment_submissions")
-    )
+    statuses = dict(rows(speaking, "SELECT submission_id, status FROM assessment_submissions"))
     assert statuses == {
         first.submission.submission_id: "superseded",
         second.submission.submission_id: "pending",
@@ -981,9 +982,7 @@ def test_a_bytes_file_whose_hash_changed_is_reported_rather_than_deleted(
         with pytest.raises(Crash):
             take(speaking, run_id, task.content_id, data=spoken_bytes(57))
     (staged,) = [
-        speaking.root / path
-        for path in private_files(speaking.root)
-        if path.startswith("staging/")
+        speaking.root / path for path in private_files(speaking.root) if path.startswith("staging/")
     ]
     staged.write_bytes(b"not the captured bytes")
 
@@ -1062,9 +1061,10 @@ def test_end_to_end_the_page_captures_and_the_judge_records_from_the_recording(
         artifact_id = uploaded.data["artifact_id"]
         assert uploaded.data["submission"]["capture_id"] == identifier
         # A lost response, resent: the same answer, and nothing registered twice.
-        assert client.upload(path, spoken_bytes(60), content_type="audio/webm").data[
-            "artifact_id"
-        ] == artifact_id
+        assert (
+            client.upload(path, spoken_bytes(60), content_type="audio/webm").data["artifact_id"]
+            == artifact_id
+        )
 
         waiting = client.get(f"/runs/{run_id}/screen").data["outstanding"][0]
         assert waiting["state"] == "awaiting-judge"

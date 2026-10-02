@@ -135,7 +135,7 @@ def _calibrate(paths: object, run_id: str) -> None:
 LISTENING_KEY = "pl.task.listening.02"
 
 
-def _tone() -> bytes:
+def _tone(frequency: float = 440.0) -> bytes:
     """A third of a second of a generated tone: a real WAV, and nothing anybody said."""
 
     import io
@@ -150,7 +150,7 @@ def _tone() -> bytes:
         output.setframerate(8000)
         output.writeframes(
             b"".join(
-                struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / 8000)))
+                struct.pack("<h", int(12000 * math.sin(2 * math.pi * frequency * i / 8000)))
                 for i in range(2400)
             )
         )
@@ -251,6 +251,66 @@ def _listening(paths: object, *, root: Path) -> None:
         clock=Clock(),
         actor="client",
     )
+
+
+def _captured(paths: object) -> None:
+    """A spoken answer recorded twice, judged, finalized, and purged -- as a page and a
+    judge do it.
+
+    The second recording supersedes the first before the verdict, so a superseded
+    submission and its purged recording exist; purging the judged one afterwards marks its
+    result invalidated and annotates the estimate snapshot that rested on it. The staging
+    rows are what the captures left behind. The recordings are generated tones.
+    """
+
+    from linguawiki.services import recordings as recording_service
+
+    learner_service.update_track(
+        paths,  # type: ignore[arg-type]
+        preferences=learner_service.TrackPreferences(
+            voice_available=True,
+            transcript_retention_consent=True,
+            audio_recording_available=True,
+            audio_retention_consent=True,
+        ),
+        clock=Clock(),
+    )
+    run = assessment_service.start(
+        paths,  # type: ignore[arg-type]
+        dimensions=["pronunciation"],
+        modalities=["speech"],
+        scoring="machine+recorded",
+        clock=Clock(),
+    )
+    served = assessment_service.next_task(paths, run=run.run_id, clock=Clock())  # type: ignore[arg-type]
+    assert isinstance(served, assessment_service.NextTaskReport)
+    taken = None
+    for index, frequency in enumerate((523.25, 587.33)):
+        taken = recording_service.capture(
+            paths,  # type: ignore[arg-type]
+            run=run.run_id,
+            content_id=served.content_id,
+            capture_id=f"00000000-0000-4000-8000-00000000000{index}",
+            data=_tone(frequency),
+            media_type="audio/wav",
+            clock=Clock(),
+            actor="client",
+        )
+    assert taken is not None and taken.artifact_id is not None
+    assessment_service.record(
+        paths,  # type: ignore[arg-type]
+        run=run.run_id,
+        content_id=served.content_id,
+        score=0.5,
+        audio_artifact=taken.artifact_id,
+        assessor_kind="ai",
+        assessor="upgrade-fixture-judge",
+        confidence="medium",
+        rubric={"segmentals": 0.5},
+        clock=Clock(),
+    )
+    assessment_service.finalize(paths, run=run.run_id, clock=Clock())  # type: ignore[arg-type]
+    artifact_service.purge(paths, artifact=taken.artifact_id, clock=Clock())  # type: ignore[arg-type]
 
 
 def _curriculum(paths: object) -> None:
@@ -978,6 +1038,7 @@ def seed(root: Path) -> None:
     _material(paths)
     _spoken(paths, root=root)
     _listening(paths, root=root)
+    _captured(paths)
     _job_row(paths)
 
 

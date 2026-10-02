@@ -24,6 +24,11 @@ const TOKEN_KEY = "linguawiki.token";
 const RUN_KEY = "linguawiki.run";
 const STALE_TOKEN = new Set(["client_token_required", "client_token_invalid"]);
 const MACHINE_RUN = { scoring: "machine", modalities: ["text", "audio"] };
+// Where the track has both said it can record and agreed to the recording being kept,
+// spoken tasks are answered by recording and marked by a judge. The server decides that
+// (`recording.offered`); the page only reads it.
+const RECORDED_RUN = { scoring: "machine+recorded", modalities: ["text", "audio", "speech"] };
+const PAGE_SCORING = new Set(["machine", "machine+recorded"]);
 
 const state = {
   token: null,
@@ -37,6 +42,11 @@ const state = {
   // a draft that lived only in the DOM was erased by pressing Play or by any error.
   drafts: new Map(),
   stale: false,
+  recording: null, // the track's recording policy, from discovery
+  recorder: null, // { recorder, chunks, content_id } while the learner is speaking
+  // content_id -> { capture_id, blob } of a recording made and not yet acknowledged, so a
+  // retry resends the same bytes under the same identifier.
+  takes: new Map(),
 };
 
 // --- the fragment ----------------------------------------------------------------------
@@ -236,6 +246,63 @@ async function send(operation) {
   }
 }
 
+// One recording, sent as its own bytes under the identifier minted when the learner pressed
+// stop. The identifier is the upload's idempotency key: a retry resends the same bytes
+// under it, and the server answers a retry of a capture it already registered with that
+// registration rather than a second one.
+async function uploadTake(task, take) {
+  const path = `/runs/${state.run}/tasks/${task.content_id}/captures/${take.capture_id}`;
+  for (let attempt = 0; ; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(path, {
+        method: "POST",
+        headers: { [TOKEN_HEADER]: state.token, "Content-Type": take.blob.type || "audio/webm" },
+        body: take.blob,
+        cache: "no-store",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+      });
+    } catch {
+      setStatus("offline");
+      await sleep(Math.min(1000 * (attempt + 1), 5000));
+      continue;
+    }
+    let envelope = null;
+    try {
+      envelope = await response.json();
+    } catch {
+      envelope = null;
+    }
+    if (envelope === null || typeof envelope !== "object") {
+      setStatus("offline");
+      await sleep(Math.min(1000 * (attempt + 1), 5000));
+      continue;
+    }
+    if (response.ok && envelope.ok) {
+      setStatus("");
+      state.takes.delete(task.content_id);
+      return envelope.data;
+    }
+    const error = envelope.error;
+    if (STALE_TOKEN.has(error.code)) {
+      state.stale = true;
+      store(TOKEN_KEY, null);
+      setStatus("");
+      throw new Refusal(response.status, error);
+    }
+    if (response.status === 503 && error.retryable) {
+      setStatus("waiting");
+      await sleep((Number(response.headers.get("Retry-After")) || 1) * 1000);
+      continue;
+    }
+    setStatus("");
+    // A refusal is an answer: the server removed the bytes and said why. This take is over.
+    state.takes.delete(task.content_id);
+    throw new Refusal(response.status, error);
+  }
+}
+
 // --- actions ---------------------------------------------------------------------------
 
 async function act(work) {
@@ -267,9 +334,58 @@ async function openRun(runId) {
 
 function startRun() {
   return act(async () => {
-    const run = await keyed("POST", "/runs", MACHINE_RUN);
+    const shape = state.recording && state.recording.offered ? RECORDED_RUN : MACHINE_RUN;
+    const run = await keyed("POST", "/runs", shape);
     state.run = run.run_id;
   });
+}
+
+// Press to start, press to stop. No countdown: the learner decides when they have finished.
+async function startRecording(task) {
+  if (state.busy || state.recorder) return;
+  state.error = null;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    state.error = {
+      code: "client_microphone_unavailable",
+      message: "The browser did not allow the microphone, so nothing was recorded.",
+    };
+    draw();
+    return;
+  }
+  const recorder = new MediaRecorder(stream);
+  const chunks = [];
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data && event.data.size) chunks.push(event.data);
+  });
+  state.recorder = { recorder, chunks, stream, content_id: task.content_id };
+  recorder.start();
+  draw();
+}
+
+function stopRecording(task) {
+  const active = state.recorder;
+  if (!active || active.content_id !== task.content_id) return;
+  active.recorder.addEventListener(
+    "stop",
+    () => {
+      active.stream.getTracks().forEach((track) => track.stop());
+      state.recorder = null;
+      const blob = new Blob(active.chunks, { type: active.recorder.mimeType || "audio/webm" });
+      state.takes.set(task.content_id, { capture_id: crypto.randomUUID(), blob });
+      submitTake(task);
+    },
+    { once: true },
+  );
+  active.recorder.stop();
+}
+
+function submitTake(task) {
+  const take = state.takes.get(task.content_id);
+  if (!take) return Promise.resolve();
+  return act(() => uploadTake(task, take));
 }
 
 function resumeRun(runId) {
@@ -454,6 +570,7 @@ async function drawPicker() {
     state.error = { code: refusal.code, message: refusal.message };
     listed = { runs: [] };
   }
+  state.recording = listed.recording || null;
   const items = listed.runs.map((run) =>
     h(
       "li",
@@ -462,7 +579,7 @@ async function drawPicker() {
         "span",
         {},
         `${run.calibration_label} · ${run.status} · started ${run.started_at.slice(0, 10)}`,
-        run.scoring === "machine" ? "" : " · opened elsewhere: continue it with the assess skill",
+        PAGE_SCORING.has(run.scoring) ? "" : " · opened elsewhere: continue it with the assess skill",
       ),
       button(run.status === "paused" ? "Resume" : "Continue", () => resumeRun(run.run_id), {
         dataset: { run: run.run_id },
@@ -476,6 +593,9 @@ async function drawPicker() {
       ? h("section", { class: "panel" }, h("h2", {}, "Pick up where you left off"), h("ul", { class: "runs" }, items))
       : "",
     message(items.length ? "Or begin again:" : "No calibration is open.", button("Start a calibration", startRun)),
+    state.recording && state.recording.offered
+      ? h("p", { class: "note", dataset: { role: "retention" } }, retentionNote(state.recording))
+      : null,
   );
   drawStatus();
 }
@@ -503,7 +623,22 @@ function taskView(screen, task) {
       ),
     );
   }
-  if (task.answer_with === "choice") {
+  if (task.answer_with === "recording") {
+    const recording = state.recorder && state.recorder.content_id === task.content_id;
+    const pending = state.takes.get(task.content_id);
+    body.push(
+      h(
+        "div",
+        { class: "speak" },
+        recording
+          ? button("Stop recording", () => stopRecording(task), { dataset: { role: "stop" }, disabled: false })
+          : button("Start recording", () => startRecording(task), { dataset: { role: "record" } }),
+        pending && !recording ? button("Send again", () => submitTake(task), { dataset: { role: "resend" } }) : null,
+        h("span", { class: "recording-state", dataset: { role: "recording-state" } }, recording ? "Recording…" : ""),
+      ),
+      h("p", { class: "note", dataset: { role: "retention" } }, retentionNote(screen.recording)),
+    );
+  } else if (task.answer_with === "choice") {
     body.push(
       h(
         "div",
@@ -554,6 +689,26 @@ function taskView(screen, task) {
   return h("section", { class: "task", dataset: { content: task.content_id } }, body);
 }
 
+// The track's retention policy, said rather than chosen: the page never overrides it.
+function retentionNote(policy) {
+  if (!policy) return "";
+  const kept = {
+    keep: "Your recording is kept until you remove it.",
+    "rolling-days": `Your recording is kept for ${policy.retention_days || "a set number of"} day(s), then removed.`,
+    "delete-after-ingestion": "Your recording is kept until it has been marked.",
+  }[policy.retention_policy];
+  return `${kept || ""} A judge listens to it to mark your answer.`;
+}
+
+function waitingNote(waiting) {
+  if (!waiting.length) return null;
+  return h(
+    "p",
+    { class: "note", dataset: { role: "awaiting-judge" } },
+    `${waiting.length} recorded answer${waiting.length === 1 ? " is" : "s are"} waiting for a judge to mark.`,
+  );
+}
+
 function results(screen) {
   const closed = screen.status === "finalized" || screen.status === "abandoned";
   return message(
@@ -568,13 +723,22 @@ async function draw(options = {}) {
   if (!state.run || !state.screen) return drawPicker();
   const screen = state.screen;
   let content;
-  // Answerable here: scored by the server, and -- when heard -- with something to hear.
-  const answerable = screen.outstanding.find((task) => !task.needs_judge && !task.missing_recording);
-  const judged = screen.outstanding.find((task) => task.needs_judge || task.missing_recording);
-  // Only a run opened for machine scoring is served from this page. Under `any` the next
-  // task can need a judge or a recording this page does not have, and serving it would
-  // spend an exposure on a question the learner cannot answer here.
-  const servable = screen.scoring === "machine";
+  // A spoken task is answered here by recording it, when the track permits that; a judge
+  // marks it later. Everything else answerable here is scored by the server.
+  const recordable = (task) =>
+    task.answer_with === "recording" && screen.recording && screen.recording.offered;
+  const waiting = screen.outstanding.filter((task) => task.state === "awaiting-judge");
+  const open = screen.outstanding.filter((task) => task.state !== "awaiting-judge");
+  const answerable = open.find((task) => (!task.needs_judge && !task.missing_recording) || recordable(task));
+  const judged = open.find((task) => (task.needs_judge || task.missing_recording) && !recordable(task));
+  // Only a run this page shaped is served from it. Under `any` the next task can need a
+  // judge or a recording this page does not have, and serving it would spend an exposure
+  // on a question the learner cannot answer here.
+  const servable = PAGE_SCORING.has(screen.scoring);
+  // A dimension holding a recorded answer is waiting for its judge; the run may still
+  // serve the others.
+  const held = new Set(screen.outstanding.map((task) => task.dimension));
+  const free = screen.dimensions.some((dimension) => dimension.status === "open" && !held.has(dimension.dimension));
   if (screen.status === "paused") {
     content = message("This calibration is paused.", button("Resume", () => resumeRun(screen.run_id)));
   } else if (screen.status !== "in-progress") {
@@ -597,7 +761,12 @@ async function draw(options = {}) {
       "This calibration was opened outside this page, so its next task may need a judge or a recording this page does not have. Continue it with the assess skill, or pause it here.",
       button("Pause", () => setRunStatus("paused")),
     );
-  } else if (screen.dimensions.some((dimension) => dimension.status === "open")) {
+  } else if (!free && waiting.length) {
+    content = message(
+      "Every part of this calibration that is left is waiting for a judge to mark a recorded answer. You can pause here and come back.",
+      button("Pause", () => setRunStatus("paused")),
+    );
+  } else if (free) {
     if (state.error) {
       // Never serve again on its own after a refusal: a refusal that repeats would loop.
       // The learner reads the message and decides.
@@ -611,7 +780,7 @@ async function draw(options = {}) {
   } else {
     content = results(screen);
   }
-  app().replaceChildren(header(), errorBanner() || "", progress(screen), content);
+  app().replaceChildren(header(), errorBanner() || "", progress(screen), waitingNote(waiting) || "", content);
   drawStatus();
 }
 
