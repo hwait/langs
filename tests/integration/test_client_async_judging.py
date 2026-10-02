@@ -780,6 +780,41 @@ def test_a_release_is_refused_when_its_arguments_disagree(speaking: PolishWorksp
     assert rows(speaking, "SELECT count(*) FROM judging_releases") == [(0,)]
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "assessment_audio_purged",
+        "assessment_judging_exhausted",
+        "assessment_response_not_retained",
+        "assessment_run_abandoned",
+        "assessment_run_finalized",
+        "assessment_consent_withdrawn",
+    ],
+)
+def test_a_terminal_release_may_not_borrow_a_system_code(
+    speaking: PolishWorkspace, code: str
+) -> None:
+    run_id, _, submission_id, _ = submitted(speaking, 217)
+    claim_id = claimed_one(speaking, run_id)
+
+    failure = refusal(release, speaking, claim_id, terminal=True, code=code)
+
+    assert failure.payload.code == "assessment_release_code_reserved"
+    assert "assessment_audio_unintelligible" in failure.payload.message
+    assert failure.payload.details[0].context == {"code": code}
+    assert submission_state(speaking, submission_id) == ("pending", None)
+    assert rows(speaking, "SELECT count(*) FROM judging_releases") == [(0,)]
+
+
+def audits_naming(workspace: PolishWorkspace, submission_id: str) -> list[Any]:
+    return rows(
+        workspace,
+        "SELECT command, after_summary FROM audit_log WHERE affected_records_json LIKE ? "
+        "ORDER BY recorded_at",
+        [f"%{submission_id}%"],
+    )
+
+
 def exhaust(workspace: PolishWorkspace, run_id: str) -> list[str]:
     """Claim the run's one submission as often as the policy allows, letting each lease
     run out -- built with the clock, never by hand edits."""
@@ -810,6 +845,13 @@ def test_exhausted_attempts_are_reported_then_settled_by_an_unrelated_writer(
     served = serve(speaking, run_id)
 
     assert served.content_id != content_id
+    # The serve says what it withdrew, and so does the audit log -- once.
+    assert any(submission_id in warning for warning in served.warnings)
+    assert [
+        command
+        for command, summary in audits_naming(speaking, submission_id)
+        if judging.EXHAUSTED_CODE in str(summary)
+    ] == ["assessment.next"]
     status, code = submission_state(speaking, submission_id)
     assert (status, code) == ("withdrawn", judging.EXHAUSTED_CODE)
     reason = rows(
@@ -823,29 +865,50 @@ def test_exhausted_attempts_are_reported_then_settled_by_an_unrelated_writer(
 
 @pytest.mark.parametrize(
     "writer",
-    ["claim", "pause", "finalize", "record"],
+    ["claim", "pause", "finalize", "record", "release"],
 )
-def test_every_writer_touching_the_run_settles_what_lapsed(
+def test_every_writer_touching_the_run_settles_what_lapsed_and_says_so(
     speaking: PolishWorkspace, writer: str
 ) -> None:
     run_id, content_id, submission_id, _ = submitted(speaking, 208)
-    exhaust(speaking, run_id)
+    claims = exhaust(speaking, run_id)
+    audited_before = audits_naming(speaking, submission_id)
+
+    def named(warnings: tuple[str, ...]) -> bool:
+        return any(submission_id in warning for warning in warnings)
 
     if writer == "claim":
         report = claim(speaking, run_id)
         assert report.claimed == ()
         assert [entry.code for entry in report.withdrawn] == [judging.EXHAUSTED_CODE]
     elif writer == "pause":
-        pause(speaking, run_id)
+        assert named(
+            assessment_service.set_status(
+                speaking.paths, status="paused", run=run_id, clock=speaking.clock
+            ).warnings
+        )
     elif writer == "finalize":
-        assessment_service.finalize(speaking.paths, run=run_id, clock=speaking.clock)
-    else:
+        assert named(
+            assessment_service.finalize(speaking.paths, run=run_id, clock=speaking.clock).warnings
+        )
+    elif writer == "record":
         # A keyless verdict naming no claim spares nothing: the submission is settled first,
-        # and the verdict refused by what became of it.
+        # and the verdict refused by what became of it. The sweep committed before the
+        # refusal, so the refusal is where the caller is told.
         failure = refusal(verdict, speaking, run_id, content_id, submission_id)
         assert failure.payload.code == "assessment_submission_withdrawn"
+        settled = [detail for detail in failure.payload.details if detail.field == "settled"]
+        assert [detail.context["submission_id"] for detail in settled] == [submission_id]
+        assert settled[0].context["code"] == judging.EXHAUSTED_CODE
+    else:
+        # Releasing the first, long-expired claim: it spares only an unreleased claim's own
+        # submission -- and it is that one -- so release itself settles it after recording.
+        report = release(speaking, claims[0])
+        assert [entry.submission_id for entry in report.withdrawn] == [submission_id]
 
     assert submission_state(speaking, submission_id) == ("withdrawn", judging.EXHAUSTED_CODE)
+    # Audited exactly once, by whichever transaction withdrew it.
+    assert len(audits_naming(speaking, submission_id)) == len(audited_before) + 1
 
 
 def test_the_last_attempts_late_verdict_is_spared_by_its_own_delivery(

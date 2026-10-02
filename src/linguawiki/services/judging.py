@@ -18,7 +18,7 @@ Core keeps the ledger:
 
 That last rule **costs the learner an observation for a judge's failure**, deliberately:
 the alternative is a submission nobody may claim holding its dimension forever. Nothing
-runs in the background to apply it, so `settle_lapsed` runs inside every writer that
+runs in the background to apply it, so `sweep_lapsed` runs inside every writer that
 touches the run, before that writer's own work, and `db check` reports an exhausted
 submission nobody has touched since.
 
@@ -167,7 +167,7 @@ def lapsed_submissions(
     now: datetime | None = None,
 ) -> list[Lapsed]:
     """Pending submissions that have used every attempt, with none of them still live and
-    no verdict standing for them -- the ones `settle_lapsed` withdraws.
+    no verdict standing for them -- the ones `sweep_lapsed` withdraws.
 
     `run_id=None` asks across the workspace, which is what `db check` does. A submission
     with a held verdict is not lapsed: it was judged, and waits only for the resume.
@@ -230,14 +230,16 @@ def exhausted_reason(attempts: int) -> str:
     )
 
 
-def settle_lapsed(
+def _settle_lapsed(
     database: Database, run_id: str, *, sparing_claim: str | None = None
 ) -> tuple[SettlementOutcome, ...]:
     """Withdraw every lapsed submission in the run, inside the caller's transaction.
 
     `assessment_judging_exhausted`, with the policy version in the reason. Through
     `withdrawal.settle`, so the task is skipped, the dimension unblocked, and the reason on
-    the submission, exactly as any other withdrawal.
+    the submission, exactly as any other withdrawal. Private: a writer outside this module
+    calls `sweep_lapsed`, which also reports and audits what this wrote; `release` calls
+    this inside its own transaction and audits it there.
     """
 
     return tuple(
@@ -254,25 +256,96 @@ def settle_lapsed(
 
 
 def sweep_lapsed(
-    database: Database, run_id: str, *, sparing_claim: str | None = None
-) -> tuple[SettlementOutcome, ...]:
-    """`settle_lapsed` for a writer about to do its own work: its own short transaction,
-    opened only when something has lapsed.
+    database: Database,
+    run_id: str,
+    *,
+    command: str,
+    actor: str,
+    sparing_claim: str | None = None,
+) -> tuple[WithdrawnSubmission, ...]:
+    """Settle what has lapsed in a run, before a writer's own work -- **the** entry point.
 
-    A transaction of its own rather than the caller's, because what it settles is true
-    whether or not the caller's work then succeeds: a command refused for its own reasons
-    must not leave an exhausted submission holding its dimension, and a verdict planned
-    after it must see the submission as it now is. DuckDB forbids nested transactions, so
-    it runs before the caller opens one.
+    Every writer touching the run calls this, and nothing else, first: claim, release,
+    record, set_status, finalize, serving, and (Tasks 5 and 6) submit and batch.
+
+    Its own short transaction, opened only when something has lapsed, rather than the
+    caller's: what it settles is true whether or not the caller's work then succeeds -- a
+    command refused for its own reasons must not leave an exhausted submission holding its
+    dimension -- and a verdict planned after it must see the submission as it now is.
+    DuckDB forbids nested transactions, so it runs before the caller opens one.
+
+    The audit entry is written in the same transaction, under the caller's command, and
+    the withdrawals are returned so the caller's report -- or its refusal -- names them: a
+    learner's answer leaving the record is never something a command did silently.
     """
 
     if not lapsed_submissions(database, run_id=run_id, sparing_claim=sparing_claim):
         return ()
     with database.transaction() as transaction:
-        return settle_lapsed(transaction, run_id, sparing_claim=sparing_claim)
+        withdrawn = tuple(
+            _withdrawn(
+                transaction, _settle_lapsed(transaction, run_id, sparing_claim=sparing_claim)
+            )
+        )
+        if withdrawn:
+            migration_module.record_audit_entry(
+                transaction,
+                command=command,
+                correlation_id=EventId.new(),
+                outcome="succeeded",
+                actor=actor,
+                affected_records_json=json.dumps(
+                    sorted([run_id, *(entry.submission_id for entry in withdrawn)])
+                ),
+                after_summary=(
+                    f"withdrew {len(withdrawn)} submission(s) whose judging attempts lapsed "
+                    f"({EXHAUSTED_CODE}): " + ", ".join(entry.submission_id for entry in withdrawn)
+                ),
+            )
+    return withdrawn
 
 
-# --- reports -------------------------------------------------------------------------------
+def settled_warnings(withdrawn: tuple[WithdrawnSubmission, ...]) -> tuple[str, ...]:
+    """What a report says of submissions a sweep withdrew before the command's own work."""
+
+    return tuple(
+        f"withdrew submission {entry.submission_id} ({entry.content_id}) as {entry.code}: "
+        f"{entry.reason}"
+        for entry in withdrawn
+    )
+
+
+def with_settled(
+    failure: LinguaWikiError, withdrawn: tuple[WithdrawnSubmission, ...]
+) -> LinguaWikiError:
+    """The refusal a command raised, naming what its sweep had already withdrawn.
+
+    The sweep committed before the command refused, so the refusal is the only account the
+    caller gets of it. Same code and message: the refusal is still about what it was about.
+    """
+
+    payload = failure.payload
+    return LinguaWikiError(
+        payload.code,
+        payload.message,
+        retryable=payload.retryable,
+        details=(
+            *payload.details,
+            *(
+                ErrorDetail(
+                    field="settled",
+                    reason="withdrawn before this command's own work",
+                    context={
+                        "submission_id": entry.submission_id,
+                        "content_id": entry.content_id,
+                        "code": entry.code,
+                        "reason": entry.reason,
+                    },
+                )
+                for entry in withdrawn
+            ),
+        ),
+    )
 
 
 class WithdrawnSubmission(ContractModel):
@@ -283,6 +356,32 @@ class WithdrawnSubmission(ContractModel):
     code: str
     reason: str
     voided_verdicts: tuple[str, ...] = ()
+
+
+#: Codes the system withdraws with by itself -- a purge, a lapse, a consent change, a run
+#: closing. A judge giving up names its own reason; borrowing one of these would make a
+#: judge's decision read as a privacy or lifecycle event that never happened.
+RESERVED_RELEASE_CODES: frozenset[str] = frozenset(
+    {
+        "assessment_audio_purged",
+        "assessment_judging_exhausted",
+        "assessment_response_not_retained",
+    }
+)
+RESERVED_RELEASE_PREFIXES: tuple[str, ...] = ("assessment_run_", "assessment_consent")
+
+#: What a judge may use instead, named in the refusal.
+JUDGE_CODE_HINT = (
+    "a code of your own naming why the answer cannot be judged, such as "
+    "assessment_audio_unintelligible or assessment_response_off_task"
+)
+
+
+def reserved_code(code: str) -> bool:
+    return code in RESERVED_RELEASE_CODES or code.startswith(RESERVED_RELEASE_PREFIXES)
+
+
+# --- reports -------------------------------------------------------------------------------
 
 
 class ClaimedJudgement(recording_service.PendingJudgement):
@@ -429,7 +528,9 @@ def claim(
         # takes no verdict, so nothing is handed out for it.
         if status not in assessment_service.RESUMABLE_STATUSES:
             assessment_service.assert_running(run_id, status=status, action="hand work to a judge")
-        lapsed = sweep_lapsed(database, run_id)
+        # Audited and reported by the sweep's own transaction; this command's audit entry
+        # below names only what this command's transaction wrote.
+        lapsed = sweep_lapsed(database, run_id, command=command, actor=actor)
         entries = recording_service.pending_entries(database, paths.root, run_id)
         unjudgeable = [
             entry
@@ -450,7 +551,7 @@ def claim(
             for entry in entries
             if not entry.judgeable and entry not in unjudgeable
         ]
-        withdrawn = _withdrawn(database, lapsed)
+        withdrawn = list(lapsed)
         claimed: list[ClaimedJudgement] = []
         if unjudgeable or chosen:
             with database.transaction() as transaction:
@@ -465,7 +566,8 @@ def claim(
                     )
                     for entry in unjudgeable
                 )
-                withdrawn.extend(_withdrawn(transaction, settled))
+                unheard = _withdrawn(transaction, settled)
+                withdrawn.extend(unheard)
                 now = transaction.now()
                 expires = now + timedelta(seconds=lease)
                 for entry in chosen:
@@ -501,12 +603,12 @@ def claim(
                         sorted(
                             [run_id]
                             + [entry.claim_id for entry in claimed]
-                            + [entry.submission_id for entry in withdrawn]
+                            + [entry.submission_id for entry in unheard]
                         )
                     ),
                     after_summary=(
                         f"{judge} claimed {len(claimed)} submission(s) for {lease}s; "
-                        f"{len(withdrawn)} withdrawn"
+                        f"{len(unheard)} unjudgeable withdrawn"
                     ),
                 )
         return ClaimReport(
@@ -677,6 +779,14 @@ def release(
             "with; pass --code",
             details=(ErrorDetail(field="code", reason="absent"),),
         )
+    if terminal and code is not None and reserved_code(code):
+        raise LinguaWikiError(
+            "assessment_release_code_reserved",
+            f"{code} is a code the system withdraws with by itself (a purge, a lapse, a "
+            "consent change, or the run closing), and a judge giving up is none of those; use "
+            + JUDGE_CODE_HINT,
+            details=(ErrorDetail(field="code", reason="reserved", context={"code": code}),),
+        )
     if not terminal and code is not None:
         raise LinguaWikiError(
             "invalid_arguments",
@@ -686,104 +796,130 @@ def release(
         )
     with open_writer(paths, command=command, clock=clock or SystemClock()) as database:
         submission_id, run_id, _judge = _claim_row(database, claim)
-        lapsed = sweep_lapsed(database, run_id, sparing_claim=claim)
-        withdrawn = _withdrawn(database, lapsed)
-        recorded = database.one(
-            "SELECT terminal, code, reason, released_at FROM judging_releases WHERE claim_id = ?",
-            [claim],
-        )
-        if recorded is not None:
-            if (bool(recorded[0]), recorded[1], str(recorded[2])) == (terminal, code, reason):
-                return _release_report(
-                    database, claim, replayed=True, withdrawn=withdrawn, warnings=[]
-                )
-            raise released_refusal(claim, tuple(recorded))
-        verdict = database.one(
-            "SELECT verdict.verdict_id, outcome.outcome FROM assessment_verdicts verdict "
-            "LEFT JOIN assessment_verdict_outcomes outcome "
-            "ON outcome.verdict_id = verdict.verdict_id WHERE verdict.claim_id = ? "
-            "ORDER BY verdict.received_at LIMIT 1",
-            [claim],
-        )
-        if verdict is not None:
-            outcome = "held" if verdict[1] is None else str(verdict[1])
-            raise LinguaWikiError(
-                "assessment_claim_judged",
-                f"claim {claim} already delivered verdict {verdict[0]} ({outcome}); a claim "
-                "ends once, and this one ended with its verdict, so there is nothing to release",
-                details=(
-                    ErrorDetail(
-                        field="claim",
-                        reason="judged",
-                        context={"verdict": str(verdict[0]), "outcome": outcome},
-                    ),
-                ),
+        lapsed = sweep_lapsed(database, run_id, command=command, actor=actor, sparing_claim=claim)
+        withdrawn = list(lapsed)
+
+        def work() -> ReleaseReport:
+            recorded = database.one(
+                "SELECT terminal, code, reason, released_at FROM judging_releases "
+                "WHERE claim_id = ?",
+                [claim],
             )
-        submission = database.one(
-            "SELECT status, withdrawn_code, superseded_by FROM assessment_submissions "
-            "WHERE submission_id = ?",
-            [submission_id],
-        )
-        assert submission is not None
-        standing = submission_id in held_submissions(database, run_id)
-        if str(submission[0]) != "pending" or standing:
-            # Something other than this claim settled the submission: another claim's
-            # verdict, a supersession, a purge, a lapse. Recording a release now would put
-            # a terminal code on a submission it never withdrew.
-            state = "judged, verdict held" if standing else str(submission[0])
-            context = {"submission_status": state}
-            if submission[1] is not None:
-                context["code"] = str(submission[1])
-            if submission[2] is not None:
-                context["successor"] = str(submission[2])
-            raise LinguaWikiError(
-                "assessment_claim_ended",
-                f"claim {claim} is for submission {submission_id}, which is no longer waiting "
-                f"for a judge ({state}); there is nothing to release, and `assessment pending` "
-                "lists what is",
-                details=(ErrorDetail(field="claim", reason="ended", context=context),),
+            if recorded is not None:
+                if (bool(recorded[0]), recorded[1], str(recorded[2])) == (terminal, code, reason):
+                    return _release_report(
+                        database, claim, replayed=True, withdrawn=withdrawn, warnings=[]
+                    )
+                raise released_refusal(claim, tuple(recorded))
+            verdict = database.one(
+                "SELECT verdict.verdict_id, outcome.outcome FROM assessment_verdicts verdict "
+                "LEFT JOIN assessment_verdict_outcomes outcome "
+                "ON outcome.verdict_id = verdict.verdict_id WHERE verdict.claim_id = ? "
+                "ORDER BY verdict.received_at LIMIT 1",
+                [claim],
             )
-        with database.transaction() as transaction:
-            transaction.execute(
-                "INSERT INTO judging_releases (claim_id, released_at, terminal, code, reason) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [claim, transaction.now(), terminal, code, reason],
-            )
-            settled: tuple[SettlementOutcome, ...] = ()
-            if terminal:
-                assert code is not None
-                settled = (
-                    settle(
-                        transaction,
-                        Settlement(submission_id=submission_id, code=code, reason=reason),
+            if verdict is not None:
+                outcome = "held" if verdict[1] is None else str(verdict[1])
+                raise LinguaWikiError(
+                    "assessment_claim_judged",
+                    f"claim {claim} already delivered verdict {verdict[0]} ({outcome}); a "
+                    "claim ends once, and this one ended with its verdict, so there is nothing "
+                    "to release",
+                    details=(
+                        ErrorDetail(
+                            field="claim",
+                            reason="judged",
+                            context={"verdict": str(verdict[0]), "outcome": outcome},
+                        ),
                     ),
                 )
-            # After the release, for the case the release itself creates: this was the
-            # last attempt the policy allows, so nobody may claim the submission again.
-            settled += settle_lapsed(transaction, run_id)
-            withdrawn.extend(_withdrawn(transaction, settled))
-            migration_module.record_audit_entry(
-                transaction,
-                command=command,
-                correlation_id=EventId.new(),
-                outcome="succeeded",
-                actor=actor,
-                affected_records_json=json.dumps(sorted([claim, submission_id, run_id])),
-                after_summary=(
-                    f"released claim {claim} terminally ({code})"
-                    if terminal
-                    else f"released claim {claim} back to the queue"
-                ),
+            submission = database.one(
+                "SELECT status, withdrawn_code, superseded_by FROM assessment_submissions "
+                "WHERE submission_id = ?",
+                [submission_id],
             )
-        return _release_report(database, claim, replayed=False, withdrawn=withdrawn, warnings=[])
+            assert submission is not None
+            standing = submission_id in held_submissions(database, run_id)
+            if str(submission[0]) != "pending" or standing:
+                # Something other than this claim settled the submission: another claim's
+                # verdict, a supersession, a purge, a lapse. Recording a release now would put
+                # a terminal code on a submission it never withdrew.
+                state = "judged, verdict held" if standing else str(submission[0])
+                context = {"submission_status": state}
+                if submission[1] is not None:
+                    context["code"] = str(submission[1])
+                if submission[2] is not None:
+                    context["successor"] = str(submission[2])
+                raise LinguaWikiError(
+                    "assessment_claim_ended",
+                    f"claim {claim} is for submission {submission_id}, which is no longer waiting "
+                    f"for a judge ({state}); there is nothing to release, and `assessment pending` "
+                    "lists what is",
+                    details=(ErrorDetail(field="claim", reason="ended", context=context),),
+                )
+            with database.transaction() as transaction:
+                transaction.execute(
+                    "INSERT INTO judging_releases (claim_id, released_at, terminal, code, reason) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [claim, transaction.now(), terminal, code, reason],
+                )
+                settled: tuple[SettlementOutcome, ...] = ()
+                if terminal:
+                    assert code is not None
+                    settled = (
+                        settle(
+                            transaction,
+                            Settlement(submission_id=submission_id, code=code, reason=reason),
+                        ),
+                    )
+                # After the release, for the case the release itself creates: this was the
+                # last attempt the policy allows, so nobody may claim the submission again.
+                settled += _settle_lapsed(transaction, run_id)
+                released = _withdrawn(transaction, settled)
+                withdrawn.extend(released)
+                migration_module.record_audit_entry(
+                    transaction,
+                    command=command,
+                    correlation_id=EventId.new(),
+                    outcome="succeeded",
+                    actor=actor,
+                    affected_records_json=json.dumps(
+                        sorted(
+                            {
+                                claim,
+                                submission_id,
+                                run_id,
+                                *(entry.submission_id for entry in released),
+                            }
+                        )
+                    ),
+                    after_summary=(
+                        f"released claim {claim} terminally ({code})"
+                        if terminal
+                        else f"released claim {claim} back to the queue"
+                    ),
+                )
+            return _release_report(
+                database, claim, replayed=False, withdrawn=withdrawn, warnings=[]
+            )
+
+        try:
+            return work()
+        except LinguaWikiError as failure:
+            # The sweep committed before this refusal; the refusal is the only account
+            # the caller gets of it.
+            raise with_settled(failure, lapsed) from failure
 
 
 __all__ = [
     "CLAIM_COMMAND",
     "EXHAUSTED_CODE",
+    "JUDGE_CODE_HINT",
     "JUDGING_POLICY",
     "MAXIMUM_LEASE_SECONDS",
     "RELEASE_COMMAND",
+    "RESERVED_RELEASE_CODES",
+    "RESERVED_RELEASE_PREFIXES",
     "UNCLAIMED",
     "ClaimReport",
     "ClaimState",
@@ -800,6 +936,8 @@ __all__ = [
     "lapsed_submissions",
     "release",
     "released_refusal",
-    "settle_lapsed",
+    "reserved_code",
+    "settled_warnings",
     "sweep_lapsed",
+    "with_settled",
 ]

@@ -20,10 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import Field
 
@@ -88,6 +88,7 @@ from linguawiki.services import packs as pack_service
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from linguawiki.services.judging import WithdrawnSubmission
     from linguawiki.services.recordings import JudgeableAudio
     from linguawiki.services.withdrawal import Settlement, SettlementOutcome
 
@@ -602,13 +603,46 @@ def _assert_running(run_id: str, *, status: str, action: str = "serve another ta
     )
 
 
-def _settle_lapsed(database: Database, run_id: str, *, sparing_claim: str | None = None) -> None:
-    """`judging.sweep_lapsed`: what every writer touching a run does before its own work,
-    in a transaction of its own, opened only when something has lapsed."""
+def _settle_lapsed(
+    database: Database,
+    run_id: str,
+    *,
+    command: str,
+    actor: str,
+    sparing_claim: str | None = None,
+) -> tuple[WithdrawnSubmission, ...]:
+    """`judging.sweep_lapsed`, what every writer touching a run does before its own work."""
 
     from linguawiki.services import judging
 
-    judging.sweep_lapsed(database, run_id, sparing_claim=sparing_claim)
+    return judging.sweep_lapsed(
+        database, run_id, command=command, actor=actor, sparing_claim=sparing_claim
+    )
+
+
+def _noting_settled[R: AssessmentRunReport | NextTaskReport](
+    settled: tuple[WithdrawnSubmission, ...], work: Callable[[], R]
+) -> R:
+    """Run a command's own work after its sweep, and make what it says name the sweep.
+
+    A submission the sweep withdrew is the learner's answer leaving the record; a command
+    that did that and reported only its own work would have acted silently. On success the
+    report's warnings name each one; on a refusal its details do, because the sweep
+    committed whatever the command then decided.
+    """
+
+    from linguawiki.services import judging
+
+    if not settled:
+        return work()
+    try:
+        result = work()
+    except LinguaWikiError as failure:
+        raise judging.with_settled(failure, settled) from failure
+    noted = result.model_copy(
+        update={"warnings": (*result.warnings, *judging.settled_warnings(settled))}
+    )
+    return cast(R, noted)
 
 
 def assert_running(run_id: str, *, status: str, action: str) -> None:
@@ -1058,302 +1092,312 @@ def next_task(
         run_id = resolve_run(database, run, track_id=track_id)
         # Before serving: a submission whose judging attempts all lapsed is holding its
         # dimension, and settling it is what lets the dimension serve again.
-        _settle_lapsed(database, run_id)
-        row = _run_row(database, run_id)
-        # Before `_assert_running`, deliberately: a retry of the serve that *closed* the
-        # last dimension must replay rather than being told the run is finished, and a
-        # conflicting key must be refused whatever state the run has reached since.
-        fingerprint = idempotency.request_hash(operation=SERVED_EVENT, run_id=run_id)
-        replay = idempotency.resolve(
-            database,
-            key=idempotency_key,
-            event_type=SERVED_EVENT,
-            request_hash=fingerprint,
-        )
-        if replay is not None:
-            recorded = replay.get("content_id")
-            if recorded is None:
-                # The key recorded a serve that served nothing: the call closed the last
-                # open dimension and returned the run. A retry gets the same answer.
-                return run_report(database, run_id)
-            return _hand_back(
+        settled = _settle_lapsed(database, run_id, command=command, actor=actor)
+
+        # The command's own work, after the sweep: whatever it reports -- or refuses
+        # with -- names the submissions the sweep withdrew.
+        def work() -> NextTaskReport | AssessmentRunReport:
+            row = _run_row(database, run_id)
+            # Before `_assert_running`, deliberately: a retry of the serve that *closed* the
+            # last dimension must replay rather than being told the run is finished, and a
+            # conflicting key must be refused whatever state the run has reached since.
+            fingerprint = idempotency.request_hash(operation=SERVED_EVENT, run_id=run_id)
+            replay = idempotency.resolve(
                 database,
-                run_id,
-                content_id=str(recorded),
-                open_dimensions=[
-                    state.dimension
-                    for state in _dimension_states(
-                        database,
-                        run_id,
-                        {
-                            str(k): str(v)
-                            for k, v in json.loads(str(row[6]))["dimension_kinds"].items()
-                        },
-                    )
-                    if state.status == "open"
-                ],
+                key=idempotency_key,
+                event_type=SERVED_EVENT,
+                request_hash=fingerprint,
             )
-        _assert_running(run_id, status=str(row[4]))
-        conditions = json.loads(str(row[6]))
-        kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
-        record = learner_service.track_context(database, str(row[1]))
-        pack_row = pack_service.installed_pack(database, record.pack_key)
-        _assert_same_bank(run_id, conditions=conditions, pack_row=pack_row)
-        states = _dimension_states(database, run_id, kinds)
-        open_states = [state for state in states if state.status == "open"]
-        if not open_states:
-            return run_report(database, run_id)
-        # The run's own condition, never the caller's: a run opened for machine scoring
-        # never serves a task that needs a judge, whatever the bank has come to hold.
-        scoring = _run_scoring(conditions)
-        recorded = (
-            frozenset()
-            if scoring == DEFAULT_SCORING
-            else _recorded_task_ids(database, pack_row["pack_id"])
-        )
-        # Read now, not from the run: consent withdrawn after the run opened stops the
-        # next spoken task from being served, whatever the run was opened under.
-        recording = recording_permitted(record.preferences)
-        candidates = tuple(
-            candidate
-            for candidate in _candidates(database, pack_row["pack_id"])
-            if servable_candidate(
-                candidate, scoring=scoring, recorded=recorded, recording=recording
-            )
-        )
-        excluded = _excluded_task_ids(
-            database, track_id=str(row[1]), run_id=run_id, clock=active_clock
-        )
-        available = tuple(str(value) for value in conditions["available_modalities"])
-        # Serve the least-progressed open dimension first, so a run that stops early has
-        # spread its evidence rather than finishing one dimension and testing no other.
-        open_states.sort(key=lambda state: (state.tasks_used, state.dimension))
-        # A dimension holding an unanswered task is not eligible for another. The order
-        # among the rest is unchanged, so the spread rule above still decides which of the
-        # *free* dimensions goes first.
-        outstanding = _outstanding_dimensions(database, run_id)
-        free_states = [state for state in open_states if state.dimension not in outstanding]
-        warnings: list[str] = []
-        for state in free_states:
-            selection = select_task(
-                state, candidates, available_modalities=available, excluded=excluded
-            )
-            if selection is None:
-                exhausted = close_dimension(state, reason="bank exhausted inside the reuse window")
-                with database.transaction() as transaction:
-                    _write_state(
-                        transaction,
-                        run_id=run_id,
-                        state=exhausted,
-                        levels=_pinned_levels(conditions, fallback=record.framework_levels),
-                        insert=False,
-                    )
-                warnings.append(f"{state.dimension} stopped early: no unseen task is available")
-                continue
-            # The answer key is read here, from the bank row, and never from the selected
-            # `Candidate`. `Candidate` carries everything item selection is allowed to
-            # consider, and the key is not among it: putting it there would let the
-            # staircase see the answers it is choosing between.
-            task = database.one(
-                "SELECT record.stable_key, task.prompt, task.rubric_json, task.rubric_version, "
-                "task.permitted_help, record.content_hash, task.target_refs_json, "
-                "task.expected_json, task.presentation_json "
-                "FROM assessment_tasks task "
-                "JOIN content_records record ON record.content_id = task.content_id "
-                "WHERE task.content_id = ?",
-                [selection.candidate.content_id],
-            )
-            assert task is not None
-            # Resolved here, before anything is written: a shuffle happens once, and the
-            # order the learner saw is the order that is stored. Re-reading the bank on
-            # resume would reshuffle, which is a different question asked under the
-            # identity of the one they were credited for.
-            shown = _serve_presentation(
-                parse_task_presentation(None if task[8] is None else str(task[8])),
-                run_id=run_id,
-                content_id=selection.candidate.content_id,
-            )
-            # Resolved here too, and before the transaction: a task that says it plays a
-            # recording the installed pack cannot produce is refused while it is still
-            # unserved, rather than written as a row nothing can read afterwards.
-            played = None
-            if _plays_audio(shown):
-                played = _serve_asset_identity(database, record.pack_key, shown)
-            sequence = (
-                int(
-                    database.scalar(
-                        "SELECT coalesce(max(sequence), 0) FROM assessment_run_tasks "
-                        "WHERE run_id = ?",
-                        [run_id],
-                    )
-                )
-                + 1
-            )
-            with database.transaction() as transaction:
-                now = transaction.now()
-                # The served facts are copied here, not re-read later. A pack is mutable
-                # and a run is not: the score must fold in the difficulty of the task the
-                # learner actually saw, and an observation attributed to this task must be
-                # about the items it targeted when it was served -- not the ones a later
-                # pack edit says it targets now.
-                #
-                # The same reasoning is why the answer key, the prompt, and the rubric
-                # body are copied: they are what a scorer needs to reach a verdict, and
-                # scoring against the live bank would let an edit made after the sitting
-                # decide whether the learner was right. The three are written together,
-                # always: a row carrying some of them and not the others can establish
-                # neither what the learner faced nor that it predates the snapshot.
-                transaction.execute(
-                    "INSERT INTO assessment_run_tasks (run_id, sequence, content_id, dimension, "
-                    "status, served_at, task_type, level_code, difficulty, content_family, "
-                    "modality, is_anchor, rubric_version, content_hash, target_refs_json, "
-                    "expected_json, prompt_snapshot, rubric_json, presentation_json, "
-                    "asset_identity_json, permitted_help) "
-                    "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        run_id,
-                        sequence,
-                        selection.candidate.content_id,
-                        state.dimension,
-                        now,
-                        selection.candidate.task_type,
-                        selection.candidate.level_code,
-                        selection.candidate.difficulty,
-                        selection.candidate.content_family,
-                        selection.candidate.modality,
-                        selection.candidate.is_anchor,
-                        int(task[3]),
-                        str(task[5]),
-                        str(task[6]),
-                        str(task[7]),
-                        str(task[1]),
-                        str(task[2]),
-                        None
-                        if shown is None
-                        else json.dumps(
-                            shown.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
-                        ),
-                        None
-                        if played is None
-                        else json.dumps(
-                            played.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
-                        ),
-                        # The allowance the learner was held to, from the same row the
-                        # report hands back -- so the stored value and the reported one
-                        # cannot disagree. Snapshotted for the same reason as the prompt:
-                        # a second serve of this task must not read it from a pack that
-                        # has been edited since.
-                        str(task[4]),
+            if replay is not None:
+                recorded = replay.get("content_id")
+                if recorded is None:
+                    # The key recorded a serve that served nothing: the call closed the last
+                    # open dimension and returned the run. A retry gets the same answer.
+                    return run_report(database, run_id)
+                return _hand_back(
+                    database,
+                    run_id,
+                    content_id=str(recorded),
+                    open_dimensions=[
+                        state.dimension
+                        for state in _dimension_states(
+                            database,
+                            run_id,
+                            {
+                                str(k): str(v)
+                                for k, v in json.loads(str(row[6]))["dimension_kinds"].items()
+                            },
+                        )
+                        if state.status == "open"
                     ],
                 )
-                # The learner has now seen it, whether or not they answer. Recording the
-                # exposure here, in the same transaction, is what keeps an abandoned run
-                # from handing the same task back inside the reuse window.
-                _record_exposure(
-                    transaction,
-                    track_id=str(row[1]),
+            _assert_running(run_id, status=str(row[4]))
+            conditions = json.loads(str(row[6]))
+            kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
+            record = learner_service.track_context(database, str(row[1]))
+            pack_row = pack_service.installed_pack(database, record.pack_key)
+            _assert_same_bank(run_id, conditions=conditions, pack_row=pack_row)
+            states = _dimension_states(database, run_id, kinds)
+            open_states = [state for state in states if state.status == "open"]
+            if not open_states:
+                return run_report(database, run_id)
+            # The run's own condition, never the caller's: a run opened for machine scoring
+            # never serves a task that needs a judge, whatever the bank has come to hold.
+            scoring = _run_scoring(conditions)
+            recorded = (
+                frozenset()
+                if scoring == DEFAULT_SCORING
+                else _recorded_task_ids(database, pack_row["pack_id"])
+            )
+            # Read now, not from the run: consent withdrawn after the run opened stops the
+            # next spoken task from being served, whatever the run was opened under.
+            recording = recording_permitted(record.preferences)
+            candidates = tuple(
+                candidate
+                for candidate in _candidates(database, pack_row["pack_id"])
+                if servable_candidate(
+                    candidate, scoring=scoring, recorded=recorded, recording=recording
+                )
+            )
+            excluded = _excluded_task_ids(
+                database, track_id=str(row[1]), run_id=run_id, clock=active_clock
+            )
+            available = tuple(str(value) for value in conditions["available_modalities"])
+            # Serve the least-progressed open dimension first, so a run that stops early has
+            # spread its evidence rather than finishing one dimension and testing no other.
+            open_states.sort(key=lambda state: (state.tasks_used, state.dimension))
+            # A dimension holding an unanswered task is not eligible for another. The order
+            # among the rest is unchanged, so the spread rule above still decides which of the
+            # *free* dimensions goes first.
+            outstanding = _outstanding_dimensions(database, run_id)
+            free_states = [state for state in open_states if state.dimension not in outstanding]
+            warnings: list[str] = []
+            for state in free_states:
+                selection = select_task(
+                    state, candidates, available_modalities=available, excluded=excluded
+                )
+                if selection is None:
+                    exhausted = close_dimension(
+                        state, reason="bank exhausted inside the reuse window"
+                    )
+                    with database.transaction() as transaction:
+                        _write_state(
+                            transaction,
+                            run_id=run_id,
+                            state=exhausted,
+                            levels=_pinned_levels(conditions, fallback=record.framework_levels),
+                            insert=False,
+                        )
+                    warnings.append(f"{state.dimension} stopped early: no unseen task is available")
+                    continue
+                # The answer key is read here, from the bank row, and never from the selected
+                # `Candidate`. `Candidate` carries everything item selection is allowed to
+                # consider, and the key is not among it: putting it there would let the
+                # staircase see the answers it is choosing between.
+                task = database.one(
+                    "SELECT record.stable_key, task.prompt, task.rubric_json, task.rubric_version, "
+                    "task.permitted_help, record.content_hash, task.target_refs_json, "
+                    "task.expected_json, task.presentation_json "
+                    "FROM assessment_tasks task "
+                    "JOIN content_records record ON record.content_id = task.content_id "
+                    "WHERE task.content_id = ?",
+                    [selection.candidate.content_id],
+                )
+                assert task is not None
+                # Resolved here, before anything is written: a shuffle happens once, and the
+                # order the learner saw is the order that is stored. Re-reading the bank on
+                # resume would reshuffle, which is a different question asked under the
+                # identity of the one they were credited for.
+                shown = _serve_presentation(
+                    parse_task_presentation(None if task[8] is None else str(task[8])),
+                    run_id=run_id,
                     content_id=selection.candidate.content_id,
-                    purpose=str(row[3]),
-                    is_anchor=selection.candidate.is_anchor,
-                    now=now,
                 )
-                # Serving is a mutation -- it writes a run task and spends an exposure --
-                # and it wrote no audit row until C3. Putting it here rather than in the
-                # server is what keeps the two entry points' trails identical: a guard or
-                # a record the server owns is one the CLI does not have.
-                migration_module.record_audit_entry(
-                    transaction,
-                    command=command,
-                    correlation_id=EventId.new(),
-                    outcome="succeeded",
-                    actor=actor,
-                    affected_records_json=json.dumps(
-                        [run_id, selection.candidate.content_id], sort_keys=True
-                    ),
-                    after_summary=(
-                        f"served {selection.candidate.content_id} as {state.dimension} "
-                        f"task {sequence}"
-                    ),
+                # Resolved here too, and before the transaction: a task that says it plays a
+                # recording the installed pack cannot produce is refused while it is still
+                # unserved, rather than written as a row nothing can read afterwards.
+                played = None
+                if _plays_audio(shown):
+                    played = _serve_asset_identity(database, record.pack_key, shown)
+                sequence = (
+                    int(
+                        database.scalar(
+                            "SELECT coalesce(max(sequence), 0) FROM assessment_run_tasks "
+                            "WHERE run_id = ?",
+                            [run_id],
+                        )
+                    )
+                    + 1
                 )
-                if idempotency_key is not None:
+                with database.transaction() as transaction:
+                    now = transaction.now()
+                    # The served facts are copied here, not re-read later. A pack is mutable
+                    # and a run is not: the score must fold in the difficulty of the task the
+                    # learner actually saw, and an observation attributed to this task must be
+                    # about the items it targeted when it was served -- not the ones a later
+                    # pack edit says it targets now.
+                    #
+                    # The same reasoning is why the answer key, the prompt, and the rubric
+                    # body are copied: they are what a scorer needs to reach a verdict, and
+                    # scoring against the live bank would let an edit made after the sitting
+                    # decide whether the learner was right. The three are written together,
+                    # always: a row carrying some of them and not the others can establish
+                    # neither what the learner faced nor that it predates the snapshot.
+                    transaction.execute(
+                        "INSERT INTO assessment_run_tasks (run_id, sequence, content_id, "
+                        "dimension, status, served_at, task_type, level_code, difficulty, "
+                        "content_family, modality, is_anchor, rubric_version, content_hash, "
+                        "target_refs_json, "
+                        "expected_json, prompt_snapshot, rubric_json, presentation_json, "
+                        "asset_identity_json, permitted_help) "
+                        "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        "?, ?)",
+                        [
+                            run_id,
+                            sequence,
+                            selection.candidate.content_id,
+                            state.dimension,
+                            now,
+                            selection.candidate.task_type,
+                            selection.candidate.level_code,
+                            selection.candidate.difficulty,
+                            selection.candidate.content_family,
+                            selection.candidate.modality,
+                            selection.candidate.is_anchor,
+                            int(task[3]),
+                            str(task[5]),
+                            str(task[6]),
+                            str(task[7]),
+                            str(task[1]),
+                            str(task[2]),
+                            None
+                            if shown is None
+                            else json.dumps(
+                                shown.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+                            ),
+                            None
+                            if played is None
+                            else json.dumps(
+                                played.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+                            ),
+                            # The allowance the learner was held to, from the same row the
+                            # report hands back -- so the stored value and the reported one
+                            # cannot disagree. Snapshotted for the same reason as the prompt:
+                            # a second serve of this task must not read it from a pack that
+                            # has been edited since.
+                            str(task[4]),
+                        ],
+                    )
+                    # The learner has now seen it, whether or not they answer. Recording the
+                    # exposure here, in the same transaction, is what keeps an abandoned run
+                    # from handing the same task back inside the reuse window.
+                    _record_exposure(
+                        transaction,
+                        track_id=str(row[1]),
+                        content_id=selection.candidate.content_id,
+                        purpose=str(row[3]),
+                        is_anchor=selection.candidate.is_anchor,
+                        now=now,
+                    )
+                    # Serving is a mutation -- it writes a run task and spends an exposure --
+                    # and it wrote no audit row until C3. Putting it here rather than in the
+                    # server is what keeps the two entry points' trails identical: a guard or
+                    # a record the server owns is one the CLI does not have.
+                    migration_module.record_audit_entry(
+                        transaction,
+                        command=command,
+                        correlation_id=EventId.new(),
+                        outcome="succeeded",
+                        actor=actor,
+                        affected_records_json=json.dumps(
+                            [run_id, selection.candidate.content_id], sort_keys=True
+                        ),
+                        after_summary=(
+                            f"served {selection.candidate.content_id} as {state.dimension} "
+                            f"task {sequence}"
+                        ),
+                    )
+                    if idempotency_key is not None:
+                        migration_module.record_domain_event(
+                            transaction,
+                            event_type=SERVED_EVENT,
+                            aggregate_type="assessment_run",
+                            aggregate_id=run_id,
+                            correlation_id=EventId.new(),
+                            payload_json=idempotency.payload(
+                                fingerprint,
+                                content_id=selection.candidate.content_id,
+                                dimension=state.dimension,
+                                sequence=sequence,
+                            ),
+                            idempotency_key=idempotency_key,
+                        )
+                return NextTaskReport(
+                    run_id=run_id,
+                    dimension=state.dimension,
+                    sequence=sequence,
+                    content_id=selection.candidate.content_id,
+                    stable_key=str(task[0]),
+                    task_type=selection.candidate.task_type,
+                    modality=selection.candidate.modality,
+                    level_code=selection.candidate.level_code,
+                    difficulty=selection.candidate.difficulty,
+                    content_family=selection.candidate.content_family,
+                    prompt=str(task[1]),
+                    presentation=shown,
+                    asset=played,
+                    rubric=json.loads(str(task[2])),
+                    rubric_version=int(task[3]),
+                    permitted_help=str(task[4]),
+                    selection_reason=selection.reason,
+                    remaining_open_dimensions=tuple(
+                        other.dimension for other in open_states if other.status == "open"
+                    ),
+                    warnings=tuple(warnings),
+                )
+            # Nothing fresh could be served. An open dimension still holding an unanswered
+            # task has work on it, so the run is not finished and must not report as though it
+            # were: hand that task back instead. The states are already sorted, so this is
+            # the least-progressed one.
+            held = [state for state in open_states if state.dimension in outstanding]
+            handed_content_id = outstanding[held[0].dimension] if held else None
+            # Read and validated *before* the key is claimed. `_hand_back` refuses a damaged
+            # snapshot, and a refusal has to leave nothing behind: claiming the key first meant a
+            # refused call burned it, so the retry the caller was entitled to make came back as a
+            # conflict about a request that had never succeeded.
+            handed = (
+                None
+                if handed_content_id is None
+                else _hand_back(
+                    database,
+                    run_id,
+                    content_id=handed_content_id,
+                    open_dimensions=[state.dimension for state in held],
+                )
+            )
+            if idempotency_key is not None:
+                # Whatever this call did -- handed a task back, or closed the last dimension and
+                # served nothing -- it is the one operation this key performed, and recording it
+                # is what stops a retry from doing something else. A hand-back writes nothing
+                # about the *learner*: no run task, no exposure, no dimension state. An event
+                # saying which task this key was answered with is bookkeeping about the request,
+                # and without it a retry after the task was scored went on to serve a different
+                # one under the same key.
+                with database.transaction() as transaction:
                     migration_module.record_domain_event(
                         transaction,
                         event_type=SERVED_EVENT,
                         aggregate_type="assessment_run",
                         aggregate_id=run_id,
                         correlation_id=EventId.new(),
-                        payload_json=idempotency.payload(
-                            fingerprint,
-                            content_id=selection.candidate.content_id,
-                            dimension=state.dimension,
-                            sequence=sequence,
-                        ),
+                        payload_json=idempotency.payload(fingerprint, content_id=handed_content_id),
                         idempotency_key=idempotency_key,
                     )
-            return NextTaskReport(
-                run_id=run_id,
-                dimension=state.dimension,
-                sequence=sequence,
-                content_id=selection.candidate.content_id,
-                stable_key=str(task[0]),
-                task_type=selection.candidate.task_type,
-                modality=selection.candidate.modality,
-                level_code=selection.candidate.level_code,
-                difficulty=selection.candidate.difficulty,
-                content_family=selection.candidate.content_family,
-                prompt=str(task[1]),
-                presentation=shown,
-                asset=played,
-                rubric=json.loads(str(task[2])),
-                rubric_version=int(task[3]),
-                permitted_help=str(task[4]),
-                selection_reason=selection.reason,
-                remaining_open_dimensions=tuple(
-                    other.dimension for other in open_states if other.status == "open"
-                ),
-                warnings=tuple(warnings),
-            )
-        # Nothing fresh could be served. An open dimension still holding an unanswered
-        # task has work on it, so the run is not finished and must not report as though it
-        # were: hand that task back instead. The states are already sorted, so this is
-        # the least-progressed one.
-        held = [state for state in open_states if state.dimension in outstanding]
-        handed_content_id = outstanding[held[0].dimension] if held else None
-        # Read and validated *before* the key is claimed. `_hand_back` refuses a damaged
-        # snapshot, and a refusal has to leave nothing behind: claiming the key first meant a
-        # refused call burned it, so the retry the caller was entitled to make came back as a
-        # conflict about a request that had never succeeded.
-        handed = (
-            None
-            if handed_content_id is None
-            else _hand_back(
-                database,
-                run_id,
-                content_id=handed_content_id,
-                open_dimensions=[state.dimension for state in held],
-            )
-        )
-        if idempotency_key is not None:
-            # Whatever this call did -- handed a task back, or closed the last dimension and
-            # served nothing -- it is the one operation this key performed, and recording it
-            # is what stops a retry from doing something else. A hand-back writes nothing
-            # about the *learner*: no run task, no exposure, no dimension state. An event
-            # saying which task this key was answered with is bookkeeping about the request,
-            # and without it a retry after the task was scored went on to serve a different
-            # one under the same key.
-            with database.transaction() as transaction:
-                migration_module.record_domain_event(
-                    transaction,
-                    event_type=SERVED_EVENT,
-                    aggregate_type="assessment_run",
-                    aggregate_id=run_id,
-                    correlation_id=EventId.new(),
-                    payload_json=idempotency.payload(fingerprint, content_id=handed_content_id),
-                    idempotency_key=idempotency_key,
-                )
-        if handed is not None:
-            return handed.model_copy(update={"warnings": tuple(warnings)})
-        return _reported(run_report(database, run_id), warnings)
+            if handed is not None:
+                return handed.model_copy(update={"warnings": tuple(warnings)})
+            return _reported(run_report(database, run_id), warnings)
+
+        return _noting_settled(settled, work)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2695,158 +2739,172 @@ def record(
         # submission this verdict's own (unreleased) claim was for: an expired lease is
         # accepted when nothing else has happened, and this call settling it on the way in
         # would be that something.
-        _settle_lapsed(database, run_id, sparing_claim=claim)
-        # The key is checked here -- before the transaction, and before every guard below,
-        # including the one that asks whether the run may take further results. A retry is a
-        # retry whatever the run has become since: a client whose response was lost and which
-        # then paused, or whose pause and retry crossed, was told its completed work was new
-        # work it was not allowed to do. Resolving the replay first answers with what already
-        # happened, which is true in any run state -- held, applied, or voided, and the
-        # report says which.
-        #
-        # It also means the unique index on
-        # `domain_events.idempotency_key` is never the thing that refuses: it did, with a
-        # raw `ConstraintException` surfaced as `internal_error`, after every refusal below
-        # had been placed before the transaction precisely to avoid that.
-        #
-        # Every argument a refusal below could turn on is in the fingerprint -- the score,
-        # the visibility, the assessor, the rubric, the submission and claim -- which is
-        # what makes returning early on a replay safe: a call that asked for something
-        # different conflicts rather than being handed this one's result. The response text
-        # itself is never hashed into the payload under its own name; `payload_json` is
-        # never edited, so a payload written before the retention rule ran would keep what
-        # it kept for the life of the workspace. Its digest answers the same question and
-        # carries nothing.
-        scoring_fingerprint = idempotency.request_hash(
-            operation=RECORDED_EVENT,
-            run_id=run_id,
-            content_id=content_id,
-            score=score,
-            response=None if response is None else idempotency.canonical_hash(response),
-            response_excerpt=None
-            if response_excerpt is None
-            else idempotency.canonical_hash(response_excerpt),
-            response_visibility=response_visibility,
-            assessor_kind=assessor_kind,
-            assessor=assessor,
-            confidence=confidence,
-            rubric=dict(rubric or {}),
-            # Each only when named, so a keyed verdict recorded before the stage that added
-            # it still hashes to what it hashed to then and its retry stays a retry.
-            **({} if audio_artifact is None else {"audio_artifact": audio_artifact}),
-            **({} if submission is None else {"submission_id": submission}),
-            **({} if claim is None else {"claim_id": claim}),
+        settled = _settle_lapsed(
+            database, run_id, command=command, actor=actor, sparing_claim=claim
         )
-        replayed = idempotency.resolve(
-            database,
-            key=idempotency_key,
-            event_type=RECORDED_EVENT,
-            request_hash=scoring_fingerprint,
-        )
-        if replayed is not None:
-            recorded_verdict = replayed.get("verdict_id")
-            return _verdict_report(
-                database, run_id, None if recorded_verdict is None else str(recorded_verdict)
-            )
-        plan = plan_verdict(
-            database,
-            VerdictRequest(
+
+        # The command's own work, after the sweep: whatever it reports -- or refuses
+        # with -- names the submissions the sweep withdrew.
+        def work() -> AssessmentRunReport:
+            # The key is checked here -- before the transaction, and before every guard below,
+            # including the one that asks whether the run may take further results. A retry is a
+            # retry whatever the run has become since: a client whose response was lost and which
+            # then paused, or whose pause and retry crossed, was told its completed work was new
+            # work it was not allowed to do. Resolving the replay first answers with what already
+            # happened, which is true in any run state -- held, applied, or voided, and the
+            # report says which.
+            #
+            # It also means the unique index on
+            # `domain_events.idempotency_key` is never the thing that refuses: it did, with a
+            # raw `ConstraintException` surfaced as `internal_error`, after every refusal below
+            # had been placed before the transaction precisely to avoid that.
+            #
+            # Every argument a refusal below could turn on is in the fingerprint -- the score,
+            # the visibility, the assessor, the rubric, the submission and claim -- which is
+            # what makes returning early on a replay safe: a call that asked for something
+            # different conflicts rather than being handed this one's result. The response text
+            # itself is never hashed into the payload under its own name; `payload_json` is
+            # never edited, so a payload written before the retention rule ran would keep what
+            # it kept for the life of the workspace. Its digest answers the same question and
+            # carries nothing.
+            scoring_fingerprint = idempotency.request_hash(
+                operation=RECORDED_EVENT,
                 run_id=run_id,
                 content_id=content_id,
                 score=score,
-                response=response,
+                response=None if response is None else idempotency.canonical_hash(response),
+                response_excerpt=None
+                if response_excerpt is None
+                else idempotency.canonical_hash(response_excerpt),
                 response_visibility=response_visibility,
-                response_excerpt=response_excerpt,
-                rubric=rubric,
                 assessor_kind=assessor_kind,
                 assessor=assessor,
                 confidence=confidence,
-                audio_artifact=audio_artifact,
-                submission_id=submission,
-                claim_id=claim,
-                track_id=track_id,
-                actor=actor,
-                keyed=idempotency_key is not None,
-            ),
-            root=paths.root,
-        )
-        if not isinstance(plan, VerdictPlan):
-            # The recording can no longer be heard. The withdrawal commits on its own, and
-            # the refusal is raised after it, as C5 did: the judge is told why, and the task
-            # no longer holds its dimension for a verdict that can never land.
-            with database.transaction() as transaction:
-                settle(transaction, plan)
-            if plan.refusal is not None:
-                raise plan.refusal
-            raise LinguaWikiError(
-                plan.code,
-                plan.reason,
-                details=(ErrorDetail(field="submission", reason=plan.submission_id),),
+                rubric=dict(rubric or {}),
+                # Each only when named, so a keyed verdict recorded before the stage that added
+                # it still hashes to what it hashed to then and its retry stays a retry.
+                **({} if audio_artifact is None else {"audio_artifact": audio_artifact}),
+                **({} if submission is None else {"submission_id": submission}),
+                **({} if claim is None else {"claim_id": claim}),
             )
-        if plan.action == REPEAT:
-            if idempotency_key is not None:
-                # The same verdict again under a new key changes nothing about the learner,
-                # but the key has still been spent on it. Left unbound, a retry under it
-                # after the run closed met `_assert_running` instead of replaying, so the
-                # judge was told its delivered verdict was refused. Binding it to the
-                # standing verdict makes its retry replay whatever that verdict has become.
+            replayed = idempotency.resolve(
+                database,
+                key=idempotency_key,
+                event_type=RECORDED_EVENT,
+                request_hash=scoring_fingerprint,
+            )
+            if replayed is not None:
+                recorded_verdict = replayed.get("verdict_id")
+                return _verdict_report(
+                    database, run_id, None if recorded_verdict is None else str(recorded_verdict)
+                )
+            plan = plan_verdict(
+                database,
+                VerdictRequest(
+                    run_id=run_id,
+                    content_id=content_id,
+                    score=score,
+                    response=response,
+                    response_visibility=response_visibility,
+                    response_excerpt=response_excerpt,
+                    rubric=rubric,
+                    assessor_kind=assessor_kind,
+                    assessor=assessor,
+                    confidence=confidence,
+                    audio_artifact=audio_artifact,
+                    submission_id=submission,
+                    claim_id=claim,
+                    track_id=track_id,
+                    actor=actor,
+                    keyed=idempotency_key is not None,
+                ),
+                root=paths.root,
+            )
+            if not isinstance(plan, VerdictPlan):
+                # The recording can no longer be heard. The withdrawal commits on its own, and
+                # the refusal is raised after it, as C5 did: the judge is told why, and the task
+                # no longer holds its dimension for a verdict that can never land.
                 with database.transaction() as transaction:
+                    settle(transaction, plan)
+                if plan.refusal is not None:
+                    raise plan.refusal
+                raise LinguaWikiError(
+                    plan.code,
+                    plan.reason,
+                    details=(ErrorDetail(field="submission", reason=plan.submission_id),),
+                )
+            if plan.action == REPEAT:
+                if idempotency_key is not None:
+                    # The same verdict again under a new key changes nothing about the learner,
+                    # but the key has still been spent on it. Left unbound, a retry under it
+                    # after the run closed met `_assert_running` instead of replaying, so the
+                    # judge was told its delivered verdict was refused. Binding it to the
+                    # standing verdict makes its retry replay whatever that verdict has become.
+                    with database.transaction() as transaction:
+                        migration_module.record_domain_event(
+                            transaction,
+                            event_type=RECORDED_EVENT,
+                            aggregate_type="assessment_run",
+                            aggregate_id=run_id,
+                            correlation_id=EventId.new(),
+                            payload_json=idempotency.payload(
+                                scoring_fingerprint,
+                                content_id=content_id,
+                                score=plan.score,
+                                repeat=True,
+                                **(
+                                    {}
+                                    if plan.verdict_id is None
+                                    else {"verdict_id": plan.verdict_id}
+                                ),
+                            ),
+                            idempotency_key=idempotency_key,
+                        )
+                return _verdict_report(database, run_id, plan.verdict_id, plan.warnings)
+            with database.transaction() as transaction:
+                written = write_verdict(transaction, plan)
+                affected = [run_id] + [
+                    value for value in (written.verdict_id, written.result_id) if value is not None
+                ]
+                migration_module.record_audit_entry(
+                    transaction,
+                    command=command,
+                    correlation_id=EventId.new(),
+                    outcome="succeeded",
+                    actor=actor,
+                    affected_records_json=json.dumps(affected, sort_keys=True),
+                    after_summary=(
+                        f"held a verdict on {content_id} in {written.dimension} at {written.score} "
+                        "until the run resumes"
+                        if written.held
+                        else f"scored {content_id} in {written.dimension} at {written.score} "
+                        f"({plan.score_source})"
+                    ),
+                )
+                if idempotency_key is not None:
                     migration_module.record_domain_event(
                         transaction,
                         event_type=RECORDED_EVENT,
                         aggregate_type="assessment_run",
                         aggregate_id=run_id,
                         correlation_id=EventId.new(),
+                        # The event names the verdict, which is how a replay finds what it is
+                        # replaying: `assessment_verdicts` carries no key of its own.
                         payload_json=idempotency.payload(
                             scoring_fingerprint,
                             content_id=content_id,
-                            score=plan.score,
-                            repeat=True,
-                            **({} if plan.verdict_id is None else {"verdict_id": plan.verdict_id}),
+                            score=written.score,
+                            **(
+                                {}
+                                if written.verdict_id is None
+                                else {"verdict_id": written.verdict_id}
+                            ),
                         ),
                         idempotency_key=idempotency_key,
                     )
-            return _verdict_report(database, run_id, plan.verdict_id, plan.warnings)
-        with database.transaction() as transaction:
-            written = write_verdict(transaction, plan)
-            affected = [run_id] + [
-                value for value in (written.verdict_id, written.result_id) if value is not None
-            ]
-            migration_module.record_audit_entry(
-                transaction,
-                command=command,
-                correlation_id=EventId.new(),
-                outcome="succeeded",
-                actor=actor,
-                affected_records_json=json.dumps(affected, sort_keys=True),
-                after_summary=(
-                    f"held a verdict on {content_id} in {written.dimension} at {written.score} "
-                    "until the run resumes"
-                    if written.held
-                    else f"scored {content_id} in {written.dimension} at {written.score} "
-                    f"({plan.score_source})"
-                ),
-            )
-            if idempotency_key is not None:
-                migration_module.record_domain_event(
-                    transaction,
-                    event_type=RECORDED_EVENT,
-                    aggregate_type="assessment_run",
-                    aggregate_id=run_id,
-                    correlation_id=EventId.new(),
-                    # The event names the verdict, which is how a replay finds what it is
-                    # replaying: `assessment_verdicts` carries no key of its own.
-                    payload_json=idempotency.payload(
-                        scoring_fingerprint,
-                        content_id=content_id,
-                        score=written.score,
-                        **(
-                            {} if written.verdict_id is None else {"verdict_id": written.verdict_id}
-                        ),
-                    ),
-                    idempotency_key=idempotency_key,
-                )
-        return _verdict_report(database, run_id, written.verdict_id, plan.warnings)
+            return _verdict_report(database, run_id, written.verdict_id, plan.warnings)
+
+        return _noting_settled(settled, work)
 
 
 class PlayReport(ContractModel):
@@ -3018,25 +3076,31 @@ def set_status(
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
         run_id = resolve_run(database, run, track_id=track_id)
-        _settle_lapsed(database, run_id)
-        current = _run_row(database, run_id)
-        _assert_transition(run_id, current=str(current[4]), target=status)
-        with database.transaction() as transaction:
-            transaction.execute(
-                "UPDATE assessment_runs SET status = ?, updated_at = ? WHERE run_id = ?",
-                [status, transaction.now(), run_id],
-            )
-            migration_module.record_audit_entry(
-                transaction,
-                command=command,
-                correlation_id=EventId.new(),
-                outcome="succeeded",
-                actor=actor,
-                affected_records_json=json.dumps([run_id]),
-                before_summary=str(current[4]),
-                after_summary=status,
-            )
-        return run_report(database, run_id)
+        settled = _settle_lapsed(database, run_id, command=command, actor=actor)
+
+        # The command's own work, after the sweep: whatever it reports -- or refuses
+        # with -- names the submissions the sweep withdrew.
+        def work() -> AssessmentRunReport:
+            current = _run_row(database, run_id)
+            _assert_transition(run_id, current=str(current[4]), target=status)
+            with database.transaction() as transaction:
+                transaction.execute(
+                    "UPDATE assessment_runs SET status = ?, updated_at = ? WHERE run_id = ?",
+                    [status, transaction.now(), run_id],
+                )
+                migration_module.record_audit_entry(
+                    transaction,
+                    command=command,
+                    correlation_id=EventId.new(),
+                    outcome="succeeded",
+                    actor=actor,
+                    affected_records_json=json.dumps([run_id]),
+                    before_summary=str(current[4]),
+                    after_summary=status,
+                )
+            return run_report(database, run_id)
+
+        return _noting_settled(settled, work)
 
 
 def finalize(
@@ -3056,103 +3120,113 @@ def finalize(
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
         run_id = resolve_run(database, run, track_id=track_id)
-        _settle_lapsed(database, run_id)
-        row = _run_row(database, run_id)
-        # Before the already-finalized early return, not after it. `finalize` writes the
-        # caller's key straight into the same unique index as `record`, so it had the same
-        # unpreflighted `ConstraintException` -- and placing the check below the early return
-        # meant a key that closed this run for one reason answered 200 when it was reused for
-        # another, which is the exact shape of "a guard placed after the path it guards is not
-        # a guard". An exact retry still replays; what differs now conflicts.
-        closing_fingerprint = idempotency.request_hash(
-            operation=FINALIZED_EVENT, run_id=run_id, reason=reason
-        )
-        if (
-            idempotency.resolve(
-                database,
-                key=idempotency_key,
-                event_type=FINALIZED_EVENT,
-                request_hash=closing_fingerprint,
+        settled = _settle_lapsed(database, run_id, command=command, actor=actor)
+
+        # The command's own work, after the sweep: whatever it reports -- or refuses
+        # with -- names the submissions the sweep withdrew.
+        def work() -> AssessmentRunReport:
+            row = _run_row(database, run_id)
+            # Before the already-finalized early return, not after it. `finalize` writes the
+            # caller's key straight into the same unique index as `record`, so it had the same
+            # unpreflighted `ConstraintException` -- and placing the check below the early return
+            # meant a key that closed this run for one reason answered 200 when it was reused for
+            # another, which is the exact shape of "a guard placed after the path it guards is not
+            # a guard". An exact retry still replays; what differs now conflicts.
+            closing_fingerprint = idempotency.request_hash(
+                operation=FINALIZED_EVENT, run_id=run_id, reason=reason
             )
-            is not None
-        ):
-            return run_report(database, run_id)
-        if str(row[4]) == "finalized":
-            # The run is already closed, so there is nothing to do -- but the key this call
-            # was made under still has to be reserved. Left unbound, a key that successfully
-            # "finalized" a run was indistinguishable from one nobody had used, and could go
-            # on to open a run instead: an idempotency key identifies one operation, and a
-            # key whose operation succeeded as a no-op has still been spent on it.
-            if idempotency_key is not None:
-                with database.transaction() as transaction:
-                    migration_module.record_domain_event(
-                        transaction,
-                        event_type=FINALIZED_EVENT,
-                        aggregate_type="assessment_run",
-                        aggregate_id=run_id,
-                        correlation_id=EventId.new(),
-                        payload_json=idempotency.payload(
-                            closing_fingerprint, reason=reason, already_finalized=True
-                        ),
-                        idempotency_key=idempotency_key,
-                    )
-            return run_report(database, run_id)
-        _assert_transition(run_id, current=str(row[4]), target="finalized")
-        conditions = json.loads(str(row[6]))
-        kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
-        record_track = learner_service.track_context(database, str(row[1]))
-        levels = _pinned_levels(conditions, fallback=record_track.framework_levels)
-        states = _dimension_states(database, run_id, kinds)
-        basis = (
-            "placement"
-            if conditions["calibration_label"] == "comprehensive-placement"
-            else "calibration"
-        )
-        with database.transaction() as transaction:
-            now = transaction.now()
-            for state in states:
-                closed = state if state.status != "open" else close_dimension(state, reason=reason)
-                _write_state(transaction, run_id=run_id, state=closed, levels=levels, insert=False)
-                level, low, high = estimated_level(closed, levels)
-                estimate_service.upsert_from_state(
-                    transaction,
-                    track_id=str(row[1]),
-                    framework_id=record_track.proficiency_framework,
-                    state=closed,
-                    level=level,
-                    low=low,
-                    high=high,
-                    run_id=run_id,
-                    basis=basis if closed.tasks_used else "declared-hypothesis",
-                    reason=(
-                        f"{conditions['calibration_label']} run {run_id} finalized "
-                        f"({closed.stop_reason or reason})"
-                    ),
+            if (
+                idempotency.resolve(
+                    database,
+                    key=idempotency_key,
+                    event_type=FINALIZED_EVENT,
+                    request_hash=closing_fingerprint,
                 )
-            transaction.execute(
-                "UPDATE assessment_runs SET status = 'finalized', stop_reason = ?, "
-                "finalized_at = ?, updated_at = ? WHERE run_id = ?",
-                [reason, now, now, run_id],
+                is not None
+            ):
+                return run_report(database, run_id)
+            if str(row[4]) == "finalized":
+                # The run is already closed, so there is nothing to do -- but the key this call
+                # was made under still has to be reserved. Left unbound, a key that successfully
+                # "finalized" a run was indistinguishable from one nobody had used, and could go
+                # on to open a run instead: an idempotency key identifies one operation, and a
+                # key whose operation succeeded as a no-op has still been spent on it.
+                if idempotency_key is not None:
+                    with database.transaction() as transaction:
+                        migration_module.record_domain_event(
+                            transaction,
+                            event_type=FINALIZED_EVENT,
+                            aggregate_type="assessment_run",
+                            aggregate_id=run_id,
+                            correlation_id=EventId.new(),
+                            payload_json=idempotency.payload(
+                                closing_fingerprint, reason=reason, already_finalized=True
+                            ),
+                            idempotency_key=idempotency_key,
+                        )
+                return run_report(database, run_id)
+            _assert_transition(run_id, current=str(row[4]), target="finalized")
+            conditions = json.loads(str(row[6]))
+            kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
+            record_track = learner_service.track_context(database, str(row[1]))
+            levels = _pinned_levels(conditions, fallback=record_track.framework_levels)
+            states = _dimension_states(database, run_id, kinds)
+            basis = (
+                "placement"
+                if conditions["calibration_label"] == "comprehensive-placement"
+                else "calibration"
             )
-            migration_module.record_audit_entry(
-                transaction,
-                command=command,
-                correlation_id=EventId.new(),
-                outcome="succeeded",
-                actor=actor,
-                affected_records_json=json.dumps([run_id]),
-                after_summary=f"finalized with reason {reason}",
-            )
-            migration_module.record_domain_event(
-                transaction,
-                event_type="assessment.finalized",
-                aggregate_type="assessment_run",
-                aggregate_id=run_id,
-                correlation_id=EventId.new(),
-                payload_json=idempotency.payload(closing_fingerprint, reason=reason),
-                idempotency_key=idempotency_key or f"assessment.finalized:{run_id}",
-            )
-        return run_report(database, run_id)
+            with database.transaction() as transaction:
+                now = transaction.now()
+                for state in states:
+                    closed = (
+                        state if state.status != "open" else close_dimension(state, reason=reason)
+                    )
+                    _write_state(
+                        transaction, run_id=run_id, state=closed, levels=levels, insert=False
+                    )
+                    level, low, high = estimated_level(closed, levels)
+                    estimate_service.upsert_from_state(
+                        transaction,
+                        track_id=str(row[1]),
+                        framework_id=record_track.proficiency_framework,
+                        state=closed,
+                        level=level,
+                        low=low,
+                        high=high,
+                        run_id=run_id,
+                        basis=basis if closed.tasks_used else "declared-hypothesis",
+                        reason=(
+                            f"{conditions['calibration_label']} run {run_id} finalized "
+                            f"({closed.stop_reason or reason})"
+                        ),
+                    )
+                transaction.execute(
+                    "UPDATE assessment_runs SET status = 'finalized', stop_reason = ?, "
+                    "finalized_at = ?, updated_at = ? WHERE run_id = ?",
+                    [reason, now, now, run_id],
+                )
+                migration_module.record_audit_entry(
+                    transaction,
+                    command=command,
+                    correlation_id=EventId.new(),
+                    outcome="succeeded",
+                    actor=actor,
+                    affected_records_json=json.dumps([run_id]),
+                    after_summary=f"finalized with reason {reason}",
+                )
+                migration_module.record_domain_event(
+                    transaction,
+                    event_type="assessment.finalized",
+                    aggregate_type="assessment_run",
+                    aggregate_id=run_id,
+                    correlation_id=EventId.new(),
+                    payload_json=idempotency.payload(closing_fingerprint, reason=reason),
+                    idempotency_key=idempotency_key or f"assessment.finalized:{run_id}",
+                )
+            return run_report(database, run_id)
+
+        return _noting_settled(settled, work)
 
 
 def declared_estimate(
