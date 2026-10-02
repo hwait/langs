@@ -616,21 +616,31 @@ def test_a_recording_replaced_under_the_same_key_is_refused_as_changed(
     assert failure.value.payload.code == "assessment_asset_changed"
 
 
-def test_a_pack_that_will_not_load_is_reported_as_itself(
+def test_a_recording_tampered_on_disk_is_refused_by_the_read_that_plays_it(
     polish_workspace: PolishWorkspace, tmp_path: Path
 ) -> None:
-    """A checksum mismatch is not "nobody has this recording"; it names its own problem."""
+    """The bytes are checked where they are read, not by loading the pack on every read.
+
+    Reading the served task asks what the learner was shown, which `pack_assets` and the
+    snapshot answer without touching the file. Playing it asks whether these are the bytes
+    the learner heard, which only a hash of the file can answer -- and it refuses by the
+    name that says a different recording is there, rather than none.
+    """
 
     root = _with_recording(polish_workspace, tmp_path)
     run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
     content_id = _serve_until(polish_workspace, run.run_id, LISTENING)
     (root / "media" / "listening-01.wav").write_bytes(CLIP + b" tampered")
 
+    read = assessment_service.served_task(
+        polish_workspace.paths, run=run.run_id, content_id=content_id
+    )
+    assert read.asset is not None
     with pytest.raises(LinguaWikiError) as failure:
-        assessment_service.served_task(
+        assessment_service.served_recording(
             polish_workspace.paths, run=run.run_id, content_id=content_id
         )
-    assert failure.value.payload.code == "pack_checksum_mismatch"
+    assert failure.value.payload.code == "assessment_asset_changed"
 
 
 def test_db_check_finds_a_bank_whose_buttons_no_key_accepts(
@@ -765,3 +775,104 @@ def test_db_check_finds_the_cleared_snapshot_the_reader_refuses(
             polish_workspace.paths, run=run.run_id, content_id=content_id
         )
     assert failure.value.payload.code == "assessment_presentation_partial"
+
+
+# --- C5: recordings are installed into a table ---------------------------------------
+
+
+def _asset_rows(workspace: PolishWorkspace) -> list[tuple[Any, ...]]:
+    with open_reader(workspace.paths) as database:
+        return database.query(
+            "SELECT asset_key, path, sha256, media_type, duration_ms, pack_version "
+            "FROM pack_assets ORDER BY asset_key"
+        )
+
+
+def test_installing_a_pack_records_the_recordings_it_ships(
+    polish_workspace: PolishWorkspace, tmp_path: Path
+) -> None:
+    import hashlib
+
+    assert _asset_rows(polish_workspace) == []
+    _with_recording(polish_workspace, tmp_path)
+
+    assert _asset_rows(polish_workspace) == [
+        (
+            ASSET_KEY,
+            "media/listening-01.wav",
+            hashlib.sha256(CLIP).hexdigest(),
+            "audio/wav",
+            3200,
+            NEXT_PILOT_VERSION,
+        )
+    ]
+
+
+def test_an_unchanged_reinstall_records_recordings_an_older_install_did_not(
+    polish_workspace: PolishWorkspace, tmp_path: Path
+) -> None:
+    """A pack installed before `pack_assets` existed is repaired by installing it again.
+
+    And only the asset rows are written: the content records are byte-identical, and
+    rewriting them would re-bind reviews and touch rows learner state points at.
+    """
+
+    root = _with_recording(polish_workspace, tmp_path)
+    with (
+        open_writer(polish_workspace.paths, command="test.damage") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute("DELETE FROM pack_assets")
+    with open_reader(polish_workspace.paths) as database:
+        before = database.query("SELECT content_id, updated_at FROM content_records ORDER BY 1")
+
+    report = pack_service.install(polish_workspace.paths, root, clock=polish_workspace.clock)
+
+    assert report.reinstalled
+    assert [row[0] for row in _asset_rows(polish_workspace)] == [ASSET_KEY]
+    with open_reader(polish_workspace.paths) as database:
+        after = database.query("SELECT content_id, updated_at FROM content_records ORDER BY 1")
+    assert after == before
+
+
+def test_reading_a_served_recording_never_loads_the_pack(
+    polish_workspace: PolishWorkspace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every audio task read used to pay for a full `load_pack` to read one digest."""
+
+    _with_recording(polish_workspace, tmp_path)
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, LISTENING)
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a served-task read loaded the whole pack")
+
+    monkeypatch.setattr(assessment_service, "load_pack", refuse)
+
+    shown = assessment_service.served_task(
+        polish_workspace.paths, run=run.run_id, content_id=content_id
+    )
+    played = assessment_service.served_recording(
+        polish_workspace.paths, run=run.run_id, content_id=content_id
+    )
+    assert shown.asset is not None and played.data == CLIP
+
+
+def test_a_recording_missing_from_the_table_is_refused_with_the_way_forward(
+    polish_workspace: PolishWorkspace, tmp_path: Path
+) -> None:
+    _with_recording(polish_workspace, tmp_path)
+    run = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock)
+    content_id = _serve_until(polish_workspace, run.run_id, LISTENING)
+    with (
+        open_writer(polish_workspace.paths, command="test.damage") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute("DELETE FROM pack_assets")
+
+    with pytest.raises(LinguaWikiError) as failure:
+        assessment_service.served_task(
+            polish_workspace.paths, run=run.run_id, content_id=content_id
+        )
+    assert failure.value.payload.code == "assessment_asset_unavailable"
+    assert "pack install" in failure.value.payload.message

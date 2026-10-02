@@ -157,7 +157,7 @@ def test_a_recording_replaced_since_the_serve_is_refused_rather_than_played(
     assert answer.code == "assessment_asset_changed"
 
 
-def test_a_recording_tampered_on_disk_reports_the_pack_rather_than_playing(
+def test_a_recording_tampered_on_disk_is_refused_rather_than_played(
     recorded: PolishWorkspace, client: Client, tmp_path: Path
 ) -> None:
     run_id = _start_listening(client)
@@ -168,7 +168,7 @@ def test_a_recording_tampered_on_disk_reports_the_pack_rather_than_playing(
     answer = client.get(f"/runs/{run_id}/tasks/{task['content_id']}/audio")
 
     assert answer.status != 200
-    assert answer.code == "pack_checksum_mismatch"
+    assert answer.code == "assessment_asset_changed"
 
 
 # --- plays ---------------------------------------------------------------------------

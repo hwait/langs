@@ -48,12 +48,7 @@ from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.ids import AssessmentId, EventId
 from linguawiki.models import ContractModel
 from linguawiki.packs import coverage as coverage_module
-from linguawiki.packs.format import (
-    LoadedPack,
-    ResolvedAsset,
-    load_pack,
-    resolve_pack_path,
-)
+from linguawiki.packs.format import load_pack, resolve_pack_path
 from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import (
     ALGORITHM_VERSION,
@@ -1131,13 +1126,7 @@ def next_task(
             # unserved, rather than written as a row nothing can read afterwards.
             played = None
             if _plays_audio(shown):
-                on_disk = _pack_on_disk(database, record.pack_key)
-                _assert_recording_matches_the_installed_task(
-                    on_disk,
-                    content_id=selection.candidate.content_id,
-                    installed_hash=task[5],
-                )
-                played = _serve_asset_identity(() if on_disk is None else on_disk.assets, shown)
+                played = _serve_asset_identity(database, record.pack_key, shown)
             sequence = (
                 int(
                     database.scalar(
@@ -2184,73 +2173,85 @@ def _refuse_presentation(code: str, message: str, reason: str) -> LinguaWikiErro
     )
 
 
-def _pack_on_disk(database: Database, pack_key: str | None) -> LoadedPack | None:
-    """The pack directory this run's track is taught from, as it is right now.
+@dataclass(frozen=True, slots=True)
+class InstalledAsset:
+    """One recording the installed pack ships, as `pack install` recorded it."""
 
-    Scoped to that pack rather than to "the installed pack": a workspace may hold two,
-    and `installed_pack` with no key refuses with `pack_selection_required` -- a refusal
-    about pack selection surfacing out of a read of one learner's history. A track names
-    the pack it is taught from, and a reference is resolved inside that pack's content.
+    content_id: str
+    asset_key: str
+    path: str
+    sha256: str
+    media_type: str
 
-    A pack that will not load reports *itself*. Collapsing a checksum mismatch or an
-    unreadable file into "the recording is not available" sends an operator to look for
-    a missing file that is sitting right there.
+
+def _installed_asset(
+    database: Database,
+    pack_key: str | None,
+    *,
+    content_id: str | None = None,
+    asset_key: str | None = None,
+) -> InstalledAsset | None:
+    """A recording of the pack this track is taught from, by content ID or asset key.
+
+    Scoped to that pack rather than to "the installed pack": a workspace may hold two, and
+    a reference is resolved inside the pack the track names. Read from `pack_assets`, which
+    `pack install` writes, rather than by loading the whole pack directory to find one
+    digest -- what C2 did while no pack shipped audio.
+    """
+
+    pack_id = pack_service.installed_pack(database, pack_key)["pack_id"]
+    column, value = (
+        ("content_id", content_id) if content_id is not None else ("asset_key", asset_key)
+    )
+    row = database.one(
+        "SELECT content_id, asset_key, path, sha256, media_type FROM pack_assets "
+        f"WHERE pack_id = ? AND {column} = ?",
+        [pack_id, value],
+    )
+    if row is None:
+        return None
+    return InstalledAsset(
+        content_id=str(row[0]),
+        asset_key=str(row[1]),
+        path=str(row[2]),
+        sha256=str(row[3]),
+        media_type=str(row[4]),
+    )
+
+
+#: What a refusal says when a pack's recordings are not in `pack_assets`. A pack installed
+#: before C5 recorded none, and the way forward is to install it again.
+REINSTALL_HINT = "if the pack was installed before C5, `pack install` it again to record them"
+
+
+def _asset_bytes(
+    database: Database, pack_key: str | None, asset: InstalledAsset
+) -> tuple[bytes | None, str]:
+    """The bytes of an installed recording, or nothing and the reason it cannot be read.
+
+    Resolved with containment under the installed source path: a symlink out of the pack
+    reads through to bytes nobody installed.
     """
 
     source = str(pack_service.installed_pack(database, pack_key)["source_path"] or "")
     if not source:
-        return None
-    # Loading the whole pack to read one digest is wasteful and deliberate for now; C5
-    # replaces it with an installed-asset table when audio actually arrives.
-    return load_pack(resolve_pack_path(source))
-
-
-def _assert_recording_matches_the_installed_task(
-    pack: LoadedPack | None, *, content_id: str, installed_hash: object
-) -> None:
-    """The recording and the answer key have to come from one revision of the task.
-
-    The bank holds what was *installed*; the bytes are read from the pack directory,
-    which an author can re-record and republish without reinstalling. Serving then
-    paired the new recording with the installed key and snapshotted the installed hash
-    -- a question the learner was asked that no revision of the pack ever contained,
-    and one the run's own record could not describe afterwards.
-
-    A task's hash covers the recording it plays, so comparing it is the whole check.
-    """
-
-    if pack is None or installed_hash is None:
-        return
-    current = next(
-        (item for item in pack.tasks if str(item.content_id) == content_id),
-        None,
-    )
-    if current is None or current.content_hash == str(installed_hash):
-        return
-    raise LinguaWikiError(
-        "assessment_task_revision_drifted",
-        f"the pack directory holds a different revision of {content_id} than the one "
-        "installed, so its recording does not belong to the answer key that would be "
-        "served with it; install the pack version you mean to serve",
-        details=(ErrorDetail(field="content_hash", reason=f"installed {installed_hash}"),),
-    )
-
-
-def _pack_assets(database: Database, pack_key: str | None) -> tuple[ResolvedAsset, ...]:
-    """Every recording the pack this run is taught from ships.
-
-    Scoped to that pack rather than to "the installed pack": a workspace may hold two,
-    and `installed_pack` with no key refuses with `pack_selection_required` -- a refusal
-    about pack selection surfacing out of a read of one learner's history. A track names
-    the pack it is taught from, and a reference is resolved inside that pack's content.
-
-    A pack that will not load reports *itself*. Collapsing a checksum mismatch or an
-    unreadable file into "the recording is not available" sends an operator to look for
-    a missing file that is sitting right there.
-    """
-
-    pack = _pack_on_disk(database, pack_key)
-    return () if pack is None else pack.assets
+        return None, "the pack's installed location is not recorded"
+    try:
+        root = resolve_pack_path(source).resolve(strict=True)
+        path = (root / asset.path).resolve(strict=True)
+    except (OSError, RuntimeError, LinguaWikiError):
+        # `RuntimeError` is a symlink loop under Python 3.12, which no handler above this
+        # one would catch.
+        return None, "its path cannot be resolved"
+    if not path.is_relative_to(root) or not path.is_file():
+        return None, "its path leaves the pack directory"
+    try:
+        size = path.stat().st_size
+        if size > MAXIMUM_RECORDING_BYTES:
+            return None, f"it is {size} bytes, over the cap"
+        return path.read_bytes(), ""
+    except OSError:
+        return None, "it cannot be read"
 
 
 def _run_pack_key(database: Database, run_id: str) -> str | None:
@@ -2265,7 +2266,7 @@ def _plays_audio(shown: TaskPresentation | None) -> bool:
 
 
 def _serve_asset_identity(
-    assets: Sequence[ResolvedAsset], shown: TaskPresentation | None
+    database: Database, pack_key: str | None, shown: TaskPresentation | None
 ) -> ServedAsset | None:
     """The recording this serving actually played, recorded when it is played.
 
@@ -2273,18 +2274,36 @@ def _serve_asset_identity(
     task is being served, so a serve that writes the presentation and not the identity
     manufactures exactly the half-state `served_presentation_complete` exists to report,
     with no way forward for anybody who finds it afterwards.
+
+    The recording and the answer key have to come from one revision of the task. The bank
+    and `pack_assets` hold what was *installed*; the bytes are read from the pack
+    directory, which an author can re-record and republish without reinstalling. Serving
+    then paired a recording no installed revision contained with the installed key. So the
+    one file is hashed here, while the task is still unserved, and a difference refuses.
     """
 
     if shown is None or shown.audio is None:
         return None
-    for asset in assets:
-        if asset.asset_key == shown.audio.asset_key:
-            return ServedAsset(content_id=str(asset.content_id), sha256=asset.sha256)
-    raise LinguaWikiError(
-        "assessment_asset_unavailable",
-        f"this task plays {shown.audio.asset_key}, which the installed pack does not hold",
-        details=(ErrorDetail(field="asset", reason="no installed pack holds it"),),
-    )
+    asset = _installed_asset(database, pack_key, asset_key=shown.audio.asset_key)
+    if asset is None:
+        raise LinguaWikiError(
+            "assessment_asset_unavailable",
+            f"this task plays {shown.audio.asset_key}, which the installed pack does not hold; "
+            + REINSTALL_HINT,
+            details=(ErrorDetail(field="asset", reason="no installed pack holds it"),),
+        )
+    data, reason = _asset_bytes(database, pack_key, asset)
+    if data is None:
+        raise _asset_unavailable(asset.content_id, reason)
+    if hashlib.sha256(data).hexdigest() != asset.sha256:
+        raise LinguaWikiError(
+            "assessment_task_revision_drifted",
+            f"the pack directory holds a different recording for {asset.asset_key} than the "
+            "one installed, so it does not belong to the answer key that would be served "
+            "with it; install the pack version you mean to serve",
+            details=(ErrorDetail(field="asset", reason=f"installed {asset.sha256}"),),
+        )
+    return ServedAsset(content_id=asset.content_id, sha256=asset.sha256)
 
 
 def _resolve_served_asset(
@@ -2301,18 +2320,12 @@ def _resolve_served_asset(
     error prose to tell them apart is how that distinction gets lost.
     """
 
-    resolved = next(
-        (
-            candidate
-            for candidate in _pack_assets(database, pack_key)
-            if str(candidate.content_id) == identity.content_id
-        ),
-        None,
-    )
+    resolved = _installed_asset(database, pack_key, content_id=identity.content_id)
     if resolved is None:
         raise LinguaWikiError(
             "assessment_asset_unavailable",
-            f"the recording {identity.content_id} this task played is not available",
+            f"the recording {identity.content_id} this task played is not available; "
+            + REINSTALL_HINT,
             details=(ErrorDetail(field="asset", reason="the pack no longer holds it"),),
         )
     if resolved.sha256 != identity.sha256:
@@ -2360,8 +2373,8 @@ def served_recording(
     Resolved through the run's own record of the serving, never by re-reading the pack, and
     hashed as it is read: the bytes handed back are compared with the digest the snapshot
     holds, so a learner hears the recording the task was served with or none. A file
-    replaced between the pack load and this read is caught by that hash, not trusted
-    because the load was clean.
+    replaced on disk since the pack was installed is caught by that hash: `pack_assets`
+    says what was installed, and only the bytes can say what is there now.
 
     Only while the task is outstanding. A settled task's recording is no longer part of an
     open question, and serving it would let a finished answer be revisited.
@@ -2384,33 +2397,13 @@ def served_recording(
                 f"{content_id} was served with no recording, so there is nothing to play",
                 details=(ErrorDetail(field="content_id", reason="no recording"),),
             )
-        pack = _pack_on_disk(database, _run_pack_key(database, run_id))
-    resolved = (
-        None
-        if pack is None
-        else next(
-            (asset for asset in pack.assets if str(asset.content_id) == identity.content_id),
-            None,
-        )
-    )
-    if pack is None or resolved is None:
-        raise _asset_unavailable(identity.content_id, "the pack no longer holds it")
-    try:
-        root = pack.root.resolve(strict=True)
-        path = (pack.root / resolved.asset.path).resolve(strict=True)
-    except (OSError, RuntimeError):
-        # `RuntimeError` is a symlink loop under Python 3.12, which no handler above this
-        # one would catch.
-        raise _asset_unavailable(identity.content_id, "its path cannot be resolved") from None
-    if not path.is_relative_to(root) or not path.is_file():
-        raise _asset_unavailable(identity.content_id, "its path leaves the pack directory")
-    try:
-        size = path.stat().st_size
-        if size > MAXIMUM_RECORDING_BYTES:
-            raise _asset_unavailable(identity.content_id, f"it is {size} bytes, over the cap")
-        data = path.read_bytes()
-    except OSError:
-        raise _asset_unavailable(identity.content_id, "it cannot be read") from None
+        pack_key = _run_pack_key(database, run_id)
+        resolved = _installed_asset(database, pack_key, content_id=identity.content_id)
+        if resolved is None:
+            raise _asset_unavailable(identity.content_id, "the pack no longer holds it")
+        data, reason = _asset_bytes(database, pack_key, resolved)
+    if data is None:
+        raise _asset_unavailable(identity.content_id, reason)
     if hashlib.sha256(data).hexdigest() != identity.sha256:
         raise LinguaWikiError(
             "assessment_asset_changed",
@@ -2419,7 +2412,7 @@ def served_recording(
             details=(ErrorDetail(field="asset", reason=f"served {identity.sha256}"),),
         )
     return ServedRecording(
-        content_id=identity.content_id, media_type=resolved.asset.media_type, data=data
+        content_id=identity.content_id, media_type=resolved.media_type, data=data
     )
 
 
