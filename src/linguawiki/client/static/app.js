@@ -118,7 +118,7 @@ function setStatus(status) {
 
 // One request, retried only where a retry is a replay: a read, or a mutation that carries
 // its key. A retryable refusal waits the server's `Retry-After` and sends the same body.
-async function request(method, path, body, { binary = false } = {}) {
+async function request(method, path, body, { binary = false, attempts = Infinity } = {}) {
   const keyed = body !== undefined && typeof body.idempotency_key === "string";
   const mayRetry = method === "GET" || keyed;
   for (let attempt = 0; ; attempt += 1) {
@@ -141,6 +141,13 @@ async function request(method, path, body, { binary = false } = {}) {
         throw new Refusal(0, {
           code: "client_unreachable",
           message: "The LinguaWiki server did not answer, so whether that landed is unknown.",
+        });
+      }
+      if (attempt + 1 >= attempts) {
+        setStatus("");
+        throw new Refusal(0, {
+          code: "client_unreachable",
+          message: "The LinguaWiki server did not answer.",
         });
       }
       setStatus("offline");
@@ -276,19 +283,39 @@ async function play(task, player) {
   state.error = null;
   draw();
   try {
-    // Recorded before it is heard, and playback starts only when the server agrees.
-    await keyed("POST", `/runs/${state.run}/tasks/${task.content_id}/plays`);
+    // The bytes first: fetching is not a play, so a recording that cannot be had costs the
+    // learner nothing. Bounded, because this is a click waiting on an answer.
     let url = state.recordings.get(task.content_id);
     if (!url) {
-      const blob = await request("GET", `/runs/${state.run}/tasks/${task.content_id}/audio`, undefined, {
-        binary: true,
-      });
+      let blob;
+      try {
+        blob = await request("GET", `/runs/${state.run}/tasks/${task.content_id}/audio`, undefined, {
+          binary: true,
+          attempts: 3,
+        });
+      } catch (refusal) {
+        throw new Refusal(refusal.status, {
+          code: refusal.code,
+          message: `The recording could not be loaded, so no play was used. ${refusal.message}`,
+        });
+      }
       url = URL.createObjectURL(blob);
       state.recordings.set(task.content_id, url);
     }
+    // Recorded before it is heard, and playback starts only when the server agrees.
+    await keyed("POST", `/runs/${state.run}/tasks/${task.content_id}/plays`);
     player.src = url;
     player.currentTime = 0;
-    await player.play().catch(() => {});
+    try {
+      await player.play();
+    } catch {
+      // The play is already counted; saying so is the honest answer, and pressing play
+      // again is the way forward while any remain.
+      throw new Refusal(0, {
+        code: "client_playback_failed",
+        message: "The browser did not start the recording. That play was counted; press play again if any remain.",
+      });
+    }
   } catch (refusal) {
     state.error = { code: refusal.code, message: refusal.message };
   } finally {

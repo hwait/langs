@@ -404,3 +404,27 @@ def test_a_run_opened_elsewhere_is_never_served_by_the_page(
         recorded, "SELECT count(*) FROM assessment_run_tasks WHERE run_id = ?", [run.run_id]
     )
     assert served_count == 0
+
+
+def test_a_recording_that_cannot_be_fetched_costs_no_play(
+    page: Any, served: Served, recorded: PolishWorkspace
+) -> None:
+    """The bytes are fetched before the play is recorded, so a failed fetch spends nothing."""
+
+    page.route("**/audio", lambda route: route.abort())
+    _start(page, served)
+    for _ in range(10):
+        _wait_for_work(page)
+        if page.locator("[data-role=play]").count():
+            break
+        _answer_current(page)
+    content_id = page.locator("section.task").get_attribute("data-content")
+
+    page.click("[data-role=play]")
+    page.wait_for_selector(".error")
+
+    plays = _scalar(
+        recorded, "SELECT count(*) FROM assessment_task_plays WHERE content_id = ?", [content_id]
+    )
+    assert plays == 0
+    assert "2 plays left" in page.inner_text("[data-role=plays]")
