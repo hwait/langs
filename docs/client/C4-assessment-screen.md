@@ -1,7 +1,7 @@
 ---
 title: "C4 — The assessment screen"
 stage: C4
-status: blocked
+status: shipped
 depends_on: [C3]
 ---
 
@@ -15,6 +15,53 @@ model calls for machine-scorable work.
 **Scope.** Tasks whose *task type* the server can score by comparison (`objective`,
 `short-response` — `placement.MACHINE_SCORABLE_TASK_TYPES`), in the `text` and `audio`
 modalities. Audio *capture* is C5; audio *playback* is here.
+
+## Shipped — 2026-10-02
+
+Implemented on `c4-assessment-screen`. Release gate figures are in the merge request.
+
+Where it went differently from the plan, and why:
+
+- **The token survives a reload in `sessionStorage`**, not in memory only as §1 said. A
+  reload otherwise booted with no token and never reached the pending operation, which is
+  §5's whole protection against a lost `POST /runs` opening a second run. It is per tab,
+  per origin, never in the URL or history, replaced by a newer launch URL, and dropped
+  when refused. The first version of the reload test passed without it: `page.goto` to the
+  same URL plus a fragment is a same-document navigation, so the old page's own retry did
+  the work. It now reloads for real with the old document's retries blocked.
+- **The asset codes kept their C2b names** — `assessment_asset_unavailable` and
+  `assessment_asset_changed`, not §3's `…_missing`/`…_altered`. Codes are part of the
+  contract. A file tampered with on disk surfaces as `pack_checksum_mismatch`, because the
+  pack load refuses first; the route's own hash covers the window after the load.
+- **`play_count` counts recorded plays whoever records the result.** Only *zero* depends on
+  the surface: it is a claim that the learner did not listen, so a CLI result with no
+  play rows stores `NULL`. The first version stored `NULL` for any CLI result, which
+  produced a state `result_play_counts_agree` calls damage through public calls alone.
+- **`/screen` gained `needs_judge` and `missing_recording`**, rather than a third answer
+  mode. §2a assumed the screen already reported whether a task needed a judge; it did
+  not. The page serves new tasks only in a run opened for machine scoring, and treats a
+  heard task with no recording like a judged one.
+- **A recording is fetched before its play is recorded**, so one that cannot be loaded
+  costs nothing; a browser that refuses to start playback is reported.
+- **The scoring condition enters the start request hash only when it is not the
+  default**, so a keyed start made before it existed still retries as a retry.
+- **Routing reads the path alone.** A query is validated against the route's published
+  schema like a body, and a route that publishes none refuses one.
+- **Test audio is generated** — tones written by `tests/support/recordings.py`, which
+  republishes the pilot with them. The upgrade-gate seed does the same, because a table
+  it leaves empty proves nothing.
+
+Deferred, from the whole-branch review:
+
+- After `client serve` restarts on a new port (the default), the old page reports the
+  server unreachable rather than restarted; only a restart on the same port reaches the
+  stale-token state.
+- A rare redraw after a refused play can throw when another task holds the screen.
+- `GET …/audio` still serves an unanswered task of a closed run; plays are refused.
+- A pending operation on boot takes precedence over a `&run=` launch reference, and a
+  stale-token refusal clears it.
+- The run picker draws asynchronously and can, under `database_busy`, redraw over the
+  task view.
 
 ## Revised after review — 2026-10-01
 
