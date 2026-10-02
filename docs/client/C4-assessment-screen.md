@@ -18,7 +18,8 @@ modalities. Audio *capture* is C5; audio *playback* is here.
 
 ## Shipped — 2026-10-02
 
-Implemented on `c4-assessment-screen`. Release gate figures are in the merge request.
+Implemented on `c4-assessment-screen`. Release gate `scripts/verify.py`: **2451 passed, 1
+skipped**, branch coverage 93.52% against a 90% floor, wheel and distribution checks clean.
 
 Where it went differently from the plan, and why:
 
