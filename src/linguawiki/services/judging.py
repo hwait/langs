@@ -41,6 +41,7 @@ from linguawiki.paths import WorkspacePaths
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import recordings as recording_service
+from linguawiki.services.assessment import WithdrawnSubmission
 from linguawiki.services.withdrawal import Settlement, SettlementOutcome, settle
 
 
@@ -346,16 +347,6 @@ def with_settled(
             ),
         ),
     )
-
-
-class WithdrawnSubmission(ContractModel):
-    """A submission a judging command withdrew, and why."""
-
-    submission_id: str
-    content_id: str
-    code: str
-    reason: str
-    voided_verdicts: tuple[str, ...] = ()
 
 
 #: Codes the system withdraws with by itself -- a purge, a lapse, a consent change, a run

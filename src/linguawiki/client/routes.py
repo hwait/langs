@@ -218,6 +218,7 @@ def _finalize(request: Request) -> Any:
         request.paths,
         run=request.path_values["run_id"],
         reason=request.optional("reason", str) or "completed",
+        exclude_outstanding=request.optional("exclude_outstanding", bool) is True,
         idempotency_key=request.optional("idempotency_key", str),
         clock=request.clock,
         command="assessment.finalize",
@@ -431,6 +432,7 @@ ROUTES: tuple[Route, ...] = (
         request_schema=_body(
             {
                 "reason": {"type": "string", "minLength": 1},
+                "exclude_outstanding": {"type": "boolean"},
                 "idempotency_key": IDEMPOTENCY_KEY,
             }
         ),

@@ -22,9 +22,10 @@ served task is skipped -- `assessment_run_tasks.status` holds only `served`, `an
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from linguawiki.clock import aware_utc
 from linguawiki.db.connection import Database
@@ -36,12 +37,25 @@ from linguawiki.services import learners as learner_service
 
 #: The code a submission carries when its recording was purged before a judge heard it.
 PURGED_CODE = "assessment_audio_purged"
+#: The run was abandoned with the submission still waiting for a judge.
+ABANDONED_CODE = "assessment_run_abandoned"
+#: The run was finalized `exclude_outstanding`, with the submission still waiting.
+FINALIZED_CODE = "assessment_run_finalized"
+#: The track stopped consenting to keeping written answers before this one was judged.
+NOT_RETAINED_CODE = "assessment_response_not_retained"
+#: Why a consent change purged a recording, in the learner's terms. The tombstone's own
+#: `purge_reason` is a closed vocabulary (`learner-request` here: the learner withdrew the
+#: consent), so this is what keeps "why" on the submission and in the audit log.
+CONSENT_WITHDRAWN = "consent withdrawn"
 
 
 @dataclass(frozen=True, slots=True)
 class WithdrawalOutcome:
     invalidated_results: tuple[str, ...] = ()
     withdrawn_submissions: tuple[str, ...] = ()
+    #: Verdicts held for those submissions on a paused run, voided with them. Carried out
+    #: so the command that purged says so: a verdict is something a judge delivered.
+    voided_verdicts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +80,14 @@ def dependent_results(database: Database, *, artifact_id: str) -> list[str]:
     ]
 
 
-def withdraw_submission(database: Database, *, submission_id: str, code: str, reason: str) -> bool:
+def withdraw_submission(
+    database: Database,
+    *,
+    submission_id: str,
+    code: str,
+    reason: str,
+    clear_text: bool = False,
+) -> bool:
     """Withdraw a submission no judge can now hear, and settle its task as skipped.
 
     The task is settled rather than left `served`, because a served task holds its
@@ -76,6 +97,11 @@ def withdraw_submission(database: Database, *, submission_id: str, code: str, re
 
     Returns whether it withdrew anything: a submission no longer pending was settled by
     whatever moved it, and is left as that left it.
+
+    `clear_text` also discards a written answer's retained text, in the same statement
+    that withdraws it: the consent that let it be kept has gone, and a moment at which the
+    row is withdrawn for that reason and still holds the words is the breach itself. The
+    digest stays -- it carries nothing, and still answers "was this the answer?".
     """
 
     row = database.one(
@@ -86,11 +112,18 @@ def withdraw_submission(database: Database, *, submission_id: str, code: str, re
     if row is None:
         return False
     now = database.now()
-    database.execute(
-        "UPDATE assessment_submissions SET status = 'withdrawn', withdrawn_code = ?, "
-        "withdrawn_reason = ?, updated_at = ? WHERE submission_id = ?",
-        [code, reason, now, submission_id],
-    )
+    if clear_text:
+        database.execute(
+            "UPDATE assessment_submissions SET status = 'withdrawn', withdrawn_code = ?, "
+            "withdrawn_reason = ?, response_text = NULL, updated_at = ? WHERE submission_id = ?",
+            [code, reason, now, submission_id],
+        )
+    else:
+        database.execute(
+            "UPDATE assessment_submissions SET status = 'withdrawn', withdrawn_code = ?, "
+            "withdrawn_reason = ?, updated_at = ? WHERE submission_id = ?",
+            [code, reason, now, submission_id],
+        )
     database.execute(
         "UPDATE assessment_run_tasks SET status = 'skipped' "
         "WHERE run_id = ? AND content_id = ? AND status = 'served'",
@@ -116,6 +149,8 @@ class Settlement:
     code: str
     reason: str
     refusal: LinguaWikiError | None = None
+    #: Discard a written answer's text as it is withdrawn (`withdraw_submission`).
+    clear_text: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +214,7 @@ def settle(database: Database, settlement: Settlement) -> SettlementOutcome:
         submission_id=settlement.submission_id,
         code=settlement.code,
         reason=settlement.reason,
+        clear_text=settlement.clear_text,
     )
     voided = void_held_verdicts(
         database,
@@ -195,6 +231,7 @@ def write_withdrawal(database: Database, *, artifact_id: str, reason: str) -> Wi
     """Settle every assessment claim resting on this recording, in the caller's transaction."""
 
     withdrawn_submissions = []
+    voided_verdicts: list[str] = []
     for (submission_id,) in database.query(
         "SELECT submission_id FROM assessment_submissions "
         "WHERE artifact_id = ? AND status = 'pending' ORDER BY submission_id",
@@ -202,11 +239,12 @@ def write_withdrawal(database: Database, *, artifact_id: str, reason: str) -> Wi
     ):
         # Through `settle`, so a verdict held for it on a paused run is voided with the
         # same code rather than left waiting for a resume that could only refuse it.
-        settle(
+        settled = settle(
             database,
             Settlement(submission_id=str(submission_id), code=PURGED_CODE, reason=reason),
         )
         withdrawn_submissions.append(str(submission_id))
+        voided_verdicts.extend(settled.voided_verdicts)
     rows = [
         _Withdrawn(
             result_id=str(row[0]),
@@ -225,7 +263,10 @@ def write_withdrawal(database: Database, *, artifact_id: str, reason: str) -> Wi
         )
     ]
     if not rows:
-        return WithdrawalOutcome(withdrawn_submissions=tuple(withdrawn_submissions))
+        return WithdrawalOutcome(
+            withdrawn_submissions=tuple(withdrawn_submissions),
+            voided_verdicts=tuple(voided_verdicts),
+        )
     now = database.now()
     for entry in rows:
         database.execute(
@@ -250,6 +291,277 @@ def write_withdrawal(database: Database, *, artifact_id: str, reason: str) -> Wi
     return WithdrawalOutcome(
         invalidated_results=tuple(entry.result_id for entry in rows),
         withdrawn_submissions=tuple(withdrawn_submissions),
+        voided_verdicts=tuple(voided_verdicts),
+    )
+
+
+def describe_withdrawn(
+    database: Database, submission_ids: Sequence[str], voided: Sequence[str] = ()
+) -> tuple[assessment_service.WithdrawnSubmission, ...]:
+    """What a report says of submissions withdrawn in this transaction, read back from the
+    rows: the code and reason the learner is shown, and the voided verdicts that were held
+    for each. Read back rather than restated, so the report cannot say one thing while the
+    row says another."""
+
+    owners = {
+        str(verdict_id): str(submission_id)
+        for verdict_id, submission_id in (
+            database.query(
+                "SELECT verdict_id, submission_id FROM assessment_verdicts "
+                f"WHERE verdict_id IN ({', '.join('?' for _ in voided)})",
+                list(voided),
+            )
+            if voided
+            else []
+        )
+    }
+    described = []
+    for submission_id in dict.fromkeys(submission_ids):
+        row = database.one(
+            "SELECT content_id, withdrawn_code, withdrawn_reason FROM assessment_submissions "
+            "WHERE submission_id = ?",
+            [submission_id],
+        )
+        if row is None:
+            continue
+        described.append(
+            assessment_service.WithdrawnSubmission(
+                submission_id=submission_id,
+                content_id=str(row[0]),
+                code=str(row[1]),
+                reason=str(row[2]),
+                voided_verdicts=tuple(
+                    verdict_id for verdict_id in voided if owners.get(verdict_id) == submission_id
+                ),
+            )
+        )
+    return tuple(described)
+
+
+def describe_voided(
+    database: Database, verdict_ids: Sequence[str]
+) -> tuple[assessment_service.VoidedVerdict, ...]:
+    """The voided verdicts a report names, with the code and reason each was voided for."""
+
+    described = []
+    for verdict_id in dict.fromkeys(verdict_ids):
+        row = database.one(
+            "SELECT verdict.submission_id, submission.content_id, outcome.code, outcome.reason "
+            "FROM assessment_verdicts verdict "
+            "JOIN assessment_verdict_outcomes outcome ON outcome.verdict_id = verdict.verdict_id "
+            "LEFT JOIN assessment_submissions submission "
+            "  ON submission.submission_id = verdict.submission_id "
+            "WHERE verdict.verdict_id = ? AND outcome.outcome = 'void'",
+            [verdict_id],
+        )
+        if row is None:
+            continue
+        described.append(
+            assessment_service.VoidedVerdict(
+                verdict_id=verdict_id,
+                submission_id=str(row[0]),
+                content_id=str(row[1]),
+                code=str(row[2]),
+                reason=str(row[3]),
+            )
+        )
+    return tuple(described)
+
+
+@dataclass(frozen=True, slots=True)
+class Outstanding:
+    """What a run still owes a judgement on: submissions waiting for a judge, as
+    `(submission_id, content_id)`, and verdicts held for a resume, as
+    `(verdict_id, submission_id, content_id)`."""
+
+    pending: tuple[tuple[str, str], ...] = ()
+    held: tuple[tuple[str, str, str], ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.pending or self.held)
+
+
+def outstanding(database: Database, run_id: str) -> Outstanding:
+    """The judgements a run has not settled, oldest first."""
+
+    pending = tuple(
+        (str(submission_id), str(content_id))
+        for submission_id, content_id in database.query(
+            "SELECT submission_id, content_id FROM assessment_submissions "
+            "WHERE run_id = ? AND status = 'pending' ORDER BY created_at, submission_id",
+            [run_id],
+        )
+    )
+    held = tuple(
+        (str(verdict_id), str(submission_id), str(content_id))
+        for verdict_id, submission_id, content_id in database.query(
+            "SELECT verdict.verdict_id, verdict.submission_id, submission.content_id "
+            "FROM assessment_verdicts verdict "
+            "JOIN assessment_submissions submission "
+            "  ON submission.submission_id = verdict.submission_id "
+            "WHERE submission.run_id = ? AND NOT EXISTS ("
+            "  SELECT 1 FROM assessment_verdict_outcomes outcome "
+            "  WHERE outcome.verdict_id = verdict.verdict_id) "
+            "ORDER BY verdict.received_at, verdict.verdict_id",
+            [run_id],
+        )
+    )
+    return Outstanding(pending=pending, held=held)
+
+
+def withdraw_outstanding(
+    database: Database, run_id: str, *, code: str, reason: str
+) -> tuple[tuple[assessment_service.WithdrawnSubmission, ...], tuple[str, ...]]:
+    """Settle everything a closing run still owes, inside the caller's transaction.
+
+    Every pending submission is withdrawn (task skipped) and the verdicts held for it are
+    voided, through `settle`; then any verdict still held -- one whose submission is no
+    longer pending, such as one superseded while the run was paused -- is voided with the
+    same code. A closing run can apply nothing, so nothing on it may go on reading as
+    waiting. Returns the withdrawn submissions and every verdict voided, by either route.
+    """
+
+    owed = outstanding(database, run_id)
+    outcomes = [
+        settle(database, Settlement(submission_id=submission_id, code=code, reason=reason))
+        for submission_id, _ in owed.pending
+    ]
+    voided = [verdict_id for outcome in outcomes for verdict_id in outcome.voided_verdicts]
+    for submission_id in dict.fromkeys(entry[1] for entry in outstanding(database, run_id).held):
+        voided.extend(
+            void_held_verdicts(database, submission_id=submission_id, code=code, reason=reason)
+        )
+    withdrawn = describe_withdrawn(
+        database, [outcome.submission_id for outcome in outcomes if outcome.withdrawn], voided
+    )
+    return withdrawn, tuple(voided)
+
+
+@dataclass(frozen=True, slots=True)
+class ConsentOutcome:
+    """What a consent change settled: the submissions it withdrew (each naming the held
+    verdicts voided with it) and the recordings it purged."""
+
+    withdrawn: tuple[assessment_service.WithdrawnSubmission, ...] = ()
+    purged_artifacts: tuple[str, ...] = ()
+
+    @property
+    def voided_verdicts(self) -> tuple[str, ...]:
+        return tuple(verdict for entry in self.withdrawn for verdict in entry.voided_verdicts)
+
+
+def _audio_withdrawn(before: Mapping[str, object], after: Mapping[str, object]) -> bool:
+    # Consent to keep a recording is given only by `True`; anything else is its absence.
+    key = "audio_retention_consent"
+    return before.get(key) is True and after.get(key) is not True
+
+
+def _transcript_withdrawn(before: Mapping[str, object], after: Mapping[str, object]) -> bool:
+    # Unset keeps an excerpt and `True` keeps the whole text; only `False` keeps none
+    # (`evidence.retain_response`), so it is turning *to* `False` that withdraws.
+    key = "transcript_retention_consent"
+    return before.get(key) is not False and after.get(key) is False
+
+
+def on_consent_change(
+    database: Database,
+    root: Path,
+    *,
+    track_id: str,
+    before: Mapping[str, object],
+    after: Mapping[str, object],
+    command: str,
+) -> ConsentOutcome:
+    """Settle the judgements a consent change took the ground from under -- the one home
+    for that, inside the caller's transaction (`learners.update_track`'s).
+
+    - **Audio retention consent turned off**: every pending recording submission on the
+      track has its recording purged through `artifacts.write_purge` -- the file deleted
+      inside the transaction that records it, as every purge is -- and the purge withdraws
+      it with `assessment_audio_purged`. One event, one code; `consent withdrawn` is the
+      reason it carries, so the why is not lost.
+    - **Transcript retention consent turned off**: every pending written answer on the
+      track is withdrawn with `assessment_response_not_retained`, and its text cleared in
+      the statement that withdraws it.
+
+    Either way the verdicts held for those submissions are voided with them. Nothing is
+    refused here: the learner's decision is the one fact in the room that is not open to
+    question, and everything else is settled to fit it.
+    """
+
+    from linguawiki.services import artifacts as artifact_service
+
+    withdrawn: list[str] = []
+    voided: list[str] = []
+    purged: list[str] = []
+    if _audio_withdrawn(before, after):
+        for submission_id, artifact_id, purged_at in database.query(
+            "SELECT submission.submission_id, submission.artifact_id, artifact.purged_at "
+            "FROM assessment_submissions submission "
+            "JOIN assessment_runs run ON run.run_id = submission.run_id "
+            "LEFT JOIN artifacts artifact ON artifact.artifact_id = submission.artifact_id "
+            "WHERE run.track_id = ? AND submission.kind = 'recording' "
+            "AND submission.status = 'pending' ORDER BY submission.created_at, 1",
+            [track_id],
+        ):
+            if purged_at is None and artifact_id is not None:
+                # One purge may settle several submissions resting on one recording, so a
+                # later row in this loop can already be withdrawn; `write_purge` settles
+                # only what is still pending.
+                if str(artifact_id) in purged:
+                    continue
+                outcome = artifact_service.write_purge(
+                    database,
+                    root,
+                    artifact_id=str(artifact_id),
+                    reason="learner-request",
+                    detail=CONSENT_WITHDRAWN,
+                    command=command,
+                )
+                purged.append(str(artifact_id))
+                withdrawn.extend(outcome.withdrawn_submissions)
+                voided.extend(outcome.voided_verdicts)
+            else:
+                # Already gone -- a tombstone with a submission still pending is damage
+                # `db check` reports -- so there is nothing to purge, and the submission
+                # is settled by the code a purge would have given it.
+                settled = settle(
+                    database,
+                    Settlement(
+                        submission_id=str(submission_id),
+                        code=PURGED_CODE,
+                        reason=f"the recording was purged ({CONSENT_WITHDRAWN})",
+                    ),
+                )
+                if settled.withdrawn:
+                    withdrawn.append(str(submission_id))
+                voided.extend(settled.voided_verdicts)
+    if _transcript_withdrawn(before, after):
+        for (submission_id,) in database.query(
+            "SELECT submission.submission_id FROM assessment_submissions submission "
+            "JOIN assessment_runs run ON run.run_id = submission.run_id "
+            "WHERE run.track_id = ? AND submission.kind = 'text' "
+            "AND submission.status = 'pending' ORDER BY submission.created_at, 1",
+            [track_id],
+        ):
+            settled = settle(
+                database,
+                Settlement(
+                    submission_id=str(submission_id),
+                    code=NOT_RETAINED_CODE,
+                    reason=(
+                        f"{CONSENT_WITHDRAWN}: the track stopped agreeing to keep written "
+                        "answers before a judge read this one, so its text was discarded"
+                    ),
+                    clear_text=True,
+                ),
+            )
+            if settled.withdrawn:
+                withdrawn.append(str(submission_id))
+            voided.extend(settled.voided_verdicts)
+    return ConsentOutcome(
+        withdrawn=describe_withdrawn(database, withdrawn, voided),
+        purged_artifacts=tuple(purged),
     )
 
 
@@ -416,13 +728,24 @@ def _dimension_kind(database: Database, dimension: str, *, runs: set[str]) -> st
 
 
 __all__ = [
+    "ABANDONED_CODE",
+    "CONSENT_WITHDRAWN",
+    "FINALIZED_CODE",
+    "NOT_RETAINED_CODE",
     "PURGED_CODE",
+    "ConsentOutcome",
+    "Outstanding",
     "Settlement",
     "SettlementOutcome",
     "WithdrawalOutcome",
     "dependent_results",
+    "describe_voided",
+    "describe_withdrawn",
+    "on_consent_change",
+    "outstanding",
     "settle",
     "void_held_verdicts",
+    "withdraw_outstanding",
     "withdraw_submission",
     "write_withdrawal",
 ]

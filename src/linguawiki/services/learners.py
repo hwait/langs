@@ -812,7 +812,14 @@ def update_track(
 
     `current_level` is never set here: a level the learner *holds* comes from evidence,
     which Stage 3 computes, and a declared level stays a hypothesis.
+
+    Withdrawing a retention consent reaches the answers still waiting for a judge, in this
+    same transaction (`withdrawal.on_consent_change`): a recording the learner no longer
+    agrees to keep is purged, a written answer's text is discarded, and the verdicts held
+    for them are voided. The returned record's warnings name each one.
     """
+
+    from linguawiki.services import withdrawal
 
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
@@ -828,6 +835,8 @@ def update_track(
                 field=field,
             )
         settings = preferences.rows() if preferences is not None else {}
+        before = dict(current.preferences)
+        after = {**before, **{key: json.loads(value) for key, value in settings.items()}}
         with database.transaction() as transaction:
             now = transaction.now()
             transaction.execute(
@@ -853,17 +862,56 @@ def update_track(
                     "value_json = excluded.value_json, updated_at = excluded.updated_at",
                     [track_id, key, value, now],
                 )
+            settled = withdrawal.on_consent_change(
+                transaction,
+                paths.root,
+                track_id=track_id,
+                before=before,
+                after=after,
+                command=command,
+            )
             migration_module.record_audit_entry(
                 transaction,
                 command=command,
                 correlation_id=EventId.new(),
                 outcome="succeeded",
-                affected_records_json=json.dumps([track_id]),
+                affected_records_json=json.dumps(
+                    [
+                        track_id,
+                        *sorted(
+                            {
+                                *(entry.submission_id for entry in settled.withdrawn),
+                                *settled.voided_verdicts,
+                            }
+                        ),
+                    ]
+                ),
                 before_summary=f"goal={current.goal}, target={current.target_level}",
                 after_summary=f"goal={goal or current.goal}, "
-                f"target={target_level or current.target_level}",
+                f"target={target_level or current.target_level}"
+                + (
+                    "; consent withdrawn, so withdrew "
+                    + ", ".join(
+                        f"{entry.submission_id} ({entry.code})" for entry in settled.withdrawn
+                    )
+                    if settled.withdrawn
+                    else ""
+                ),
             )
-        return _read_track(database, track_id)
+        record = _read_track(database, track_id)
+        warnings = [
+            f"withdrew submission {entry.submission_id} ({entry.content_id}) as {entry.code}: "
+            f"{entry.reason}"
+            + (
+                f"; voided held verdict(s) {', '.join(entry.voided_verdicts)}"
+                if entry.voided_verdicts
+                else ""
+            )
+            for entry in settled.withdrawn
+        ]
+        if not warnings:
+            return record
+        return record.model_copy(update={"warnings": (*record.warnings, *warnings)})
 
 
 def _assert_revivable(database: Database, current: TrackRecord) -> None:

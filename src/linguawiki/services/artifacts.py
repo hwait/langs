@@ -128,6 +128,10 @@ class PurgeReport(ContractModel):
     invalidated_results: tuple[str, ...] = ()
     #: Recordings a judge had not yet heard, withdrawn with their tasks skipped.
     withdrawn_submissions: tuple[str, ...] = ()
+    #: Verdicts a judge had delivered for those recordings while their run was paused,
+    #: voided with them: they can never be applied, and the judge's work is named rather
+    #: than silently dropped.
+    voided_verdicts: tuple[str, ...] = ()
     #: What survived, and why -- the counterpart of the above, and the reason a purge is
     #: safe to offer at all.
     surviving_language_evidence: int = 0
@@ -1124,6 +1128,7 @@ class PurgeOutcome:
     invalidated_observations: tuple[str, ...] = ()
     invalidated_results: tuple[str, ...] = ()
     withdrawn_submissions: tuple[str, ...] = ()
+    voided_verdicts: tuple[str, ...] = ()
 
 
 def write_purge(
@@ -1133,6 +1138,7 @@ def write_purge(
     artifact_id: str,
     reason: str,
     command: str,
+    detail: str | None = None,
 ) -> PurgeOutcome:
     """Tombstone a recording, settle what rested on it, and delete its bytes -- in the
     caller's transaction.
@@ -1141,9 +1147,16 @@ def write_purge(
     of it: a capture superseding an earlier recording of the same task purges that
     recording in the transaction that binds the new one, so there is no moment at which
     both are live and no moment at which neither is.
+
+    `reason` is the tombstone's, from a closed vocabulary. `detail`, when given, is the
+    why in words -- `consent withdrawn` for a consent change, which the vocabulary has no
+    term for -- and it is what the withdrawn submissions and the audit entry say, so the
+    reason is not lost to the column's narrower one.
     """
 
     from linguawiki.services import withdrawal
+
+    why = reason if detail is None else detail
 
     relative_path = str(
         database.scalar("SELECT relative_path FROM artifacts WHERE artifact_id = ?", [artifact_id])
@@ -1160,13 +1173,13 @@ def write_purge(
         database.execute(
             "UPDATE pronunciation_observations SET invalidated_at = ?, "
             "invalidation_reason = ? WHERE observation_id = ?",
-            [now, f"the audio it rested on was purged ({reason})", observation_id],
+            [now, f"the audio it rested on was purged ({why})", observation_id],
         )
     # The assessment results that rested on it, and any submission still waiting for a
     # judge. Before C5 a purge found its dependents only among pronunciation observations,
     # so a score outlived the recording it was given for.
     withdrawn = withdrawal.write_withdrawal(
-        database, artifact_id=artifact_id, reason=f"the recording was purged ({reason})"
+        database, artifact_id=artifact_id, reason=f"the recording was purged ({why})"
     )
     migration_module.record_audit_entry(
         database,
@@ -1175,9 +1188,16 @@ def write_purge(
         outcome="succeeded",
         affected_records_json=json.dumps([artifact_id]),
         after_summary=(
-            f"purged ({reason}); {len(dependent)} acoustic claim(s) and "
+            f"purged ({reason if detail is None else f'{reason}: {detail}'}); "
+            f"{len(dependent)} acoustic claim(s) and "
             f"{len(withdrawn.invalidated_results)} assessment result(s) invalidated, "
-            "language evidence untouched"
+            f"{len(withdrawn.withdrawn_submissions)} unjudged submission(s) withdrawn"
+            + (
+                f" and verdict(s) {', '.join(withdrawn.voided_verdicts)} voided"
+                if withdrawn.voided_verdicts
+                else ""
+            )
+            + ", language evidence untouched"
         ),
     )
     migration_module.record_domain_event(
@@ -1191,6 +1211,7 @@ def write_purge(
                 "reason": reason,
                 "invalidated": len(dependent),
                 "invalidated_results": len(withdrawn.invalidated_results),
+                **({} if detail is None else {"detail": detail}),
             },
             sort_keys=True,
         ),
@@ -1216,6 +1237,7 @@ def write_purge(
         invalidated_observations=tuple(entry[0] for entry in dependent),
         invalidated_results=withdrawn.invalidated_results,
         withdrawn_submissions=withdrawn.withdrawn_submissions,
+        voided_verdicts=withdrawn.voided_verdicts,
     )
 
 
@@ -1336,6 +1358,11 @@ def purge(
             f"{len(outcome.withdrawn_submissions)} recording(s) a judge had not yet heard "
             "were withdrawn, and their tasks skipped"
         )
+    if outcome.voided_verdicts:
+        warnings.append(
+            "verdict(s) held for them while their run was paused were voided, and will not "
+            "be applied when it resumes: " + ", ".join(outcome.voided_verdicts)
+        )
     return PurgeReport(
         artifact_id=artifact_id,
         relative_path=relative_path,
@@ -1344,6 +1371,7 @@ def purge(
         invalidated_observations=outcome.invalidated_observations,
         invalidated_results=outcome.invalidated_results,
         withdrawn_submissions=outcome.withdrawn_submissions,
+        voided_verdicts=outcome.voided_verdicts,
         surviving_language_evidence=surviving,
         purged_at=outcome.purged_at,
         warnings=tuple(warnings),

@@ -1510,18 +1510,55 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
     # the two cannot disagree about what "lapsed" means.
     from linguawiki.services import judging
 
+    # A run that is finalized or abandoned holds no pending submission -- closing it
+    # withdraws them all -- so one there is reported once, by the check below, whose remedy
+    # works on a closed run. Every command named here refuses one.
+    open_runs = {
+        str(run_id)
+        for (run_id,) in database.query(
+            "SELECT run_id FROM assessment_runs WHERE status IN ('in-progress', 'paused')"
+        )
+    }
     lapsed = [
         f"{entry.submission_id} (run {entry.run_id}, {entry.attempts} attempt(s), none live)"
         for entry in judging.lapsed_submissions(database, run_id=None)
+        if entry.run_id in open_runs
     ]
     checks.append(
         _named(
             "lapsed_judging_settled",
             lapsed,
             failed="a pending submission has used every judging attempt the policy allows and "
-            "none is still live, so nobody may claim it and it holds its dimension; any "
-            "command that writes to its run withdraws it",
+            "none is still live, so nobody may claim it and it holds its dimension; the next "
+            "command that writes to its run -- serving a task, `assessment claim`, `record`, "
+            "`release`, pausing or resuming, or `finalize` -- withdraws it",
             ok="no pending submission has run out of judging attempts unsettled",
+            field="submissions",
+        )
+    )
+    # Closing a run settles everything it still owes: abandoning withdraws every pending
+    # submission, and finalizing either refuses or withdraws them. One left pending on a
+    # closed run can never be judged -- every judging command refuses a closed run -- and
+    # nothing would ever say what became of it. A run closed before C6 could leave one.
+    stranded_pending = [
+        f"{submission_id} ({kind} on run {run_id}, which is {status})"
+        for submission_id, kind, run_id, status in database.query(
+            "SELECT submission.submission_id, submission.kind, submission.run_id, "
+            "coalesce(run.status, 'missing') FROM assessment_submissions submission "
+            "LEFT JOIN assessment_runs run ON run.run_id = submission.run_id "
+            "WHERE submission.status = 'pending' "
+            "AND (run.run_id IS NULL OR run.status NOT IN ('in-progress', 'paused')) "
+            "ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "no_pending_submission_on_a_closed_run",
+            stranded_pending,
+            failed="a submission still waits for a judge on a run that is closed, so no "
+            "verdict can ever land on it; `artifact purge` of its recording withdraws a "
+            "recorded one, with its reason on the row",
+            ok="no submission waits for a judge on a closed run",
             field="submissions",
         )
     )

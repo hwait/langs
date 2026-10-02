@@ -266,6 +266,7 @@ def test_c5_submissions_migrate_to_recordings_and_judged_ones_gain_their_verdict
         "applied_verdicts_name_their_result": "ok",
         "held_verdicts_on_paused_runs": "ok",
         "lapsed_judging_settled": "ok",
+        "no_pending_submission_on_a_closed_run": "ok",
         "judged_submissions_have_an_applied_verdict": "ok",
         "result_observation_times": "ok",
     }

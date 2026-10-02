@@ -651,6 +651,12 @@ def _assessment_parser(subcommands: Any) -> None:
     finalize.add_argument("--run")
     _add_track_selector(finalize)
     finalize.add_argument("--reason", default="completed")
+    finalize.add_argument(
+        "--exclude-outstanding",
+        action="store_true",
+        help="close without answers still waiting for a judge or verdicts held for a "
+        "resume, withdrawing them",
+    )
     finalize.add_argument("--idempotency-key")
     _add_workspace(finalize)
     report = actions.add_parser("report", help="show a run's per-dimension estimates")
@@ -2346,6 +2352,22 @@ def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
     )
     if report.untested_dimensions:
         lines.append(f"not tested: {list(report.untested_dimensions)}")
+    lines.extend(
+        f"applied held verdict {entry.verdict_id} to {entry.content_id} at {entry.score}"
+        for entry in report.applied_verdicts
+    )
+    lines.extend(
+        f"withdrew {entry.submission_id} ({entry.content_id}) as {entry.code}"
+        for entry in report.withdrawn
+    )
+    lines.extend(
+        f"excluded {entry.submission_id} ({entry.content_id}) as {entry.code}"
+        for entry in report.excluded
+    )
+    lines.extend(
+        f"voided verdict {entry.verdict_id} on {entry.content_id} ({entry.code}): {entry.reason}"
+        for entry in report.voided_verdicts
+    )
     return "\n".join(lines)
 
 
@@ -2546,6 +2568,7 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             run=args.run,
             track=args.track,
             reason=args.reason,
+            exclude_outstanding=args.exclude_outstanding,
             idempotency_key=args.idempotency_key,
             clock=clock,
             command=command,

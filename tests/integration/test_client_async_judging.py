@@ -1049,3 +1049,550 @@ def test_the_cli_claims_and_releases(
     )
     assert code == 0, released
     assert released["data"]["returned_to_queue"] is True
+
+
+# --- run transitions -------------------------------------------------------------------------
+
+
+def two_submitted(workspace: PolishWorkspace, seed: int) -> tuple[str, list[tuple[str, str, str]]]:
+    """A run with two recordings waiting for a judge, one per spoken dimension:
+    `(run_id, [(content_id, submission_id, artifact_id), ...])`."""
+
+    run_id = start_spoken(workspace)
+    answered = []
+    for offset in (0, 1):
+        task = serve(workspace, run_id)
+        taken = take(workspace, run_id, task.content_id, data=spoken_bytes(seed + offset))
+        assert taken.submission is not None and taken.artifact_id is not None
+        answered.append((task.content_id, taken.submission.submission_id, taken.artifact_id))
+    return run_id, answered
+
+
+def resume(workspace: PolishWorkspace, run_id: str) -> assessment_service.AssessmentRunReport:
+    return assessment_service.set_status(
+        workspace.paths, status="in-progress", run=run_id, clock=workspace.clock
+    )
+
+
+def recording_path(workspace: PolishWorkspace, artifact_id: str) -> Any:
+    relative = rows(
+        workspace, "SELECT relative_path FROM artifacts WHERE artifact_id = ?", [artifact_id]
+    )[0][0]
+    return workspace.root / str(relative)
+
+
+def outcome_of(workspace: PolishWorkspace, verdict_id: str | None) -> tuple[Any, ...]:
+    return tuple(
+        rows(
+            workspace,
+            "SELECT outcome, code FROM assessment_verdict_outcomes WHERE verdict_id = ?",
+            [verdict_id],
+        )[0]
+    )
+
+
+def test_a_resume_applies_held_verdicts_in_the_order_they_arrived(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, answered = two_submitted(speaking, 301)
+    pause(speaking, run_id)
+    # Delivered in the opposite order to the one they were answered in: arrival decides.
+    second, first = answered
+    held = [
+        verdict(speaking, run_id, content_id, submission_id, score=score)
+        for (content_id, submission_id, _), score in ((first, 0.25), (second, 0.75))
+    ]
+    assert all(entry.held for entry in held)
+    assert_clean(speaking)
+
+    resumed = resume(speaking, run_id)
+
+    assert resumed.status == "in-progress"
+    assert [entry.verdict_id for entry in resumed.applied_verdicts] == [
+        entry.verdict_id for entry in held
+    ]
+    assert [entry.score for entry in resumed.applied_verdicts] == [0.25, 0.75]
+    assert resumed.voided_verdicts == ()
+    assert resumed.tasks_recorded == 2
+    # Folded in arrival order, each on the posterior the one before it left.
+    recorded = rows(
+        speaking,
+        "SELECT result_id FROM assessment_results WHERE run_id = ? ORDER BY recorded_at, result_id",
+        [run_id],
+    )
+    assert [row[0] for row in recorded] == [entry.result_id for entry in resumed.applied_verdicts]
+    assert rows(speaking, "SELECT DISTINCT status FROM assessment_submissions") == [("judged",)]
+    for entry in held:
+        assert outcome_of(speaking, entry.verdict_id) == ("applied", None)
+    assert_clean(speaking)
+
+
+@pytest.mark.parametrize("invalidation", ["altered", "missing", "superseded"])
+def test_a_held_verdict_that_no_longer_holds_is_voided_and_the_resume_succeeds(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch, invalidation: str
+) -> None:
+    from tests.integration.test_client_audio import Crash as CaptureCrash
+    from tests.integration.test_client_audio import crash_at
+
+    run_id, answered = two_submitted(speaking, 311)
+    (good_content, good, _), (bad_content, bad, bad_artifact) = answered
+    if invalidation == "superseded":
+        # The learner answered again and the capture was staged; the run was paused before
+        # it was promoted, and recovery promotes it on the paused run -- superseding the
+        # answer the held verdict judged.
+        with monkeypatch.context() as patched:
+            crash_at(patched, "_promote")
+            with pytest.raises(CaptureCrash):
+                take(speaking, run_id, bad_content, data=spoken_bytes(399))
+    pause(speaking, run_id)
+    kept = verdict(speaking, run_id, good_content, good)
+    stale = verdict(speaking, run_id, bad_content, bad, score=0.5)
+    successor = None
+    if invalidation == "altered":
+        path = recording_path(speaking, bad_artifact)
+        path.write_bytes(path.read_bytes() + b"altered")
+    elif invalidation == "missing":
+        recording_path(speaking, bad_artifact).unlink()
+    else:
+        recovered = recording_service.recover(speaking.paths, clock=speaking.clock)
+        assert len(recovered.registered) == 1
+        successor = rows(
+            speaking,
+            "SELECT superseded_by FROM assessment_submissions WHERE submission_id = ?",
+            [bad],
+        )[0][0]
+        assert successor is not None
+
+    resumed = resume(speaking, run_id)
+
+    assert resumed.status == "in-progress"
+    assert [entry.verdict_id for entry in resumed.applied_verdicts] == [kept.verdict_id]
+    assert [entry.verdict_id for entry in resumed.voided_verdicts] == [stale.verdict_id]
+    void = resumed.voided_verdicts[0]
+    assert void.submission_id == bad and void.content_id == bad_content
+    if invalidation == "superseded":
+        assert void.code == "assessment_submission_superseded"
+        assert str(successor) in void.reason
+        # The successor is waiting for a judge, and judging it works.
+        assert verdict(speaking, run_id, bad_content, str(successor)).verdict_status == "applied"
+    else:
+        assert void.code == f"assessment_audio_{invalidation}"
+        assert submission_state(speaking, bad) == ("withdrawn", void.code)
+    assert outcome_of(speaking, stale.verdict_id) == ("void", void.code)
+    assert_clean(speaking)
+
+
+def test_a_resume_after_a_purge_while_paused_has_nothing_left_to_void(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id, artifact_id = submitted(speaking, 321)
+    pause(speaking, run_id)
+    held = verdict(speaking, run_id, content_id, submission_id)
+
+    purged = artifact_service.purge(speaking.paths, artifact=artifact_id)
+    resumed = resume(speaking, run_id)
+
+    # The purge voided it, and said so; the resume finds nothing held.
+    assert purged.voided_verdicts == (held.verdict_id,)
+    assert any(str(held.verdict_id) in warning for warning in purged.warnings)
+    assert resumed.applied_verdicts == () and resumed.voided_verdicts == ()
+    assert outcome_of(speaking, held.verdict_id) == ("void", withdrawal.PURGED_CODE)
+    assert_clean(speaking)
+
+
+def test_a_crash_during_the_resume_leaves_the_verdict_held_on_a_paused_run(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart with an unapplied verdict resolves to a state `db check` accepts: the
+    resume is one transaction, so a crash inside it leaves the run paused and the verdict
+    held, and resuming again applies it."""
+
+    run_id, content_id, submission_id, _ = submitted(speaking, 331)
+    pause(speaking, run_id)
+    held = verdict(speaking, run_id, content_id, submission_id)
+
+    def die(*_args: Any, **_kwargs: Any) -> Any:
+        raise Crash("write_verdict")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(assessment_service, "write_verdict", die)
+        with pytest.raises(Crash):
+            resume(speaking, run_id)
+
+    assert rows(speaking, "SELECT status FROM assessment_runs WHERE run_id = ?", [run_id]) == [
+        ("paused",)
+    ]
+    assert verdict_rows(speaking, submission_id) == [(held.verdict_id, 0.75, None)]
+    assert_clean(speaking)
+
+    resumed = resume(speaking, run_id)
+
+    assert [entry.verdict_id for entry in resumed.applied_verdicts] == [held.verdict_id]
+    assert_clean(speaking)
+
+
+def test_abandoning_withdraws_what_waits_and_voids_what_is_held(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, answered = two_submitted(speaking, 341)
+    (held_content, held_submission, _), (waiting_content, waiting, _) = answered
+    pause(speaking, run_id)
+    held = verdict(speaking, run_id, held_content, held_submission)
+
+    abandoned = assessment_service.set_status(
+        speaking.paths, status="abandoned", run=run_id, clock=speaking.clock
+    )
+
+    assert abandoned.status == "abandoned"
+    assert {entry.submission_id for entry in abandoned.withdrawn} == {held_submission, waiting}
+    assert {entry.code for entry in abandoned.withdrawn} == {withdrawal.ABANDONED_CODE}
+    by_submission = {entry.submission_id: entry for entry in abandoned.withdrawn}
+    assert by_submission[held_submission].voided_verdicts == (held.verdict_id,)
+    assert by_submission[waiting].voided_verdicts == ()
+    assert [entry.verdict_id for entry in abandoned.voided_verdicts] == [held.verdict_id]
+    assert abandoned.voided_verdicts[0].code == withdrawal.ABANDONED_CODE
+    assert outcome_of(speaking, held.verdict_id) == ("void", withdrawal.ABANDONED_CODE)
+    assert rows(
+        speaking, "SELECT DISTINCT status FROM assessment_run_tasks WHERE run_id = ?", [run_id]
+    ) == [("skipped",)]
+    # A verdict arriving afterwards meets the withdrawal, by its code.
+    late = refusal(verdict, speaking, run_id, waiting_content, waiting)
+    assert late.payload.code == "assessment_submission_withdrawn"
+    assert late.payload.details[0].context["code"] == withdrawal.ABANDONED_CODE
+    audit = rows(
+        speaking,
+        "SELECT after_summary FROM audit_log WHERE command = 'assessment.pause' "
+        "ORDER BY recorded_at DESC LIMIT 1",
+    )
+    assert str(held.verdict_id) in str(audit[0][0])
+    assert_clean(speaking)
+
+
+def test_finalize_refuses_while_judgement_is_outstanding_and_the_flag_it_names_works(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, answered = two_submitted(speaking, 351)
+    (held_content, held_submission, _), (waiting_content, waiting, _) = answered
+    pause(speaking, run_id)
+    held = verdict(speaking, run_id, held_content, held_submission)
+
+    refused = refusal(
+        assessment_service.finalize,
+        speaking.paths,
+        run=run_id,
+        idempotency_key="close-it",
+        clock=speaking.clock,
+    )
+
+    assert refused.payload.code == "assessment_judgement_outstanding"
+    assert "--exclude-outstanding" in refused.payload.message
+    listed = {
+        (detail.field, detail.context.get("submission_id"), detail.context.get("verdict_id"))
+        for detail in refused.payload.details
+    }
+    assert listed == {
+        ("submission", held_submission, None),
+        ("submission", waiting, None),
+        ("verdict", held_submission, held.verdict_id),
+    }
+    # Nothing moved: the run is paused, the verdict held, both answers waiting.
+    assert rows(speaking, "SELECT status FROM assessment_runs WHERE run_id = ?", [run_id]) == [
+        ("paused",)
+    ]
+    assert rows(speaking, "SELECT DISTINCT status FROM assessment_submissions") == [("pending",)]
+    assert_clean(speaking)
+
+    # The same key with the flag is a new request, not the refusal replayed.
+    closed = assessment_service.finalize(
+        speaking.paths,
+        run=run_id,
+        exclude_outstanding=True,
+        idempotency_key="close-it",
+        clock=speaking.clock,
+    )
+
+    assert closed.status == "finalized"
+    assert {entry.submission_id for entry in closed.excluded} == {held_submission, waiting}
+    assert {entry.code for entry in closed.excluded} == {withdrawal.FINALIZED_CODE}
+    assert [entry.verdict_id for entry in closed.voided_verdicts] == [held.verdict_id]
+    assert outcome_of(speaking, held.verdict_id) == ("void", withdrawal.FINALIZED_CODE)
+    assert_clean(speaking)
+
+    # Its retry replays and says the same; the key without the flag is another request.
+    replayed = assessment_service.finalize(
+        speaking.paths,
+        run=run_id,
+        exclude_outstanding=True,
+        idempotency_key="close-it",
+        clock=speaking.clock,
+    )
+    assert replayed.excluded == closed.excluded
+    assert replayed.voided_verdicts == closed.voided_verdicts
+    reused = refusal(
+        assessment_service.finalize,
+        speaking.paths,
+        run=run_id,
+        idempotency_key="close-it",
+        clock=speaking.clock,
+    )
+    assert reused.payload.code == "idempotency_conflict"
+    # A verdict arriving afterwards is refused against the closed run, never applied.
+    late = refusal(verdict, speaking, run_id, waiting_content, waiting)
+    assert late.payload.code == "assessment_submission_withdrawn"
+    assert late.payload.details[0].context["code"] == withdrawal.FINALIZED_CODE
+    assert results(speaking, run_id) == 0
+
+
+def test_a_finalize_with_nothing_outstanding_hashes_as_it_did_before_the_flag(
+    speaking: PolishWorkspace,
+) -> None:
+    from linguawiki import idempotency
+
+    run_id, content_id, submission_id, _ = submitted(speaking, 361)
+    verdict(speaking, run_id, content_id, submission_id)
+
+    closed = assessment_service.finalize(
+        speaking.paths, run=run_id, idempotency_key="old-key", clock=speaking.clock
+    )
+
+    assert closed.excluded == () and closed.voided_verdicts == ()
+    stored = rows(
+        speaking, "SELECT payload_json FROM domain_events WHERE idempotency_key = 'old-key'"
+    )
+    import json
+
+    assert json.loads(stored[0][0])[idempotency.REQUEST_HASH_FIELD] == idempotency.request_hash(
+        operation=assessment_service.FINALIZED_EVENT, run_id=run_id, reason="completed"
+    )
+
+
+def test_the_cli_finalizes_excluding_outstanding_judgement(
+    speaking: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id, _, submission_id, _ = submitted(speaking, 371)
+
+    code, refused = _cli(speaking, capsys, "assessment", "finalize", "--run", run_id)
+    assert code != 0 and refused["error"]["code"] == "assessment_judgement_outstanding"
+
+    code, payload = _cli(
+        speaking, capsys, "assessment", "finalize", "--run", run_id, "--exclude-outstanding"
+    )
+
+    assert code == 0, payload
+    assert [entry["submission_id"] for entry in payload["data"]["excluded"]] == [submission_id]
+
+
+# --- lifecycle -------------------------------------------------------------------------------
+
+
+def test_withdrawing_audio_consent_purges_what_waits_and_voids_what_is_held(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id, artifact_id = submitted(speaking, 381)
+    path = recording_path(speaking, artifact_id)
+    pause(speaking, run_id)
+    held = verdict(speaking, run_id, content_id, submission_id)
+
+    updated = learner_service.update_track(
+        speaking.paths,
+        preferences=learner_service.TrackPreferences(audio_retention_consent=False),
+        clock=speaking.clock,
+    )
+
+    assert updated.preferences["audio_retention_consent"] is False
+    code, reason = rows(
+        speaking,
+        "SELECT withdrawn_code, withdrawn_reason FROM assessment_submissions "
+        "WHERE submission_id = ?",
+        [submission_id],
+    )[0]
+    assert code == withdrawal.PURGED_CODE and withdrawal.CONSENT_WITHDRAWN in str(reason)
+    assert rows(
+        speaking,
+        "SELECT purge_reason, purged_at IS NOT NULL FROM artifacts WHERE artifact_id = ?",
+        [artifact_id],
+    ) == [("learner-request", True)]
+    assert not path.exists()
+    assert outcome_of(speaking, held.verdict_id) == ("void", withdrawal.PURGED_CODE)
+    assert any(
+        submission_id in warning and str(held.verdict_id) in warning for warning in updated.warnings
+    )
+    # The purge and the preference are one audit-logged change.
+    audit = rows(
+        speaking,
+        "SELECT command FROM audit_log WHERE affected_records_json LIKE ? ORDER BY recorded_at",
+        [f"%{artifact_id}%"],
+    )
+    assert [row[0] for row in audit][-1] == "track.update"
+    late = refusal(verdict, speaking, run_id, content_id, submission_id)
+    assert late.payload.code == "assessment_submission_withdrawn"
+    assert late.payload.details[0].context["code"] == withdrawal.PURGED_CODE
+    assert_clean(speaking)
+
+
+def test_a_consent_withdrawal_whose_purge_fails_changes_nothing(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The purge runs in the preference's own transaction: the preference, the tombstone,
+    and the withdrawal land together or not at all."""
+
+    run_id, _, submission_id, _ = submitted(speaking, 391)
+
+    def cannot_delete(*_args: Any, **_kwargs: Any) -> None:
+        raise LinguaWikiError("artifact_file_not_removed", "the disk refused the deletion")
+
+    monkeypatch.setattr(artifact_service, "_remove_file", cannot_delete)
+    failure = refusal(
+        learner_service.update_track,
+        speaking.paths,
+        preferences=learner_service.TrackPreferences(audio_retention_consent=False),
+        clock=speaking.clock,
+    )
+
+    assert failure.payload.code == "artifact_file_not_removed"
+    assert submission_state(speaking, submission_id) == ("pending", None)
+    assert rows(
+        speaking,
+        "SELECT value_json FROM track_preferences WHERE key = 'audio_retention_consent'",
+    ) == [("true",)]
+    assert run_id
+
+
+def test_a_preference_change_that_withdraws_no_consent_settles_nothing(
+    speaking: PolishWorkspace,
+) -> None:
+    _, _, submission_id, _ = submitted(speaking, 395)
+
+    updated = learner_service.update_track(
+        speaking.paths,
+        preferences=learner_service.TrackPreferences(weekly_minutes=90),
+        clock=speaking.clock,
+    )
+
+    assert updated.warnings == ()
+    assert submission_state(speaking, submission_id) == ("pending", None)
+
+
+def test_withdrawing_transcript_consent_withdraws_written_answers_and_clears_their_text(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """Written answers arrive with a later task; the row is inserted directly, shaped as
+    0035 says a text submission is."""
+
+    import hashlib
+
+    from linguawiki.ids import AssessmentId
+
+    learner_service.update_track(
+        polish_workspace.paths,
+        preferences=learner_service.TrackPreferences(transcript_retention_consent=True),
+        clock=polish_workspace.clock,
+    )
+    run_id = assessment_service.start(polish_workspace.paths, clock=polish_workspace.clock).run_id
+    task = serve(polish_workspace, run_id)
+    answer = "synthetic written answer"
+    submission_id, verdict_id = str(AssessmentId.new()), str(AssessmentId.new())
+    with (
+        open_writer(polish_workspace.paths, command="test.seed") as database,
+        database.transaction() as transaction,
+    ):
+        now = transaction.now()
+        transaction.execute(
+            "INSERT INTO assessment_submissions (submission_id, run_id, content_id, kind, "
+            "capture_id, artifact_id, response_visibility, response_text, response_digest, "
+            "status, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'text', 'text-key', NULL, 'full', ?, ?, 'pending', ?, ?)",
+            [
+                submission_id,
+                run_id,
+                task.content_id,
+                answer,
+                hashlib.sha256(answer.encode()).hexdigest(),
+                now,
+                now,
+            ],
+        )
+        transaction.execute(
+            "UPDATE assessment_runs SET status = 'paused' WHERE run_id = ?", [run_id]
+        )
+        transaction.execute(
+            "INSERT INTO assessment_verdicts (verdict_id, submission_id, claim_id, raw_score, "
+            "rubric_json, assessor_kind, assessor, confidence, response_visibility, "
+            "response_excerpt, response_hash, received_at) "
+            "VALUES (?, ?, NULL, 0.5, '{}', 'ai', 'synthetic-ai-judge', 'medium', "
+            "'withheld', NULL, NULL, ?)",
+            [verdict_id, submission_id, now],
+        )
+    # Not checked clean here: until written answers land, `db check` reads every pending
+    # submission as a recording. Withdrawn, it is no longer one it reads.
+
+    updated = learner_service.update_track(
+        polish_workspace.paths,
+        preferences=learner_service.TrackPreferences(transcript_retention_consent=False),
+        clock=polish_workspace.clock,
+    )
+
+    stored = rows(
+        polish_workspace,
+        "SELECT status, withdrawn_code, response_text, response_digest "
+        "FROM assessment_submissions WHERE submission_id = ?",
+        [submission_id],
+    )[0]
+    assert stored[:3] == ("withdrawn", withdrawal.NOT_RETAINED_CODE, None)
+    assert stored[3] == hashlib.sha256(answer.encode()).hexdigest()
+    assert outcome_of(polish_workspace, verdict_id) == ("void", withdrawal.NOT_RETAINED_CODE)
+    assert any(submission_id in warning for warning in updated.warnings)
+    assert rows(
+        polish_workspace,
+        "SELECT status FROM assessment_run_tasks WHERE run_id = ? AND content_id = ?",
+        [run_id, task.content_id],
+    ) == [("skipped",)]
+    assert_clean(polish_workspace)
+
+
+# --- deferred minors -------------------------------------------------------------------------
+
+
+def test_a_settled_verdict_refusal_names_the_held_verdict_it_voided(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id, artifact_id = submitted(speaking, 401)
+    pause(speaking, run_id)
+    held = verdict(speaking, run_id, content_id, submission_id)
+    path = recording_path(speaking, artifact_id)
+    path.write_bytes(path.read_bytes() + b"altered")
+
+    failure = refusal(verdict, speaking, run_id, content_id, submission_id, score=0.25)
+
+    assert failure.payload.code == "assessment_audio_altered"
+    voided = [detail for detail in failure.payload.details if detail.field == "voided"]
+    assert [detail.context for detail in voided] == [
+        {"verdict_id": held.verdict_id, "submission_id": submission_id}
+    ]
+    assert outcome_of(speaking, held.verdict_id) == ("void", "assessment_audio_altered")
+
+
+def test_applying_a_verdict_to_a_submission_no_longer_pending_fails_loudly(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id, _ = submitted(speaking, 411)
+    pause(speaking, run_id)
+    held = verdict(speaking, run_id, content_id, submission_id)
+    assert held.verdict_id is not None
+
+    with open_writer(speaking.paths, command="test.resume", clock=speaking.clock) as database:
+        request = assessment_service.held_verdict_request(database, held.verdict_id)
+        plan = assessment_service.plan_verdict(database, request, root=speaking.root)
+        assert isinstance(plan, assessment_service.VerdictPlan)
+        with (
+            pytest.raises(AssertionError, match="judged 0 pending"),
+            database.transaction() as transaction,
+        ):
+            # The state moves under the plan: something withdrew the submission.
+            withdrawal.withdraw_submission(
+                transaction, submission_id=submission_id, code="test_moved", reason="moved"
+            )
+            assessment_service.write_verdict(transaction, plan)
+
+    assert submission_state(speaking, submission_id) == ("pending", None)
+    assert results(speaking, run_id) == 0

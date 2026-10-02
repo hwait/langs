@@ -807,6 +807,45 @@ def test_the_hold_lapses_when_the_run_closes_unjudged(polish_workspace: PolishWo
     )
     polish_workspace.clock.advance(timedelta(days=3))
 
+    # C6: abandoning the run withdraws the answer itself, so the sweep finds a recording
+    # whose hold has lapsed and nothing left to withdraw.
+    assert rows(polish_workspace, "SELECT status, withdrawn_code FROM assessment_submissions") == [
+        ("withdrawn", "assessment_run_abandoned")
+    ]
+
+    swept = artifact_service.sweep(polish_workspace.paths, clock=polish_workspace.clock)
+
+    assert swept.purged == (waiting,) and swept.withdrawn_submissions == ()
+    assert content_id
+    assert not failed_checks(polish_workspace)
+
+
+def close_without_settling(workspace: PolishWorkspace, run_id: str) -> None:
+    """Abandon a run the way a release before C6 did: its pending answers left pending."""
+
+    with (
+        open_writer(workspace.paths, command="test.legacy") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE assessment_runs SET status = 'abandoned' WHERE run_id = ?", [run_id]
+        )
+
+
+def test_a_run_closed_before_c6_with_an_answer_pending_is_settled_by_the_sweep(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    """A run closed by a release that did not settle its submissions on the way out: the
+    state `db check` names, and that the retention sweep still withdraws."""
+
+    permit_recording(
+        polish_workspace, audio_retention_policy="rolling-days", audio_retention_days=1
+    )
+    run_id, _, waiting = pending_task(polish_workspace, 45)
+    close_without_settling(polish_workspace, run_id)
+    assert set(failed_checks(polish_workspace)) == {"no_pending_submission_on_a_closed_run"}
+    polish_workspace.clock.advance(timedelta(days=3))
+
     swept = artifact_service.sweep(polish_workspace.paths, clock=polish_workspace.clock)
 
     assert swept.purged == (waiting,) and len(swept.withdrawn_submissions) == 1
@@ -814,7 +853,6 @@ def test_the_hold_lapses_when_the_run_closes_unjudged(polish_workspace: PolishWo
     assert rows(polish_workspace, "SELECT status, withdrawn_code FROM assessment_submissions") == [
         ("withdrawn", "assessment_audio_purged")
     ]
-    assert content_id
     assert not failed_checks(polish_workspace)
 
 
@@ -1345,9 +1383,9 @@ def test_a_sweep_whose_purge_fails_leaves_the_submission_pending(
         polish_workspace, audio_retention_policy="rolling-days", audio_retention_days=1
     )
     run_id, _, _ = pending_task(polish_workspace, 83)
-    assessment_service.set_status(
-        polish_workspace.paths, status="abandoned", run=run_id, clock=polish_workspace.clock
-    )
+    # Closed without settling, as a release before C6 left it: since C6 abandoning withdraws
+    # the answer itself, and only such a run still leaves the sweep a submission to settle.
+    close_without_settling(polish_workspace, run_id)
     polish_workspace.clock.advance(timedelta(days=3))
 
     def cannot_delete(*_args: Any, **_kwargs: Any) -> None:

@@ -88,9 +88,8 @@ from linguawiki.services import packs as pack_service
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from linguawiki.services.judging import WithdrawnSubmission
     from linguawiki.services.recordings import JudgeableAudio
-    from linguawiki.services.withdrawal import Settlement, SettlementOutcome
+    from linguawiki.services.withdrawal import Outstanding, Settlement, SettlementOutcome
 
 #: Modalities a workspace can always offer, whatever the learner's equipment.
 BASELINE_MODALITIES = ("text", "writing", "audio")
@@ -156,6 +155,42 @@ class NextTaskReport(ContractModel):
     status: str = "served"
 
 
+class WithdrawnSubmission(ContractModel):
+    """A submission a command withdrew, and why -- with the held verdicts it voided.
+
+    Defined here rather than in `judging`, which imports this module: a run report names
+    the submissions a transition withdrew, and a model a field is typed with has to exist
+    when the field does.
+    """
+
+    submission_id: str
+    content_id: str
+    code: str
+    reason: str
+    voided_verdicts: tuple[str, ...] = ()
+
+
+class AppliedVerdict(ContractModel):
+    """A held verdict a resume revalidated and applied: the result it became."""
+
+    verdict_id: str
+    submission_id: str
+    content_id: str
+    result_id: str
+    score: float
+
+
+class VoidedVerdict(ContractModel):
+    """A verdict that will never be applied, and why -- by the code a skill acts on and
+    in the words a learner is shown."""
+
+    verdict_id: str
+    submission_id: str
+    content_id: str
+    code: str
+    reason: str
+
+
 class AssessmentRunReport(ContractModel):
     run_id: str
     track_id: str
@@ -194,6 +229,16 @@ class AssessmentRunReport(ContractModel):
     #: verdict held when it arrived and applied at resume replays as applied.
     verdict_id: str | None = None
     verdict_status: str | None = None
+    #: What a transition did to the judgements still outstanding when it ran, so nothing
+    #: about the learner's answers changes without the report saying so. A resume applies
+    #: held verdicts that still revalidate (`applied_verdicts`) and voids the rest; abandoning
+    #: withdraws every pending submission (`withdrawn`); finalizing with
+    #: `exclude_outstanding` withdraws them as `excluded`. `voided_verdicts` is every verdict
+    #: the transition voided, whichever of those it came through.
+    applied_verdicts: tuple[AppliedVerdict, ...] = ()
+    voided_verdicts: tuple[VoidedVerdict, ...] = ()
+    withdrawn: tuple[WithdrawnSubmission, ...] = ()
+    excluded: tuple[WithdrawnSubmission, ...] = ()
 
 
 def _grid_json(state: DimensionState) -> str:
@@ -2594,11 +2639,19 @@ def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
         # In the result's transaction: a judged submission without its result, or a result
         # whose submission still waits for a judge, is a state nobody can explain
         # afterwards.
-        database.execute(
+        judged = database.query(
             "UPDATE assessment_submissions SET status = 'judged', updated_at = ? "
-            "WHERE submission_id = ? AND status = 'pending'",
+            "WHERE submission_id = ? AND status = 'pending' RETURNING submission_id",
             [now, plan.submission_id],
         )
+        if len(judged) != 1:
+            # `plan_verdict` established that the submission is pending and live; a plan
+            # that reaches here otherwise was made against a state that moved under it, and
+            # writing the result anyway would judge a submission that is not waiting.
+            raise AssertionError(
+                f"applying a verdict to {plan.submission_id} judged {len(judged)} pending "
+                "submission(s), not one; the plan was made against a state that has moved"
+            )
         database.execute(
             "INSERT INTO assessment_verdict_outcomes (verdict_id, outcome, result_id, code, "
             "reason, decided_at) VALUES (?, 'applied', ?, NULL, NULL, ?)",
@@ -2642,6 +2695,34 @@ def _verdict_report(
     status = VERDICT_HELD if outcome is None else str(outcome[0])
     return report.model_copy(
         update={"held": status == VERDICT_HELD, "verdict_id": verdict_id, "verdict_status": status}
+    )
+
+
+def _naming_voided(failure: LinguaWikiError, settled: SettlementOutcome) -> LinguaWikiError:
+    """The refusal a settlement raises, naming the held verdicts it voided on the way.
+
+    A held verdict is a judge's delivered work; voiding it is part of what the refused call
+    did, and the refusal is the only account the caller gets. Same code and message.
+    """
+
+    if not settled.voided_verdicts:
+        return failure
+    payload = failure.payload
+    return LinguaWikiError(
+        payload.code,
+        payload.message,
+        retryable=payload.retryable,
+        details=(
+            *payload.details,
+            *(
+                ErrorDetail(
+                    field="voided",
+                    reason="a held verdict voided with the submission",
+                    context={"verdict_id": verdict_id, "submission_id": settled.submission_id},
+                )
+                for verdict_id in settled.voided_verdicts
+            ),
+        ),
     )
 
 
@@ -2825,13 +2906,15 @@ def record(
                 # the refusal is raised after it, as C5 did: the judge is told why, and the task
                 # no longer holds its dimension for a verdict that can never land.
                 with database.transaction() as transaction:
-                    settle(transaction, plan)
-                if plan.refusal is not None:
-                    raise plan.refusal
-                raise LinguaWikiError(
-                    plan.code,
-                    plan.reason,
-                    details=(ErrorDetail(field="submission", reason=plan.submission_id),),
+                    settled = settle(transaction, plan)
+                raise _naming_voided(
+                    plan.refusal
+                    or LinguaWikiError(
+                        plan.code,
+                        plan.reason,
+                        details=(ErrorDetail(field="submission", reason=plan.submission_id),),
+                    ),
+                    settled,
                 )
             if plan.action == REPEAT:
                 if idempotency_key is not None:
@@ -3066,7 +3149,22 @@ def set_status(
     command: str = "assessment.pause",
     actor: str = DEFAULT_ACTOR,
 ) -> AssessmentRunReport:
-    """Pause or resume a run so a calibration can span several sittings."""
+    """Pause, resume, or abandon a run, settling the judgements the move reaches.
+
+    - **Resume** applies the verdicts held while the run was paused, oldest first, each
+      revalidated by `plan_verdict` and written by `write_verdict` inside the resume's own
+      transaction -- so each sees what the one before it wrote. A held verdict that no
+      longer revalidates is voided with the refusal's code and message (and its submission
+      settled, when the refusal is a `Settlement`), and the resume still succeeds: the
+      learner asked to carry on, and a judge's stale verdict is no reason to refuse that.
+    - **Abandon** withdraws every pending submission (`assessment_run_abandoned`, task
+      skipped) and voids every held verdict, because nothing on a closed run can be
+      applied, and nothing should go on reading as waiting.
+
+    The report names what was applied, voided, and withdrawn.
+    """
+
+    from linguawiki.services import withdrawal
 
     if status not in ("in-progress", "paused", "abandoned"):
         raise LinguaWikiError(
@@ -3083,7 +3181,19 @@ def set_status(
         def work() -> AssessmentRunReport:
             current = _run_row(database, run_id)
             _assert_transition(run_id, current=str(current[4]), target=status)
+            applied: tuple[AppliedVerdict, ...] = ()
+            voided: tuple[str, ...] = ()
+            withdrawn: tuple[WithdrawnSubmission, ...] = ()
             with database.transaction() as transaction:
+                if status == RUNNING_STATUS and str(current[4]) == "paused":
+                    applied, voided = _apply_held_verdicts(transaction, run_id, root=paths.root)
+                elif status == "abandoned":
+                    withdrawn, voided = withdrawal.withdraw_outstanding(
+                        transaction,
+                        run_id,
+                        code=withdrawal.ABANDONED_CODE,
+                        reason="the run was abandoned before this answer's judgement was applied",
+                    )
                 transaction.execute(
                     "UPDATE assessment_runs SET status = ?, updated_at = ? WHERE run_id = ?",
                     [status, transaction.now(), run_id],
@@ -3094,13 +3204,182 @@ def set_status(
                     correlation_id=EventId.new(),
                     outcome="succeeded",
                     actor=actor,
-                    affected_records_json=json.dumps([run_id]),
+                    affected_records_json=json.dumps(
+                        [
+                            run_id,
+                            *sorted(
+                                {
+                                    *(entry.verdict_id for entry in applied),
+                                    *(entry.result_id for entry in applied),
+                                    *voided,
+                                    *(entry.submission_id for entry in withdrawn),
+                                }
+                            ),
+                        ]
+                    ),
                     before_summary=str(current[4]),
-                    after_summary=status,
+                    after_summary=status
+                    + _settled_summary(
+                        applied=len(applied), voided=voided, withdrawn=len(withdrawn)
+                    ),
                 )
-            return run_report(database, run_id)
+            return run_report(database, run_id).model_copy(
+                update={
+                    "applied_verdicts": applied,
+                    "voided_verdicts": withdrawal.describe_voided(database, voided),
+                    "withdrawn": withdrawn,
+                }
+            )
 
         return _noting_settled(settled, work)
+
+
+def _settled_summary(*, applied: int, voided: Sequence[str], withdrawn: int) -> str:
+    parts = []
+    if applied:
+        parts.append(f"applied {applied} held verdict(s)")
+    if withdrawn:
+        parts.append(f"withdrew {withdrawn} pending submission(s)")
+    if voided:
+        parts.append("voided verdict(s) " + ", ".join(voided))
+    return "" if not parts else "; " + "; ".join(parts)
+
+
+def _apply_held_verdicts(
+    database: Database, run_id: str, *, root: Path
+) -> tuple[tuple[AppliedVerdict, ...], tuple[str, ...]]:
+    """Apply a resuming run's held verdicts, oldest first, in the caller's transaction.
+
+    Each is revalidated *now* -- the plan is the one `record` makes, so a held verdict is
+    held to every rule a fresh one is -- and planned inside the transaction, so it sees
+    what the verdicts before it wrote. One that no longer revalidates is voided with the
+    refusal's own code and message: a superseded submission's names its successor, a
+    purged recording's the purge. A `Settlement` (the recording can no longer be heard)
+    is written as one, withdrawing the submission too. A refusal that leaves the
+    submission pending -- its verdict was wrong, not its answer -- voids only the verdict,
+    and the answer goes back to waiting for a judge.
+
+    Returns what was applied and every verdict voided.
+    """
+
+    from linguawiki.services import withdrawal
+
+    applied: list[AppliedVerdict] = []
+    voided: list[str] = []
+    for verdict_id, submission_id, content_id in withdrawal.outstanding(database, run_id).held:
+        if verdict_id in voided:
+            continue
+        try:
+            plan = plan_verdict(database, held_verdict_request(database, verdict_id), root=root)
+        except LinguaWikiError as failure:
+            voided.extend(
+                withdrawal.void_held_verdicts(
+                    database,
+                    submission_id=submission_id,
+                    code=failure.payload.code,
+                    reason=failure.payload.message,
+                )
+            )
+            continue
+        if not isinstance(plan, VerdictPlan):
+            voided.extend(settle(database, plan).voided_verdicts)
+            continue
+        if plan.action == REPEAT:
+            # The same verdict already stands for this submission: applying this one would
+            # credit one answer twice, and leaving it held would strand it on a running run.
+            voided.extend(
+                withdrawal.void_held_verdicts(
+                    database,
+                    submission_id=submission_id,
+                    code="assessment_verdict_repeat",
+                    reason=f"verdict {plan.verdict_id} already stands for {submission_id} "
+                    "with the same score, so this one adds nothing",
+                )
+            )
+            continue
+        written = write_verdict(database, plan)
+        if written.result_id is None or written.verdict_id is None:
+            raise AssertionError(f"applying held verdict {verdict_id} wrote no result")
+        applied.append(
+            AppliedVerdict(
+                verdict_id=written.verdict_id,
+                submission_id=submission_id,
+                content_id=content_id,
+                result_id=written.result_id,
+                score=written.score,
+            )
+        )
+    return tuple(applied), tuple(voided)
+
+
+def _outstanding_refusal(run_id: str, owed: Outstanding) -> LinguaWikiError:
+    return LinguaWikiError(
+        "assessment_judgement_outstanding",
+        f"run {run_id} still has {len(owed.pending)} answer(s) waiting for a judge and "
+        f"{len(owed.held)} verdict(s) held until it resumes, and finalizing now would close "
+        "it without them; wait for the judge (resume the run, and held verdicts apply), or "
+        "finalize with --exclude-outstanding to withdraw them and close without them",
+        details=(
+            *(
+                ErrorDetail(
+                    field="submission",
+                    reason="waiting for a judge",
+                    context={"submission_id": submission_id, "content_id": content_id},
+                )
+                for submission_id, content_id in owed.pending
+            ),
+            *(
+                ErrorDetail(
+                    field="verdict",
+                    reason="held until the run resumes",
+                    context={
+                        "verdict_id": verdict_id,
+                        "submission_id": submission_id,
+                        "content_id": content_id,
+                    },
+                )
+                for verdict_id, submission_id, content_id in owed.held
+            ),
+        ),
+    )
+
+
+def _closing_report(database: Database, run_id: str) -> AssessmentRunReport:
+    """A finalized run's report, naming what finalizing excluded -- read from the rows, so
+    a replay of the finalize says what the original did."""
+
+    from linguawiki.services import withdrawal
+
+    excluded = [
+        str(submission_id)
+        for (submission_id,) in database.query(
+            "SELECT submission_id FROM assessment_submissions "
+            "WHERE run_id = ? AND status = 'withdrawn' AND withdrawn_code = ? "
+            "ORDER BY created_at, submission_id",
+            [run_id, withdrawal.FINALIZED_CODE],
+        )
+    ]
+    voided = [
+        str(verdict_id)
+        for (verdict_id,) in database.query(
+            "SELECT verdict.verdict_id FROM assessment_verdicts verdict "
+            "JOIN assessment_verdict_outcomes outcome ON outcome.verdict_id = verdict.verdict_id "
+            "JOIN assessment_submissions submission "
+            "  ON submission.submission_id = verdict.submission_id "
+            "WHERE submission.run_id = ? AND outcome.outcome = 'void' AND outcome.code = ? "
+            "ORDER BY verdict.received_at, verdict.verdict_id",
+            [run_id, withdrawal.FINALIZED_CODE],
+        )
+    ]
+    report = run_report(database, run_id)
+    if not excluded and not voided:
+        return report
+    return report.model_copy(
+        update={
+            "excluded": withdrawal.describe_withdrawn(database, excluded, voided),
+            "voided_verdicts": withdrawal.describe_voided(database, voided),
+        }
+    )
 
 
 def finalize(
@@ -3109,12 +3388,23 @@ def finalize(
     run: str | None = None,
     track: str | None = None,
     reason: str = "completed",
+    exclude_outstanding: bool = False,
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.finalize",
     actor: str = DEFAULT_ACTOR,
 ) -> AssessmentRunReport:
-    """Close a run, writing one uncertainty-aware estimate per tested dimension."""
+    """Close a run, writing one uncertainty-aware estimate per tested dimension.
+
+    A run with judgements outstanding -- answers waiting for a judge, verdicts held for a
+    resume -- is refused with `assessment_judgement_outstanding`, listing them, unless
+    `exclude_outstanding` asks to close without them: then they are withdrawn
+    (`assessment_run_finalized`) in the finalize transaction and the report's `excluded`
+    names them. A verdict arriving afterwards meets a closed run, never a retroactive
+    application.
+    """
+
+    from linguawiki.services import withdrawal
 
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
@@ -3132,8 +3422,16 @@ def finalize(
             # meant a key that closed this run for one reason answered 200 when it was reused for
             # another, which is the exact shape of "a guard placed after the path it guards is not
             # a guard". An exact retry still replays; what differs now conflicts.
+            #
+            # `exclude_outstanding` is part of the request, so a retry with it after a refusal
+            # without it is a new request rather than a replay -- the remedy the refusal names
+            # has to work. Only when set, so a keyed finalize from before it existed still
+            # hashes to what it hashed to then.
             closing_fingerprint = idempotency.request_hash(
-                operation=FINALIZED_EVENT, run_id=run_id, reason=reason
+                operation=FINALIZED_EVENT,
+                run_id=run_id,
+                reason=reason,
+                **({"exclude_outstanding": True} if exclude_outstanding else {}),
             )
             if (
                 idempotency.resolve(
@@ -3144,7 +3442,7 @@ def finalize(
                 )
                 is not None
             ):
-                return run_report(database, run_id)
+                return _closing_report(database, run_id)
             if str(row[4]) == "finalized":
                 # The run is already closed, so there is nothing to do -- but the key this call
                 # was made under still has to be reserved. Left unbound, a key that successfully
@@ -3164,8 +3462,11 @@ def finalize(
                             ),
                             idempotency_key=idempotency_key,
                         )
-                return run_report(database, run_id)
+                return _closing_report(database, run_id)
             _assert_transition(run_id, current=str(row[4]), target="finalized")
+            owed = withdrawal.outstanding(database, run_id)
+            if owed and not exclude_outstanding:
+                raise _outstanding_refusal(run_id, owed)
             conditions = json.loads(str(row[6]))
             kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
             record_track = learner_service.track_context(database, str(row[1]))
@@ -3178,6 +3479,12 @@ def finalize(
             )
             with database.transaction() as transaction:
                 now = transaction.now()
+                excluded, voided = withdrawal.withdraw_outstanding(
+                    transaction,
+                    run_id,
+                    code=withdrawal.FINALIZED_CODE,
+                    reason="the run was finalized without waiting for this answer's judgement",
+                )
                 for state in states:
                     closed = (
                         state if state.status != "open" else close_dimension(state, reason=reason)
@@ -3212,8 +3519,14 @@ def finalize(
                     correlation_id=EventId.new(),
                     outcome="succeeded",
                     actor=actor,
-                    affected_records_json=json.dumps([run_id]),
-                    after_summary=f"finalized with reason {reason}",
+                    affected_records_json=json.dumps(
+                        [
+                            run_id,
+                            *sorted({*voided, *(entry.submission_id for entry in excluded)}),
+                        ]
+                    ),
+                    after_summary=f"finalized with reason {reason}"
+                    + _settled_summary(applied=0, voided=voided, withdrawn=len(excluded)),
                 )
                 migration_module.record_domain_event(
                     transaction,
@@ -3224,7 +3537,7 @@ def finalize(
                     payload_json=idempotency.payload(closing_fingerprint, reason=reason),
                     idempotency_key=idempotency_key or f"assessment.finalized:{run_id}",
                 )
-            return run_report(database, run_id)
+            return _closing_report(database, run_id)
 
         return _noting_settled(settled, work)
 
@@ -3982,6 +4295,7 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
 
 
 __all__ = [
+    "AppliedVerdict",
     "AssessmentRunReport",
     "DimensionReport",
     "NextTaskReport",
@@ -3990,6 +4304,8 @@ __all__ = [
     "VerdictPlan",
     "VerdictRequest",
     "VerdictWrite",
+    "VoidedVerdict",
+    "WithdrawnSubmission",
     "finalize",
     "held_verdict_request",
     "next_task",

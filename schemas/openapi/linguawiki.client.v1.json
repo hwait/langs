@@ -1,12 +1,55 @@
 {
   "components": {
     "schemas": {
+      "AppliedVerdict": {
+        "additionalProperties": false,
+        "description": "A held verdict a resume revalidated and applied: the result it became.",
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "result_id": {
+            "title": "Result Id",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "verdict_id": {
+            "title": "Verdict Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict_id",
+          "submission_id",
+          "content_id",
+          "result_id",
+          "score"
+        ],
+        "title": "AppliedVerdict",
+        "type": "object"
+      },
       "AssessmentRunReport": {
         "additionalProperties": false,
         "properties": {
           "algorithm_version": {
             "title": "Algorithm Version",
             "type": "string"
+          },
+          "applied_verdicts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AppliedVerdict"
+            },
+            "title": "Applied Verdicts",
+            "type": "array"
           },
           "available_modalities": {
             "items": {
@@ -35,6 +78,14 @@
               "$ref": "#/components/schemas/DimensionReport"
             },
             "title": "Dimensions",
+            "type": "array"
+          },
+          "excluded": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WithdrawnSubmission"
+            },
+            "title": "Excluded",
             "type": "array"
           },
           "finalized_at": {
@@ -169,12 +220,28 @@
             "default": null,
             "title": "Verdict Status"
           },
+          "voided_verdicts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/VoidedVerdict"
+            },
+            "title": "Voided Verdicts",
+            "type": "array"
+          },
           "warnings": {
             "default": [],
             "items": {
               "type": "string"
             },
             "title": "Warnings",
+            "type": "array"
+          },
+          "withdrawn": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WithdrawnSubmission"
+            },
+            "title": "Withdrawn",
             "type": "array"
           }
         },
@@ -1231,6 +1298,79 @@
         "title": "TaskPresentation",
         "type": "object"
       },
+      "VoidedVerdict": {
+        "additionalProperties": false,
+        "description": "A verdict that will never be applied, and why -- by the code a skill acts on and\nin the words a learner is shown.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "verdict_id": {
+            "title": "Verdict Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict_id",
+          "submission_id",
+          "content_id",
+          "code",
+          "reason"
+        ],
+        "title": "VoidedVerdict",
+        "type": "object"
+      },
+      "WithdrawnSubmission": {
+        "additionalProperties": false,
+        "description": "A submission a command withdrew, and why -- with the held verdicts it voided.\n\nDefined here rather than in `judging`, which imports this module: a run report names\nthe submissions a transition withdrew, and a model a field is typed with has to exist\nwhen the field does.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "voided_verdicts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Voided Verdicts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "submission_id",
+          "content_id",
+          "code",
+          "reason"
+        ],
+        "title": "WithdrawnSubmission",
+        "type": "object"
+      },
       "linguawiki.cli.error.v1": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -2023,6 +2163,9 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "exclude_outstanding": {
+                    "type": "boolean"
+                  },
                   "idempotency_key": {
                     "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
                     "minLength": 1,
