@@ -43,6 +43,7 @@ from linguawiki.services import database as database_service
 from linguawiki.services import errors as error_service
 from linguawiki.services import estimates as estimate_service
 from linguawiki.services import evidence as evidence_service
+from linguawiki.services import judging as judging_service
 from linguawiki.services import knowledge as knowledge_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import onboarding as onboarding_service
@@ -608,6 +609,34 @@ def _assessment_parser(subcommands: Any) -> None:
     pending.add_argument("--run")
     _add_track_selector(pending)
     _add_workspace(pending)
+    # A judge pulls work: each claim is one attempt under a lease, and the connection
+    # closes before the judging starts.
+    claim = actions.add_parser(
+        "claim", help="hand pending recordings to a judge, each under a lease"
+    )
+    claim.add_argument("--run")
+    _add_track_selector(claim)
+    claim.add_argument("--judge", required=True)
+    claim.add_argument(
+        "--lease",
+        type=int,
+        default=judging_service.JUDGING_POLICY.default_lease_seconds,
+        help="seconds the claim is held before another judge may take the submission",
+    )
+    claim.add_argument("--limit", type=int)
+    _add_workspace(claim)
+    release = actions.add_parser(
+        "release", help="end a claim with no verdict: back to the queue, or --terminal"
+    )
+    release.add_argument("--claim", required=True)
+    release.add_argument("--reason", required=True)
+    release.add_argument(
+        "--terminal",
+        action="store_true",
+        help="give up on the submission: withdraw it with --code, skipping its task",
+    )
+    release.add_argument("--code")
+    _add_workspace(release)
     for name, help_text, status in (
         ("pause", "pause a run so it can resume later", "paused"),
         ("resume", "resume a paused run", "in-progress"),
@@ -2243,6 +2272,42 @@ def _pending_lines(report: recording_service.PendingReport) -> str:
     return "\n".join(lines)
 
 
+def _claim_lines(report: judging_service.ClaimReport) -> str:
+    lines = [
+        f"{report.run_id}: {report.judge} claimed {len(report.claimed)} recording(s) for "
+        f"{report.lease_seconds}s; {report.waiting} still waiting"
+    ]
+    for entry in report.claimed:
+        lines.append(
+            f"  claim {entry.claim_id}: {entry.task.content_id} ({entry.task.dimension}) "
+            f"submission {entry.submission.submission_id}, attempt {entry.attempts} of "
+            f"{report.max_attempts}, until {entry.lease_expires_at}: {entry.audio_path}"
+        )
+    for withdrawn in report.withdrawn:
+        lines.append(
+            f"  withdrew {withdrawn.submission_id} ({withdrawn.content_id}): "
+            f"{withdrawn.code}: {withdrawn.reason}"
+        )
+    return "\n".join(lines)
+
+
+def _release_lines(report: judging_service.ReleaseReport) -> str:
+    how = f"terminally ({report.code})" if report.terminal else "back to the queue"
+    lines = [
+        f"claim {report.claim_id} released {how}"
+        + (" (already recorded)" if report.replayed else "")
+        + f"; submission {report.submission_id} is {report.submission_status}, attempt "
+        f"{report.attempts} of {report.max_attempts}"
+        + ("; claimable again" if report.returned_to_queue else "")
+    ]
+    for withdrawn in report.withdrawn:
+        lines.append(
+            f"  withdrew {withdrawn.submission_id} ({withdrawn.content_id}): "
+            f"{withdrawn.code}: {withdrawn.reason}"
+        )
+    return "\n".join(lines)
+
+
 def _assessment_rubric(args: argparse.Namespace) -> Any:
     """The rubric a judge scored against: `--rubric`, or the older `--input`, not both."""
 
@@ -2430,6 +2495,39 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
         _print(
             _envelope(command, waiting, clock, waiting.warnings),
             _pending_lines(waiting),
+            args.format,
+        )
+        return 0
+    elif args.action == "claim":
+        claimed = judging_service.claim(
+            paths,
+            judge=args.judge,
+            run=args.run,
+            track=args.track,
+            lease_seconds=args.lease,
+            limit=args.limit,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, claimed, clock, claimed.warnings),
+            _claim_lines(claimed),
+            args.format,
+        )
+        return 0
+    elif args.action == "release":
+        released = judging_service.release(
+            paths,
+            claim=args.claim,
+            reason=args.reason,
+            terminal=args.terminal,
+            code=args.code,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, released, clock, released.warnings),
+            _release_lines(released),
             args.format,
         )
         return 0

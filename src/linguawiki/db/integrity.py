@@ -1504,6 +1504,27 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "  AND outcome.outcome = 'applied') ORDER BY 1"
         )
     ]
+    # A submission whose every judging attempt ended without a verdict is withdrawn by the
+    # next writer that touches its run. Nothing runs in the background, so a workspace
+    # nobody has touched since says so here -- by the same question the writers ask, so
+    # the two cannot disagree about what "lapsed" means.
+    from linguawiki.services import judging
+
+    lapsed = [
+        f"{entry.submission_id} (run {entry.run_id}, {entry.attempts} attempt(s), none live)"
+        for entry in judging.lapsed_submissions(database, run_id=None)
+    ]
+    checks.append(
+        _named(
+            "lapsed_judging_settled",
+            lapsed,
+            failed="a pending submission has used every judging attempt the policy allows and "
+            "none is still live, so nobody may claim it and it holds its dimension; any "
+            "command that writes to its run withdraws it",
+            ok="no pending submission has run out of judging attempts unsettled",
+            field="submissions",
+        )
+    )
     checks.append(
         _named(
             "judged_submissions_have_an_applied_verdict",
@@ -3302,6 +3323,7 @@ CHECK_REQUIREMENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "assessment_submissions",
             "judging_claims",
+            "judging_releases",
             "assessment_verdicts",
             "assessment_verdict_outcomes",
             "assessment_results",

@@ -1230,6 +1230,17 @@ class PendingJudgement(ContractModel):
     judgeable: bool
     problem_code: str | None = None
     problem: str | None = None
+    #: Claims made for this submission so far: each is one attempt at judging it, and
+    #: `judging.JUDGING_POLICY.max_attempts` is where asking stops.
+    attempts: int = 0
+    #: The judge holding a live lease on it, and when that lease runs out. Both `None` when
+    #: nobody holds one -- never claimed, or the last claim expired, was released, or
+    #: delivered its verdict. Derived from the rows and the clock, never stored.
+    claimed_by: str | None = None
+    lease_expires_at: str | None = None
+    #: A verdict for it is held until the run resumes: it is judged, and waits only to be
+    #: applied, so it is not handed to another judge.
+    verdict_held: bool = False
 
 
 class PendingReport(ContractModel):
@@ -1238,6 +1249,83 @@ class PendingReport(ContractModel):
     recording: RecordingPolicy
     pending: tuple[PendingJudgement, ...] = ()
     warnings: tuple[str, ...] = ()
+
+
+def pending_entries(database: Database, root: Path, run_id: str) -> list[PendingJudgement]:
+    """Every pending submission in a run, with what a judge needs and where its judging
+    stands -- read through whatever connection the caller holds.
+
+    `pending` lists these from a reader; `judging.claim` hands them out from inside its
+    writer, so the two cannot describe one submission differently.
+    """
+
+    from linguawiki.services import judging
+
+    kinds = assessment_service.run_dimension_kinds(database, run_id)
+    states = judging.claim_states(database, run_id)
+    held = judging.held_submissions(database, run_id)
+    entries: list[PendingJudgement] = []
+    for row in database.query(
+        f"SELECT {_SUBMISSION_COLUMNS} FROM assessment_submissions "
+        "WHERE run_id = ? AND status = 'pending' ORDER BY created_at, submission_id",
+        [run_id],
+    ):
+        submission = _submission_from(row)
+        shown = assessment_service.served_task_report(
+            database, run_id, content_id=submission.content_id
+        )
+        task = PendingTask(
+            content_id=shown.content_id,
+            dimension=shown.dimension,
+            dimension_kind=kinds.get(shown.dimension, ""),
+            task_type=shown.task_type,
+            modality=shown.modality,
+            level_code=shown.level_code,
+            prompt=shown.prompt,
+            rubric=shown.rubric,
+            rubric_version=shown.rubric_version,
+        )
+        state = states.get(submission.submission_id, judging.UNCLAIMED)
+        judging_state: dict[str, Any] = {
+            "attempts": state.attempts,
+            "claimed_by": state.claimed_by,
+            "lease_expires_at": None
+            if state.lease_expires_at is None
+            else aware_utc(state.lease_expires_at).isoformat(),
+            "verdict_held": submission.submission_id in held,
+        }
+        try:
+            audio = assert_judgeable(
+                database,
+                root,
+                artifact_id=submission.artifact_id,
+                run_id=run_id,
+                content_id=submission.content_id,
+            )
+        except LinguaWikiError as failure:
+            entries.append(
+                PendingJudgement(
+                    submission=submission,
+                    task=task,
+                    judgeable=False,
+                    problem_code=failure.payload.code,
+                    problem=failure.payload.message,
+                    **judging_state,
+                )
+            )
+            continue
+        entries.append(
+            PendingJudgement(
+                submission=submission,
+                task=task,
+                audio_path=str(audio.path),
+                media_type=audio.media_type,
+                sha256=audio.sha256,
+                judgeable=True,
+                **judging_state,
+            )
+        )
+    return entries
 
 
 def pending(
@@ -1252,6 +1340,11 @@ def pending(
     The judge reads the audio through this contract, never by guessing a path: the path is
     the one `assert_judgeable` proved holds the submitted bytes, and a recording that fails
     the check is listed with its reason rather than handed out.
+
+    A reader, so it never writes: an unjudgeable recording is *listed* with its reason, and
+    a submission whose judging attempts ran out is listed as it stands. Settling either is
+    a writer's job -- `assessment claim` withdraws an unjudgeable one before handing out
+    the rest, and every writer touching the run settles a lapsed one first.
     """
 
     with open_reader(paths, clock=clock or SystemClock()) as database:
@@ -1260,57 +1353,7 @@ def pending(
         run_track = str(
             database.scalar("SELECT track_id FROM assessment_runs WHERE run_id = ?", [run_id])
         )
-        kinds = assessment_service.run_dimension_kinds(database, run_id)
-        entries: list[PendingJudgement] = []
-        for row in database.query(
-            f"SELECT {_SUBMISSION_COLUMNS} FROM assessment_submissions "
-            "WHERE run_id = ? AND status = 'pending' ORDER BY created_at, submission_id",
-            [run_id],
-        ):
-            submission = _submission_from(row)
-            shown = assessment_service.served_task_report(
-                database, run_id, content_id=submission.content_id
-            )
-            task = PendingTask(
-                content_id=shown.content_id,
-                dimension=shown.dimension,
-                dimension_kind=kinds.get(shown.dimension, ""),
-                task_type=shown.task_type,
-                modality=shown.modality,
-                level_code=shown.level_code,
-                prompt=shown.prompt,
-                rubric=shown.rubric,
-                rubric_version=shown.rubric_version,
-            )
-            try:
-                audio = assert_judgeable(
-                    database,
-                    paths.root,
-                    artifact_id=submission.artifact_id,
-                    run_id=run_id,
-                    content_id=submission.content_id,
-                )
-            except LinguaWikiError as failure:
-                entries.append(
-                    PendingJudgement(
-                        submission=submission,
-                        task=task,
-                        judgeable=False,
-                        problem_code=failure.payload.code,
-                        problem=failure.payload.message,
-                    )
-                )
-                continue
-            entries.append(
-                PendingJudgement(
-                    submission=submission,
-                    task=task,
-                    audio_path=str(audio.path),
-                    media_type=audio.media_type,
-                    sha256=audio.sha256,
-                    judgeable=True,
-                )
-            )
+        entries = pending_entries(database, paths.root, run_id)
         warnings = tuple(
             f"{entry.submission.content_id} cannot be judged: {entry.problem}"
             for entry in entries
@@ -1428,6 +1471,7 @@ __all__ = [
     "latest_submission",
     "live_submission",
     "pending",
+    "pending_entries",
     "recording_policy",
     "recover",
     "track_recording_policy",

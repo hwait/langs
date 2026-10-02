@@ -17,10 +17,14 @@ linguawiki assessment next     --workspace <path> [--run <id>] --format json
 linguawiki assessment record   --workspace <path> --content <id> \
   [--response "<what the learner answered>" | --response-file <path>] [--score <0..1>] \
   [--response-visibility withheld|excerpt|full] [--rubric rubric.json] \
-  [--audio-artifact <artifact-id>] \
+  [--audio-artifact <artifact-id>] [--submission <id> --claim <id>] \
   [--assessor-kind deterministic|ai|learner|human] [--assessor <who>] \
-  [--confidence low|medium|high] --format json
+  [--confidence low|medium|high] [--idempotency-key <key>] --format json
 linguawiki assessment pending  --workspace <path> [--run <id>] --format json
+linguawiki assessment claim    --workspace <path> [--run <id>] --judge <your name> \
+  [--lease <seconds, default 600>] [--limit <n>] --format json
+linguawiki assessment release  --workspace <path> --claim <id> --reason <why> \
+  [--terminal --code <code>] --format json
 linguawiki assessment pause    --workspace <path> [--run <id>] --format json
 linguawiki assessment resume   --workspace <path> [--run <id>] --format json
 linguawiki assessment finalize --workspace <path> [--run <id>] [--reason <why>] --format json
@@ -44,32 +48,53 @@ linguawiki assessment report   --workspace <path> [--run <id>] --format json
 `next` and `record` are the only way tasks enter a run: recording a task that was not served
 is refused, and re-recording an answered task is an idempotent no-op, so a retry is safe.
 
-## Recorded answers: pending, listen, record
+## Recorded answers: claim, listen, record
 
 A learner can answer a spoken task in the browser by recording it, where their track has
 both said it can record and agreed to the recording being kept. The page submits the
 recording; nothing scores it until a judge does. You may be that judge.
 
-1. `assessment pending --run <id>` lists every recording waiting for a judge: the served
-   task as it was served (`prompt`, `rubric`, `dimension`), the submission, and
-   `audio_path` -- the recording's path inside the workspace, already checked to be the
-   bytes the learner submitted. **Read the audio only through that path.** Never guess one
-   from a directory listing, and never judge an entry whose `judgeable` is false; its
-   `problem` says why, and that reason is what to report.
+1. `assessment claim --run <id> --judge <your name>` hands you the recordings waiting for a
+   judge, each under a lease (600 seconds unless you ask with `--lease`; `--limit` takes
+   fewer). Each entry is what `pending` lists -- the served task as it was served (`prompt`,
+   `rubric`, `dimension`), the submission, and `audio_path`, the recording's path inside the
+   workspace, already checked to be the bytes the learner submitted -- plus its `claim_id`.
+   **Read the audio only through that path.** Never guess one from a directory listing.
+   The command returns before you judge: you hold nothing open while you listen.
 2. Listen to the recording and score it against the snapshotted rubric.
-3. `assessment record --content <id> --score <0..1> --audio-artifact <artifact-id>
-   --rubric <file> --assessor-kind ai --assessor <your name> --confidence low|medium`.
-   `--audio-artifact` is the `submission.artifact_id` the entry named. An `ai` verdict on
+3. `assessment record --content <id> --submission <submission_id> --claim <claim_id>
+   --idempotency-key <claim_id> --score <0..1> --rubric <file> --assessor-kind ai
+   --assessor <your name> --confidence low|medium`. Use the claim ID as the key, so a
+   retry after a lost response replays rather than scoring twice. An `ai` verdict on
    pronunciation or spoken production **must name its assessor and may not claim more
    than `medium`**: `assessor_required` and `assessor_confidence_ceiling` refuse it, and
-   the rule's version is stored on the result.
+   the rule's version is stored on the result. On a paused run the verdict is *held*
+   (`held: true`) and applied when the run resumes.
+4. If you cannot judge it now (you crashed, timed out, the tool failed), give it back:
+   `assessment release --claim <id> --reason <why>`. If it can never be judged (the
+   recording is silence, or not the task), `--terminal --code <code> --reason <why>`
+   withdraws it and skips its task. Doing nothing is the same as a non-terminal release
+   once the lease runs out. A verdict after the lease ran out still lands if nothing else
+   happened to the submission.
+
+`assessment pending` is the read-only listing of the same entries, with `attempts`,
+`claimed_by`, and `lease_expires_at`; it hands nothing out. Never judge an entry whose
+`judgeable` is false; its `problem` says why, and that reason is what to report -- `claim`
+withdraws such a recording rather than hand it out, and lists it under `withdrawn`.
+
+Each claim is an attempt. After three attempts end with no verdict, the submission is
+withdrawn as `assessment_judging_exhausted`: the learner loses that observation, and the
+dimension serves another task. Relay that; it is not a learner error.
 
 The recording is checked again when your verdict arrives. If it was purged, altered, or is
 no longer kept while you were listening, the verdict is refused by that reason
 (`assessment_audio_purged`, `assessment_audio_altered`, ...), the submission is withdrawn,
-and the task is skipped -- relay that; do not try again with another recording. A verdict
-for a task whose result was invalidated is refused as `assessment_result_invalidated`: a
-fresh measurement belongs to a fresh run.
+and the task is skipped -- relay that; do not try again with another recording. Other
+refusals name what happened instead: `assessment_submission_superseded` (the learner
+answered again; judge the successor it names), `assessment_claim_released` (your claim was
+released; claim again), `assessment_verdict_conflict` (another judge's different verdict
+landed first). A verdict for a task whose result was invalidated is refused as
+`assessment_result_invalidated`: a fresh measurement belongs to a fresh run.
 
 ## Scoring
 
@@ -83,8 +108,8 @@ fresh measurement belongs to a fresh run.
   `--rubric`, and set `--score` to the weighted total. Store the rubric detail, not only the
   total. (`--input` is the older spelling of the same payload; pass one, not both.)
 - Pronunciation tasks: **audio is required**. A correct transcript proves nothing about
-  pronunciation. Judge only from a recording `assessment pending` hands you, and name it
-  with `--audio-artifact`. If there is none, do not score the task — leave the dimension to
+  pronunciation. Judge only from a recording `assessment claim` hands you, and name it
+  with `--submission` and `--claim`. If there is none, do not score the task — leave the dimension to
   stop as under-evidenced, or pause the run until audio is available.
 
 `--score` stays available for the judged types and for a verdict you reached yourself. A

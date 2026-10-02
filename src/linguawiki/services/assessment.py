@@ -602,6 +602,15 @@ def _assert_running(run_id: str, *, status: str, action: str = "serve another ta
     )
 
 
+def _settle_lapsed(database: Database, run_id: str, *, sparing_claim: str | None = None) -> None:
+    """`judging.sweep_lapsed`: what every writer touching a run does before its own work,
+    in a transaction of its own, opened only when something has lapsed."""
+
+    from linguawiki.services import judging
+
+    judging.sweep_lapsed(database, run_id, sparing_claim=sparing_claim)
+
+
 def assert_running(run_id: str, *, status: str, action: str) -> None:
     """Refuse work on a run that is not being worked, by the codes its callers know."""
 
@@ -1047,6 +1056,9 @@ def next_task(
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
         run_id = resolve_run(database, run, track_id=track_id)
+        # Before serving: a submission whose judging attempts all lapsed is holding its
+        # dimension, and settling it is what lets the dimension serve again.
+        _settle_lapsed(database, run_id)
         row = _run_row(database, run_id)
         # Before `_assert_running`, deliberately: a retry of the serve that *closed* the
         # last dimension must replay rather than being told the run is finished, and a
@@ -1928,16 +1940,34 @@ def _named_submission(
         )
     if status == "superseded" or live is None or live.submission_id != submission_id:
         successor = None if row[4] is None else str(row[4])
-        if successor is None and live is not None:
+        if live is None:
+            # Nothing answers the task now: the successor, if one was named, was itself
+            # withdrawn or superseded, and naming it as the thing to judge would send the
+            # judge to a second refusal.
+            replaced = "" if successor is None else f" (replaced by {successor}, which is gone too)"
+            raise LinguaWikiError(
+                "assessment_submission_superseded",
+                f"{submission_id} no longer answers {content_id}{replaced}, and no submission "
+                "answers it now, so there is nothing for this verdict to judge; drop it, and "
+                "`assessment pending` lists what is waiting for a judge",
+                details=(
+                    ErrorDetail(
+                        field="submission",
+                        reason="superseded, and nothing answers the task",
+                        context={} if successor is None else {"successor": successor},
+                    ),
+                ),
+            )
+        if successor is None:
             successor = live.submission_id
         context = {"successor": str(successor)}
-        if live is not None and live.submission_id != successor:
+        if live.submission_id != successor:
             context["live"] = live.submission_id
         raise LinguaWikiError(
             "assessment_submission_superseded",
             f"{submission_id} was replaced by {successor}: the learner answered again, and a "
             f"verdict on the earlier answer judges something no longer submitted; judge "
-            f"{live.submission_id if live is not None else successor} instead",
+            f"{live.submission_id} instead",
             details=(ErrorDetail(field="submission", reason="superseded", context=context),),
         )
     return _NamedSubmission(
@@ -2109,10 +2139,17 @@ def plan_verdict(
     resume itself, which may plan before it flips the run's status.
     """
 
+    from linguawiki.services import judging
     from linguawiki.services.withdrawal import Settlement
 
     run_id, content_id = request.run_id, request.content_id
     row = _run_row(database, run_id)
+    if request.claim_id is not None:
+        # First, before what became of the submission: a terminal release withdrew it, and
+        # "your claim was released" is the account of *this* judge's attempt, where
+        # "the submission was withdrawn" would send it looking for who withdrew it. An
+        # expired lease is no refusal -- it schedules, it does not decide.
+        judging.assert_claim_not_released(database, request.claim_id)
     named = (
         None
         if request.submission_id is None
@@ -2654,6 +2691,11 @@ def record(
         if submission is not None and run is None:
             run = _submission_run(database, submission)
         run_id = resolve_run(database, run, track_id=track_id)
+        # Every writer touching the run settles what has lapsed before its own work. Not the
+        # submission this verdict's own (unreleased) claim was for: an expired lease is
+        # accepted when nothing else has happened, and this call settling it on the way in
+        # would be that something.
+        _settle_lapsed(database, run_id, sparing_claim=claim)
         # The key is checked here -- before the transaction, and before every guard below,
         # including the one that asks whether the run may take further results. A retry is a
         # retry whatever the run has become since: a client whose response was lost and which
@@ -2742,6 +2784,28 @@ def record(
                 details=(ErrorDetail(field="submission", reason=plan.submission_id),),
             )
         if plan.action == REPEAT:
+            if idempotency_key is not None:
+                # The same verdict again under a new key changes nothing about the learner,
+                # but the key has still been spent on it. Left unbound, a retry under it
+                # after the run closed met `_assert_running` instead of replaying, so the
+                # judge was told its delivered verdict was refused. Binding it to the
+                # standing verdict makes its retry replay whatever that verdict has become.
+                with database.transaction() as transaction:
+                    migration_module.record_domain_event(
+                        transaction,
+                        event_type=RECORDED_EVENT,
+                        aggregate_type="assessment_run",
+                        aggregate_id=run_id,
+                        correlation_id=EventId.new(),
+                        payload_json=idempotency.payload(
+                            scoring_fingerprint,
+                            content_id=content_id,
+                            score=plan.score,
+                            repeat=True,
+                            **({} if plan.verdict_id is None else {"verdict_id": plan.verdict_id}),
+                        ),
+                        idempotency_key=idempotency_key,
+                    )
             return _verdict_report(database, run_id, plan.verdict_id, plan.warnings)
         with database.transaction() as transaction:
             written = write_verdict(transaction, plan)
@@ -2954,6 +3018,7 @@ def set_status(
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
         run_id = resolve_run(database, run, track_id=track_id)
+        _settle_lapsed(database, run_id)
         current = _run_row(database, run_id)
         _assert_transition(run_id, current=str(current[4]), target=status)
         with database.transaction() as transaction:
@@ -2991,6 +3056,7 @@ def finalize(
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
         run_id = resolve_run(database, run, track_id=track_id)
+        _settle_lapsed(database, run_id)
         row = _run_row(database, run_id)
         # Before the already-finalized early return, not after it. `finalize` writes the
         # caller's key straight into the same unique index as `record`, so it had the same
