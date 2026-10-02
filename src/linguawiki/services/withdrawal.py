@@ -37,6 +37,8 @@ from linguawiki.services import learners as learner_service
 
 #: The code a submission carries when its recording was purged before a judge heard it.
 PURGED_CODE = "assessment_audio_purged"
+#: The submission a held verdict judged was replaced by a later answer.
+SUPERSEDED_CODE = "assessment_submission_superseded"
 #: The run was abandoned with the submission still waiting for a judge.
 ABANDONED_CODE = "assessment_run_abandoned"
 #: The run was finalized `exclude_outstanding`, with the submission still waiting.
@@ -428,8 +430,23 @@ def withdraw_outstanding(
     ]
     voided = [verdict_id for outcome in outcomes for verdict_id in outcome.voided_verdicts]
     for submission_id in dict.fromkeys(entry[1] for entry in outstanding(database, run_id).held):
+        successor = database.scalar(
+            "SELECT superseded_by FROM assessment_submissions "
+            "WHERE submission_id = ? AND status = 'superseded'",
+            [submission_id],
+        )
+        # A superseded answer's verdict ended with the answer, whatever the run did next:
+        # it is voided as superseded, naming what replaced it, exactly as a resume would.
         voided.extend(
-            void_held_verdicts(database, submission_id=submission_id, code=code, reason=reason)
+            void_held_verdicts(
+                database,
+                submission_id=submission_id,
+                code=code if successor is None else SUPERSEDED_CODE,
+                reason=reason
+                if successor is None
+                else f"{submission_id} was replaced by {successor}: the learner answered "
+                "again, and this verdict judges an answer no longer submitted",
+            )
         )
     withdrawn = describe_withdrawn(
         database, [outcome.submission_id for outcome in outcomes if outcome.withdrawn], voided
@@ -733,6 +750,7 @@ __all__ = [
     "FINALIZED_CODE",
     "NOT_RETAINED_CODE",
     "PURGED_CODE",
+    "SUPERSEDED_CODE",
     "ConsentOutcome",
     "Outstanding",
     "Settlement",

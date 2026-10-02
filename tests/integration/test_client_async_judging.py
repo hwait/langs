@@ -8,6 +8,7 @@ the same commit that received it, and never credited twice however often it is d
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from typing import Any
 
@@ -1596,3 +1597,129 @@ def test_applying_a_verdict_to_a_submission_no_longer_pending_fails_loudly(
 
     assert submission_state(speaking, submission_id) == ("pending", None)
     assert results(speaking, run_id) == 0
+
+
+# --- fix round 1 -----------------------------------------------------------------------------
+
+
+def test_a_held_verdict_applied_after_transcript_consent_was_withdrawn_copies_no_text(
+    speaking: PolishWorkspace,
+) -> None:
+    """Ruling R9: applying a held verdict re-runs retention against the consent in force
+    now. The result is what a verdict arriving now would store; the verdict row keeps what
+    it stored under the consent valid when it arrived."""
+
+    run_id, content_id, submission_id, _ = submitted(speaking, 421)
+    pause(speaking, run_id)
+    words = "the learner said something about the weather"
+    held = assessment_service.record(
+        speaking.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=submission_id,
+        response_excerpt=words,
+        rubric={"accuracy": 0.5, "note": words},
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=speaking.clock,
+    )
+    assert held.held
+    stored = rows(
+        speaking,
+        "SELECT response_visibility, response_excerpt, rubric_json FROM assessment_verdicts "
+        "WHERE verdict_id = ?",
+        [held.verdict_id],
+    )[0]
+    assert stored[0] == "excerpt" and stored[1] == words and words in str(stored[2])
+    # Withdrawn while the run is paused. Written directly: a recording track cannot decline
+    # transcripts through `track update` (audio consent requires it), and declining audio
+    # too would purge the recording and void the verdict instead -- written answers (Task 5)
+    # are where this arises through the command.
+    with (
+        open_writer(speaking.paths, command="test.consent") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE track_preferences SET value_json = 'false' "
+            "WHERE key = 'transcript_retention_consent'"
+        )
+
+    resumed = resume(speaking, run_id)
+
+    assert [entry.verdict_id for entry in resumed.applied_verdicts] == [held.verdict_id]
+    result = rows(
+        speaking,
+        "SELECT response_visibility, response_excerpt, rubric_json FROM assessment_results "
+        "WHERE run_id = ?",
+        [run_id],
+    )
+    assert len(result) == 1
+    visibility, excerpt, rubric_json = result[0]
+    assert visibility == "withheld" and excerpt is None
+    assert words not in str(rubric_json)
+    assert json.loads(str(rubric_json)) == {"accuracy": 0.5, "note": None}
+    # The insert-only verdict row is left as it was stored (the deferred stored-excerpt gap).
+    assert (
+        rows(
+            speaking,
+            "SELECT response_excerpt FROM assessment_verdicts WHERE verdict_id = ?",
+            [held.verdict_id],
+        )[0][0]
+        == words
+    )
+
+
+def test_narrowed_retention_only_ever_narrows() -> None:
+    narrowed = assessment_service._narrowed_retention
+    long = "x" * 500
+    assert narrowed("full", long, preferences={"transcript_retention_consent": True}) == (
+        "full",
+        long,
+    )
+    assert narrowed("full", long, preferences={}) == ("excerpt", long[:240])
+    assert narrowed("excerpt", "kept", preferences={}) == ("excerpt", "kept")
+    assert narrowed("excerpt", "kept", preferences={"transcript_retention_consent": False}) == (
+        "withheld",
+        None,
+    )
+    # Never wider: what was withheld stays withheld under any consent.
+    assert narrowed("withheld", None, preferences={"transcript_retention_consent": True}) == (
+        "withheld",
+        None,
+    )
+
+
+def test_abandoning_voids_a_superseded_answers_held_verdict_naming_its_successor(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.integration.test_client_audio import Crash as CaptureCrash
+    from tests.integration.test_client_audio import crash_at
+
+    run_id, content_id, first, _ = submitted(speaking, 431)
+    with monkeypatch.context() as patched:
+        crash_at(patched, "_promote")
+        with pytest.raises(CaptureCrash):
+            take(speaking, run_id, content_id, data=spoken_bytes(432))
+    pause(speaking, run_id)
+    held = verdict(speaking, run_id, content_id, first)
+    assert len(recording_service.recover(speaking.paths, clock=speaking.clock).registered) == 1
+    successor = str(
+        rows(
+            speaking,
+            "SELECT superseded_by FROM assessment_submissions WHERE submission_id = ?",
+            [first],
+        )[0][0]
+    )
+
+    abandoned = assessment_service.set_status(
+        speaking.paths, status="abandoned", run=run_id, clock=speaking.clock
+    )
+
+    void = {entry.verdict_id: entry for entry in abandoned.voided_verdicts}[held.verdict_id]
+    assert void.code == withdrawal.SUPERSEDED_CODE and successor in void.reason
+    assert [(entry.submission_id, entry.code) for entry in abandoned.withdrawn] == [
+        (successor, withdrawal.ABANDONED_CODE)
+    ]
+    assert outcome_of(speaking, held.verdict_id) == ("void", withdrawal.SUPERSEDED_CODE)
+    assert_clean(speaking)

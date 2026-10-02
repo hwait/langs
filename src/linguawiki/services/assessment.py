@@ -1865,6 +1865,24 @@ def retain_rubric(
     return {str(name): retained(item, str(name)) for name, item in (rubric or {}).items()}
 
 
+def _narrowed_retention(
+    visibility: str, excerpt: str | None, *, preferences: Mapping[str, object]
+) -> tuple[str, str | None]:
+    """A retained response as the track's *current* consent allows it, never wider.
+
+    `evidence.retain_response` applied to what was already retained: declined consent keeps
+    nothing (`withheld`); the default keeps at most a bounded excerpt, so a `full` answer
+    kept under consent since withdrawn is cut back to one; consent keeps what was kept.
+    """
+
+    consent = preferences.get("transcript_retention_consent")
+    if visibility == "withheld" or excerpt is None or consent is False:
+        return "withheld", None
+    if visibility == "full" and consent is not True:
+        return "excerpt", excerpt[: evidence_service.EXCERPT_LIMIT]
+    return visibility, excerpt
+
+
 @dataclass(frozen=True, slots=True)
 class VerdictRequest:
     """One verdict as its caller stated it, with the run already resolved.
@@ -2385,12 +2403,26 @@ def plan_verdict(
             else (None if named is None else named.submission_id),
         )
     if held_row is not None:
-        # Retained when it was received; retention is not run twice on what it already
-        # decided, and the response itself was never stored to run it on.
-        visibility = str(held_row[3])
-        excerpt = None if held_row[4] is None else str(held_row[4])
+        # Retained when it was received, and retained *again* against the consent in force
+        # now: the result this writes is a new copy, and a learner who withdrew transcript
+        # consent while the run was paused must not find their words copied into it. Only
+        # ever narrower -- the response itself was never stored, so nothing can widen --
+        # and the verdict row keeps what it stored under the consent valid then.
+        visibility, excerpt = _narrowed_retention(
+            str(held_row[3]),
+            None if held_row[4] is None else str(held_row[4]),
+            preferences=record_track.preferences,
+        )
         response_hash = None if held_row[5] is None else str(held_row[5])
-        rubric_json = str(held_row[2])
+        rubric_json = json.dumps(
+            retain_rubric(
+                _stored_rubric(held_row[2]),
+                preferences=record_track.preferences,
+                full=visibility == "full",
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     else:
         # The response goes through retention either way. Scoring in the background and
         # discarding the result would make the stored score unexplainable, and a
@@ -3285,18 +3317,15 @@ def _apply_held_verdicts(
             voided.extend(settle(database, plan).voided_verdicts)
             continue
         if plan.action == REPEAT:
-            # The same verdict already stands for this submission: applying this one would
-            # credit one answer twice, and leaving it held would strand it on a running run.
-            voided.extend(
-                withdrawal.void_held_verdicts(
-                    database,
-                    submission_id=submission_id,
-                    code="assessment_verdict_repeat",
-                    reason=f"verdict {plan.verdict_id} already stands for {submission_id} "
-                    "with the same score, so this one adds nothing",
-                )
+            # Unreachable: a held verdict is planned against its own submission, excluding
+            # itself, and a verdict identical to one already standing is never stored -- the
+            # second delivery is a repeat that writes nothing. Two held verdicts for one
+            # submission would need a different score, which is a conflict and was refused
+            # when it arrived. Applying it would credit one answer twice, so fail loudly.
+            raise AssertionError(
+                f"held verdict {verdict_id} plans as a repeat of {plan.verdict_id}; a held "
+                "verdict is never stored beside an identical standing one"
             )
-            continue
         written = write_verdict(database, plan)
         if written.result_id is None or written.verdict_id is None:
             raise AssertionError(f"applying held verdict {verdict_id} wrote no result")
