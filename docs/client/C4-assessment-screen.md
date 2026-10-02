@@ -18,7 +18,7 @@ modalities. Audio *capture* is C5; audio *playback* is here.
 
 ## Shipped — 2026-10-02
 
-Implemented on `c4-assessment-screen`. Release gate `scripts/verify.py`: **2451 passed, 1
+Implemented on `c4-assessment-screen`. Release gate `scripts/verify.py`: **2453 passed, 1
 skipped**, branch coverage 93.52% against a 90% floor, wheel and distribution checks clean.
 
 Where it went differently from the plan, and why:
@@ -44,6 +44,10 @@ Where it went differently from the plan, and why:
   heard task with no recording like a judged one.
 - **A recording is fetched before its play is recorded**, so one that cannot be loaded
   costs nothing; a browser that refuses to start playback is reported.
+- **An unreadable answer is an unknown outcome, not a refusal.** A response cut off after
+  the server committed was read as a refusal, which discarded the pending key, and the
+  next press opened a second run. It is now resent under its key like a dropped
+  connection. Drafts are kept per task, because every redraw rebuilds the answer field.
 - **The scoring condition enters the start request hash only when it is not the
   default**, so a keyed start made before it existed still retries as a retry.
 - **Routing reads the path alone.** A query is validated against the route's published
