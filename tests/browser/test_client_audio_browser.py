@@ -111,3 +111,73 @@ def test_a_spoken_task_is_recorded_by_press_and_shown_as_waiting_for_a_judge(
         assert (speaking.root / str(stored[0][0])).is_file()
     finally:
         context.close()
+
+
+#: Keeps every microphone stream the page opens, so a test can ask whether it was stopped.
+TRACK_STREAMS = """
+window.__streams = [];
+const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+navigator.mediaDevices.getUserMedia = async (constraints) => {
+  const stream = await original(constraints);
+  window.__streams.push(stream);
+  return stream;
+};
+"""
+
+
+def test_pausing_mid_recording_turns_the_microphone_off(
+    browser: Any, served: Any, speaking: PolishWorkspace
+) -> None:
+    context = browser.new_context(viewport={"width": 420, "height": 720})
+    context.grant_permissions(["microphone"])
+    context.add_init_script(TRACK_STREAMS)
+    page = context.new_page()
+    try:
+        page.goto(served.launch_url)
+        page.click("[data-role=record]", timeout=20000)
+        page.wait_for_selector("[data-role=stop]")
+        assert page.evaluate(
+            "window.__streams.flatMap((s) => s.getTracks()).some((t) => t.readyState === 'live')"
+        )
+
+        page.click("text=Pause")
+        page.wait_for_selector("text=This calibration is paused.")
+
+        assert page.evaluate(
+            "window.__streams.flatMap((s) => s.getTracks()).every((t) => t.readyState === 'ended')"
+        )
+        assert _rows(speaking, "SELECT count(*) FROM capture_stagings") == [(0,)]
+    finally:
+        context.close()
+
+
+def test_the_page_does_not_promise_a_deletion_the_sweep_never_makes(
+    browser: Any, polish_workspace: PolishWorkspace
+) -> None:
+    """Under `delete-after-ingestion` a recording made here is not swept, so it is not
+    promised to be."""
+
+    permit_recording(polish_workspace, audio_retention_policy="delete-after-ingestion")
+    run = assessment_service.start(
+        polish_workspace.paths,
+        dimensions=["pronunciation"],
+        modalities=["speech"],
+        scoring="machine+recorded",
+        clock=polish_workspace.clock,
+    )
+    server = server_module.build_server(
+        polish_workspace.paths, clock=polish_workspace.clock, run=run.run_id
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.goto(server.launch_url)
+        note = page.locator("[data-role=retention]")
+        note.wait_for(timeout=20000)
+        assert "kept until you remove it" in note.inner_text()
+    finally:
+        context.close()
+        server.close()
+        thread.join(timeout=5)

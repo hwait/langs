@@ -365,6 +365,21 @@ async function startRecording(task) {
   draw();
 }
 
+// Stop the microphone and throw the take away. Leaving the task view for any reason --
+// pausing, a refusal, the task settling -- must not leave a live microphone behind a screen
+// with no stop button on it.
+function discardRecording() {
+  const active = state.recorder;
+  if (!active) return;
+  state.recorder = null;
+  try {
+    if (active.recorder.state !== "inactive") active.recorder.stop();
+  } catch {
+    /* already stopped */
+  }
+  active.stream.getTracks().forEach((track) => track.stop());
+}
+
 function stopRecording(task) {
   const active = state.recorder;
   if (!active || active.content_id !== task.content_id) return;
@@ -399,6 +414,7 @@ function resumeRun(runId) {
 }
 
 function setRunStatus(status) {
+  discardRecording();
   return act(() => request("POST", `/runs/${state.run}/status`, { status }));
 }
 
@@ -689,13 +705,18 @@ function taskView(screen, task) {
   return h("section", { class: "task", dataset: { content: task.content_id } }, body);
 }
 
-// The track's retention policy, said rather than chosen: the page never overrides it.
+// The track's retention policy as it applies to *this* recording, said rather than chosen:
+// the page never overrides it, and it must not promise a deletion the sweep never does.
+// `delete-after-ingestion` is about recordings a package brought in; a recording made here
+// is not one, so under it this recording is kept until the learner removes it. Under a
+// rolling window, a recording a judge has not heard yet is held until it is heard.
 function retentionNote(policy) {
   if (!policy) return "";
   const kept = {
     keep: "Your recording is kept until you remove it.",
-    "rolling-days": `Your recording is kept for ${policy.retention_days || "a set number of"} day(s), then removed.`,
-    "delete-after-ingestion": "Your recording is kept until it has been marked.",
+    "rolling-days": `Your recording is removed ${policy.retention_days || "a set number of"} day(s) after you make it, though not before a judge has heard it.`,
+    "delete-after-ingestion":
+      "Your recording is kept until you remove it: this track removes imported recordings after they are processed, and a recording made here is not one.",
   }[policy.retention_policy];
   return `${kept || ""} A judge listens to it to mark your answer.`;
 }
@@ -718,6 +739,7 @@ function results(screen) {
 }
 
 async function draw(options = {}) {
+  if (state.stale || !state.run || !state.screen) discardRecording();
   if (state.stale) return drawStale();
   store(RUN_KEY, state.run);
   if (!state.run || !state.screen) return drawPicker();
@@ -739,6 +761,13 @@ async function draw(options = {}) {
   // serve the others.
   const held = new Set(screen.outstanding.map((task) => task.dimension));
   const free = screen.dimensions.some((dimension) => dimension.status === "open" && !held.has(dimension.dimension));
+  // The only screen a live recording may sit behind is the task it is recording.
+  if (
+    state.recorder &&
+    (screen.status !== "in-progress" || !answerable || answerable.content_id !== state.recorder.content_id)
+  ) {
+    discardRecording();
+  }
   if (screen.status === "paused") {
     content = message("This calibration is paused.", button("Resume", () => resumeRun(screen.run_id)));
   } else if (screen.status !== "in-progress") {

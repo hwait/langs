@@ -54,8 +54,11 @@ from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import (
     ALGORITHM_VERSION,
     DEFAULT_SCORING,
+    RECORDED_JUDGED_TASK_TYPES,
+    RECORDED_SCORING,
     REUSE_WINDOW_MONTHS,
     SCORING_POLICY_VERSION,
+    SPOKEN_MODALITY,
     Candidate,
     DimensionState,
     assert_machine_scorable,
@@ -1437,6 +1440,7 @@ def _assert_repeat(
     score: float,
     response_hash: str | None,
     visibility: str,
+    audio_artifact: str | None = None,
 ) -> None:
     """Accept a retry of a recorded result, and refuse a second, different one.
 
@@ -1457,8 +1461,8 @@ def _assert_repeat(
     """
 
     recorded = database.one(
-        "SELECT raw_score, response_hash, response_visibility FROM assessment_results "
-        "WHERE run_id = ? AND content_id = ?",
+        "SELECT raw_score, response_hash, response_visibility, audio_artifact_id "
+        "FROM assessment_results WHERE run_id = ? AND content_id = ?",
         [run_id, content_id],
     )
     if recorded is None:
@@ -1487,6 +1491,18 @@ def _assert_repeat(
                 reason="the recorded result keeps a different amount of the answer, and a "
                 "retry cannot change what was kept",
                 context={"recorded": str(recorded[2]), "offered": visibility},
+            )
+        )
+    # The recording a verdict rests on is part of the observation. A repeat naming another
+    # one -- or none, where one was recorded, or one where none was -- is a different
+    # request, and accepting it would tell the caller its recording was the one judged.
+    recorded_audio = None if recorded[3] is None else str(recorded[3])
+    if recorded_audio != audio_artifact:
+        conflicts.append(
+            ErrorDetail(
+                field="audio_artifact",
+                reason="the recorded result rests on a different recording",
+                context={"recorded": str(recorded_audio), "offered": str(audio_artifact)},
             )
         )
     if conflicts:
@@ -1555,6 +1571,7 @@ def _judged_recording(
     audio_artifact: str | None,
     assessor_kind: str,
     answered: bool,
+    requires_recording: bool = False,
 ) -> JudgeableAudio | None:
     """The submitted recording a verdict rests on, checked now -- or `None` if there is none.
 
@@ -1573,6 +1590,14 @@ def _judged_recording(
         return None
     live = recording_service.live_submission(database, run_id, content_id)
     if live is None and audio_artifact is None:
+        if requires_recording:
+            raise LinguaWikiError(
+                "assessment_recording_required",
+                f"{content_id} is a spoken task in a run opened for recorded judging, and no "
+                "recording of it has been submitted; a verdict is reached from the learner's "
+                "recording, so record it first",
+                details=(ErrorDetail(field="audio_artifact", reason="nothing submitted"),),
+            )
         return None
     if live is not None and audio_artifact is None:
         raise LinguaWikiError(
@@ -1814,6 +1839,14 @@ def record(
             audio_artifact=audio_artifact,
             assessor_kind=assessor_kind,
             answered=str(served[2]) == "answered",
+            # A run opened for recorded judging serves a spoken task *to be recorded*: a
+            # verdict on one with nothing submitted would be a result no purge could ever
+            # reach, standing on audio nobody holds.
+            requires_recording=(
+                _run_scoring(conditions) == RECORDED_SCORING
+                and candidate.modality == SPOKEN_MODALITY
+                and candidate.task_type in RECORDED_JUDGED_TASK_TYPES
+            ),
         )
         # The response goes through retention either way. Scoring in the background and
         # discarding the result would make the stored score unexplainable, and a
@@ -1845,6 +1878,7 @@ def record(
                 score=resolved_score,
                 response_hash=response_hash,
                 visibility=visibility,
+                audio_artifact=audio_artifact,
             )
             return run_report(database, run_id)
         states = {state.dimension: state for state in _dimension_states(database, run_id, kinds)}

@@ -23,8 +23,8 @@ package ingestion. Do not reopen it through the browser.
 
 ## Shipped — 2026-10-02
 
-Implemented on `c5-audio-and-evidence`. Release gate `scripts/verify.py`: **2515 passed, 1
-skipped**, branch coverage 93.37% against a 90% floor, wheel and distribution checks clean.
+Implemented on `c5-audio-and-evidence`. Release gate `scripts/verify.py` after the review round: **2521
+passed, 1 skipped**, branch coverage 93.39% against a 90% floor, wheel and distribution checks clean.
 `linguawiki privacy audit` and `db check` are clean on a scratch workspace driven through a
 crash before promotion, a crash after the move, recovery, a supersession, a duplicate, a
 verdict, and a purge.
@@ -80,6 +80,27 @@ Where it went differently from the plan, and why:
   workspace root; `check_database` is given only a connection.
 - **A browser test records through Chromium's fake microphone**
   (`tests/browser/test_client_audio_browser.py`), beside the HTTP and service tests.
+
+Closed in the review round, each with a test that failed before its fix:
+
+- **Pausing stopped the screen and not the microphone.** The page now stops the recorder
+  and every track whenever it leaves the task being recorded -- pause, a refusal, a settled
+  task, a stale token -- and a browser test asserts the track has `ended`.
+- **Recovery could move a capture over a file it could not identify.** `_move` itself now
+  requires the staged bytes to be contained and to hash to the capture, and the destination
+  to be empty; otherwise the capture is refused as `capture_path_occupied` and the
+  unrelated file is left where it is.
+- **A `machine+recorded` run took a spoken verdict with nothing submitted**, which made a
+  result no purge could reach. It is refused as `assessment_recording_required`.
+- **Recovery reported a capture as refused when its cleanup had failed** and the row was
+  still `staged`, so the server started over it. Recovery re-reads the row and refuses to
+  start with `capture_unresolved`.
+- **A verdict repeat ignored the recording it named.** The stored result's
+  `audio_artifact_id` is part of the repeat comparison, so naming another recording -- or
+  none -- is `assessment_result_conflict`.
+- **The page promised a deletion the sweep never makes.** Under `delete-after-ingestion` a
+  recording made in the page is not swept, and the page now says it is kept until the
+  learner removes it; under a rolling window, that it is not removed before a judge hears it.
 
 Deferred:
 

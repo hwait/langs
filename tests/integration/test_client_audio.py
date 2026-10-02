@@ -1181,3 +1181,85 @@ def test_rubric_and_input_are_one_payload_and_not_two(
     )
 
     assert code != 0 and refusal["error"]["code"] == "invalid_arguments"
+
+
+# --- review findings ---------------------------------------------------------------------
+
+
+def test_recovery_never_moves_a_capture_over_a_file_it_cannot_identify(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash before the move, then something appears at the destination: no overwrite."""
+
+    run_id = start_spoken(speaking, ("pronunciation",))
+    task = serve(speaking, run_id)
+    with monkeypatch.context() as patched:
+        crash_at(patched, "_move")
+        with pytest.raises(Crash):
+            take(speaking, run_id, task.content_id, data=spoken_bytes(70))
+    assert staging_states(speaking) == [("promoting", None)]
+    final = speaking.root / str(rows(speaking, "SELECT final_path FROM capture_stagings")[0][0])
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(b"somebody else's file")
+
+    recovered = recording_service.recover(speaking.paths, clock=speaking.clock)
+
+    assert len(recovered.refused) == 1
+    assert staging_states(speaking) == [("refused", "capture_path_occupied")]
+    assert final.read_bytes() == b"somebody else's file"
+    assert not any(path.startswith("staging/") for path in private_files(speaking.root))
+
+
+def test_a_recovery_whose_cleanup_fails_refuses_to_report_success(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from linguawiki.client import server as server_module
+
+    run_id = start_spoken(speaking, ("pronunciation",))
+    task = serve(speaking, run_id)
+    with monkeypatch.context() as patched:
+        crash_at(patched, "_promote")
+        with pytest.raises(Crash):
+            take(speaking, run_id, task.content_id, data=spoken_bytes(71))
+    assessment_service.set_status(
+        speaking.paths, status="abandoned", run=run_id, clock=speaking.clock
+    )
+
+    def cannot_delete(*_args: Any, **_kwargs: Any) -> Any:
+        raise LinguaWikiError("capture_file_not_removed", "the disk refused the deletion")
+
+    monkeypatch.setattr(recording_service, "_remove_identified", cannot_delete)
+
+    assert refused(recording_service.recover, speaking.paths, clock=speaking.clock) == (
+        "capture_unresolved"
+    )
+    assert staging_states(speaking) == [("staged", None)]
+    assert (
+        refused(server_module.build_server, speaking.paths, clock=speaking.clock)
+        == "capture_unresolved"
+    )
+
+
+def test_a_recorded_scoring_run_takes_no_spoken_verdict_without_a_recording(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id = start_spoken(speaking, ("pronunciation",))
+    task = serve(speaking, run_id)
+
+    assert refused(judge, speaking, run_id, task.content_id, None) == (
+        "assessment_recording_required"
+    )
+    assert rows(speaking, "SELECT count(*) FROM assessment_results") == [(0,)]
+
+
+def test_a_verdict_repeat_naming_another_recording_is_a_conflict(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, content_id, artifact_id = pending_task(speaking, 72)
+    judge(speaking, run_id, content_id, artifact_id)
+
+    judge(speaking, run_id, content_id, artifact_id)  # an exact repeat is a repeat
+    assert refused(judge, speaking, run_id, content_id, "art_nonexistent") == (
+        "assessment_result_conflict"
+    )
+    assert refused(judge, speaking, run_id, content_id, None) == "assessment_result_conflict"

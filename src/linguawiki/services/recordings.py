@@ -697,14 +697,14 @@ def _promote(
                 [transaction.now(), row.capture_id],
             )
         row = _staging(database, row.capture_id) or row
-        _move(root, row)
+        _move(database, root, row)
         return _register_and_bind(paths, database, row, actor=actor, command=command)
     # `promoting`: the crash was after the state change. Where the bytes are says which
     # step it was.
     staged_state, _ = _classify_staged(root, row.staged_path)
     final_state, _ = _classify_final(root, row.final_path)
     if staged_state == artifact_service.PATH_PRESENT:
-        _move(root, row)
+        _move(database, root, row)
         return _register_and_bind(paths, database, row, actor=actor, command=command)
     if final_state == artifact_service.PATH_PRESENT:
         return _register_and_bind(paths, database, row, actor=actor, command=command)
@@ -724,12 +724,49 @@ def _promote(
     )
 
 
-def _move(root: Path, row: _Staging) -> None:
-    """Step (3): one rename on one filesystem, so the bytes are at exactly one path."""
+def _move(database: Database, root: Path, row: _Staging) -> None:
+    """Step (3): one rename on one filesystem, so the bytes are at exactly one path.
 
+    Checked here, at the rename, rather than trusted from whoever called it: recovery reaches
+    this after a crash, when the disk may have changed since the row was written. The staged
+    file has to be contained and hold the captured bytes, and the destination has to be
+    empty -- `os.replace` silently overwrites, and overwriting a file nothing here can
+    identify is the one thing worse than leaving it.
+    """
+
+    staged_state, staged = _classify_staged(root, row.staged_path)
+    if (
+        staged_state != artifact_service.PATH_PRESENT
+        or staged is None
+        or artifact_service.digest_or_none(staged) != row.sha256
+    ):
+        raise _refuse(
+            database,
+            root,
+            row,
+            LinguaWikiError(
+                "capture_hash_mismatch",
+                f"the staged bytes of capture {row.capture_id} are not the bytes that were "
+                f"sent ({staged_state})",
+                details=(ErrorDetail(field="sha256", reason=row.sha256),),
+            ),
+        )
+    final_state, _ = _classify_final(root, row.final_path)
+    if final_state != artifact_service.PATH_ABSENT:
+        raise _refuse(
+            database,
+            root,
+            row,
+            LinguaWikiError(
+                "capture_path_occupied",
+                f"something is already at {row.final_path} ({final_state}), and nothing here "
+                "accounts for it; it was left where it is and the capture was not moved over it",
+                details=(ErrorDetail(field="capture_id", reason=row.capture_id),),
+            ),
+        )
     target = root / row.final_path
     target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(root / row.staged_path, target)
+    os.replace(staged, target)
 
 
 def _register_and_bind(
@@ -908,6 +945,18 @@ def recover(
                     )
                     registered.append(row.capture_id)
                 except LinguaWikiError as failure:
+                    after = _staging(database, row.capture_id)
+                    if after is None or after.state in (STAGED, PROMOTING):
+                        # The refusal did not land -- its cleanup failed and the transaction
+                        # recording it rolled back. Reporting that as a resolved capture
+                        # would let the server start over exactly what recovery exists for.
+                        raise LinguaWikiError(
+                            "capture_unresolved",
+                            f"capture {row.capture_id} could not be resolved: "
+                            f"{failure.payload.message}. The server will not start over it; "
+                            "fix the cause and start it again.",
+                            details=failure.payload.details,
+                        ) from failure
                     refused.append(row.capture_id)
                     findings.append(f"capture {row.capture_id}: {failure.payload.message}")
             findings.extend(unaccounted_staged_files(paths, database))
