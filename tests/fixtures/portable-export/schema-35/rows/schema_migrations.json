@@ -1,246 +1,246 @@
 [
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.722705Z",
+    "applied_at": "2026-10-02T20:02:42.921327Z",
     "checksum": "0298a8fa36fdcad22f4f2bc9cc883748c489a5b5328ce32164494a8c4b78c293",
     "migration_id": "0001_schema_migration_history",
     "version": 1
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.732840Z",
+    "applied_at": "2026-10-02T20:02:42.926651Z",
     "checksum": "908130a370d0e917f19f05548f26a3b1b45f4a66de30fd70f3753980a41a7cb5",
     "migration_id": "0002_workspace_identity",
     "version": 2
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.734816Z",
+    "applied_at": "2026-10-02T20:02:42.928492Z",
     "checksum": "2aa2070ce15ff77c40fd410b4249c99aaf450a210a8f050b982efb3059806f97",
     "migration_id": "0003_users_and_languages",
     "version": 3
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.736259Z",
+    "applied_at": "2026-10-02T20:02:42.929703Z",
     "checksum": "f160260106c8c119a7d69f43c7b0c8bbaa80668c5f34097fff0e54f414755941",
     "migration_id": "0004_tracks_preferences_settings",
     "version": 4
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.737792Z",
+    "applied_at": "2026-10-02T20:02:42.930924Z",
     "checksum": "d7fe609f7764965912eaf2723ea0272d81d0d8d0a9cf3e2fbd9f0988268c1bde",
     "migration_id": "0005_pack_and_framework_registry",
     "version": 5
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.739023Z",
+    "applied_at": "2026-10-02T20:02:42.931886Z",
     "checksum": "2b8cd579b2b1a5487908381940e1ba99c11e853f4f7f98cf64f354bbbd512402",
     "migration_id": "0006_domain_events_and_audit",
     "version": 6
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.740028Z",
+    "applied_at": "2026-10-02T20:02:42.932714Z",
     "checksum": "4db504bdc4fa413ddf520b5471e3bf0932f915d4b92c3776b50e3be0a4d1ee24",
     "migration_id": "0007_projection_and_job_state",
     "version": 7
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.742836Z",
+    "applied_at": "2026-10-02T20:02:42.934824Z",
     "checksum": "62a25ff09337c85c8c91d85d19f6a938fbf5466b38fcb1fd664ed4629e63338f",
     "migration_id": "0008_pack_registry",
     "version": 8
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.745185Z",
+    "applied_at": "2026-10-02T20:02:42.937004Z",
     "checksum": "ded1355a42e60ceaf210018bd76eb30c8eecc6cf89f672442f1fb64f5f9c06b9",
     "migration_id": "0009_content_provenance",
     "version": 9
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.747732Z",
+    "applied_at": "2026-10-02T20:02:42.938910Z",
     "checksum": "c7a6fb0cff29f4ccde3f4e45a5924746765aa583d5d63b72a9f0cf7a27076f50",
     "migration_id": "0010_pack_catalog",
     "version": 10
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.749892Z",
+    "applied_at": "2026-10-02T20:02:42.940695Z",
     "checksum": "f4e22bd7338d06f2abe19ca48ee8759d71cc6446105ce186d8b9d1a288737567",
     "migration_id": "0011_knowledge_graph",
     "version": 11
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.752972Z",
+    "applied_at": "2026-10-02T20:02:42.943192Z",
     "checksum": "9d2eee72e500d3a8d0e1580787ad07b3c5209ac79ab68cb80c06814c916629eb",
     "migration_id": "0012_assessment_bank",
     "version": 12
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.755453Z",
+    "applied_at": "2026-10-02T20:02:42.945121Z",
     "checksum": "809772de20c012de1c3b2a50289fe7567384a4ce2a1456a2fb50ce2ccceaaad5",
     "migration_id": "0013_onboarding_and_resources",
     "version": 13
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.758006Z",
+    "applied_at": "2026-10-02T20:02:42.947241Z",
     "checksum": "04d4f904a05f8c95d1206576a67aad47f98764ed0b9e0dc1f039d042461ab956",
     "migration_id": "0014_curriculum",
     "version": 14
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.759281Z",
+    "applied_at": "2026-10-02T20:02:42.948161Z",
     "checksum": "4b947c4d281c6664b8ee31a2dcbb8bb7beff5933d659125312191f14a0032da0",
     "migration_id": "0015_track_pack_binding",
     "version": 15
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.775086Z",
+    "applied_at": "2026-10-02T20:02:42.954137Z",
     "checksum": "d9c71e75c5ca0943b98097715f29347e3881965a36b15cc8a74bd66baf5fbbac",
     "migration_id": "0016_run_task_facts_and_pack_levels",
     "version": 16
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.776288Z",
+    "applied_at": "2026-10-02T20:02:42.954881Z",
     "checksum": "919c5c1cfcc95dd753ee91a392cd7fd4e9995c9825fc0899ec52aea6ef4f12bf",
     "migration_id": "0017_track_replacement",
     "version": 17
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.777177Z",
+    "applied_at": "2026-10-02T20:02:42.955575Z",
     "checksum": "1c865efe74f7490b4b1eefa4bbd5e0d00d3478b5705c3ff1cc3150ae4d6d88ff",
     "migration_id": "0018_definition_status",
     "version": 18
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.778851Z",
+    "applied_at": "2026-10-02T20:02:42.957068Z",
     "checksum": "f62ce207ee2c9a76b84c880f70497b27086c85922ce6dcf2b54d82b4bb4ef05b",
     "migration_id": "0019_attempts_and_evidence",
     "version": 19
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.780635Z",
+    "applied_at": "2026-10-02T20:02:42.958695Z",
     "checksum": "f46c06b8d9bff30ebcbdff3d69c178ac7fe0ccf56e63294739d2c8f6c2c7df27",
     "migration_id": "0020_error_model",
     "version": 20
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.782733Z",
+    "applied_at": "2026-10-02T20:02:42.960216Z",
     "checksum": "5fd36ffafd9a910cb52d61860b739d4160247a9c54226be38a1e031d69ca6612",
     "migration_id": "0021_mastery_and_estimate_history",
     "version": 21
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.783679Z",
+    "applied_at": "2026-10-02T20:02:42.960926Z",
     "checksum": "aef267ca623346bf4d295767f1acbd70d9e96d8aa166300b9947890c00400e87",
     "migration_id": "0022_served_task_targets",
     "version": 22
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.787168Z",
+    "applied_at": "2026-10-02T20:02:42.964011Z",
     "checksum": "5fdbf71406454777fbfb602576410644d34c117aa1d2dc8d944ebe680b44ad26",
     "migration_id": "0023_session_engine",
     "version": 23
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.790287Z",
+    "applied_at": "2026-10-02T20:02:42.966441Z",
     "checksum": "0b565ca2ea218a66bc9cc73a19c8a33736ca47f42e418e4eb717f8862ee4383d",
     "migration_id": "0024_sources_and_artifacts",
     "version": 24
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.792639Z",
+    "applied_at": "2026-10-02T20:02:42.968286Z",
     "checksum": "4dffbb813c8483c706ba70ef03f5c97b0802104bba6deb294fd54a9b7fb50f42",
     "migration_id": "0025_transcripts_and_acoustics",
     "version": 25
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.795210Z",
+    "applied_at": "2026-10-02T20:02:42.969993Z",
     "checksum": "165a0c4bcc16cc35388dc75808dedd2eb44cf3e675e32d4101a62558677f51ad",
     "migration_id": "0026_source_progress_events",
     "version": 26
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.799280Z",
+    "applied_at": "2026-10-02T20:02:42.972512Z",
     "checksum": "20bb708314871e3ff5d5a4a71f00f7dab45fe4998b42cde937c7b5b75121f867",
     "migration_id": "0027_utterance_identity_and_supersession",
     "version": 27
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.801018Z",
+    "applied_at": "2026-10-02T20:02:42.973890Z",
     "checksum": "070f8d8c98d392f96e45e5bca5d93b1aaa84f7b4c23ea9c19aa541cb303315b0",
     "migration_id": "0028_override_provenance",
     "version": 28
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.801971Z",
+    "applied_at": "2026-10-02T20:02:42.974748Z",
     "checksum": "3b17c2b04fe60b6c277bfc7b0559fb60289fceee1f7ce865dabf8b69ab973137",
     "migration_id": "0029_selected_clips",
     "version": 29
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.803235Z",
+    "applied_at": "2026-10-02T20:02:42.975908Z",
     "checksum": "8e06a6d1e4d4cdae1ffdfc5e8b3605215afacce5b0ca0174a367938229ef43e5",
     "migration_id": "0030_served_answer_key",
     "version": 30
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.804145Z",
+    "applied_at": "2026-10-02T20:02:42.976692Z",
     "checksum": "64face577fd80a2386209711ce1b4d33bdb61eb32651b1a45823275c7656069e",
     "migration_id": "0031_task_presentation",
     "version": 31
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.804821Z",
+    "applied_at": "2026-10-02T20:02:42.977328Z",
     "checksum": "1ed377cf769a74f89ee2382854fccdf2a624dd29b8b7504b200ff8c26fe2305a",
     "migration_id": "0032_served_help_allowance",
     "version": 32
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.805744Z",
+    "applied_at": "2026-10-02T20:02:42.978158Z",
     "checksum": "67728c70b496768adf1794bdd1b42589455c93b231b9e770cbae4691fc2236ef",
     "migration_id": "0033_task_plays",
     "version": 33
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.807791Z",
+    "applied_at": "2026-10-02T20:02:42.979911Z",
     "checksum": "2c981aec53dc734665945fb52f7e2b5fe69278bb8f742b4b0fc8732cbafe8320",
     "migration_id": "0034_recorded_judgement",
     "version": 34
   },
   {
     "application_version": "0.1.0",
-    "applied_at": "2026-10-02T19:26:30.811481Z",
-    "checksum": "0528f2ad5dd8d64baeda3a089bec380749f9cda4b3d929448e2b82695405f9c4",
+    "applied_at": "2026-10-02T20:02:42.983889Z",
+    "checksum": "83fa5c957f1bf6a94c40badfcf618a66655a597463365980b7b79f0ba859dbea",
     "migration_id": "0035_submission_lifecycle",
     "version": 35
   }

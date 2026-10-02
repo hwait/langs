@@ -1368,6 +1368,14 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "  WHEN kind IS NULL OR kind NOT IN ('recording', 'text') "
             "    THEN 'kind ' || coalesce(kind, 'is missing') "
             "  WHEN length(trim(coalesce(capture_id, ''))) = 0 THEN 'no producer identifier' "
+            # 0035 holds these in the one CHECK it also holds the kind rules in, so a
+            # restore that predates the table loses them together; they are re-asserted
+            # together.
+            "  WHEN (status = 'superseded') IS DISTINCT FROM (superseded_by IS NOT NULL) "
+            "    THEN 'superseded exactly when it names a successor, and it does not' "
+            "  WHEN (status = 'withdrawn') IS DISTINCT FROM "
+            "    (withdrawn_code IS NOT NULL AND withdrawn_reason IS NOT NULL) "
+            "    THEN 'withdrawn exactly when it gives a code and a reason, and it does not' "
             "  WHEN kind = 'recording' AND artifact_id IS NULL THEN 'a recording with no artifact' "
             "  WHEN kind = 'text' AND artifact_id IS NOT NULL THEN 'a written answer naming an "
             "artifact' "
@@ -1394,9 +1402,10 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
         _named(
             "submission_kind_shape",
             misshapen,
-            failed="a submission does not have the shape of its kind: a recording names its "
-            "artifact and carries no text, a written answer carries its retained text and none",
-            ok="every submission has the shape of its kind",
+            failed="a submission does not have the shape of its kind or its status: a "
+            "recording names its artifact and carries no text, a written answer carries its "
+            "retained text and none, and a superseded or withdrawn one says why",
+            ok="every submission has the shape of its kind and its status",
             field="submissions",
         )
     )

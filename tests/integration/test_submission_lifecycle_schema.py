@@ -332,6 +332,19 @@ def _text_submission(run_id: str, content_id: str, **overrides: Any) -> tuple[st
         pytest.param({"response_text": "   "}, id="blank-text"),
         pytest.param({"response_visibility": "withheld"}, id="withheld-keeping-text"),
         pytest.param({"kind": "video"}, id="unknown-kind"),
+        pytest.param(
+            {"kind": "recording", "artifact_id": "art_01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+            id="recording-carrying-text",
+        ),
+        pytest.param({"status": "superseded"}, id="superseded-naming-no-successor"),
+        pytest.param(
+            {"withdrawn_code": "assessment_audio_purged", "withdrawn_reason": "purged"},
+            id="pending-with-a-withdrawal",
+        ),
+        pytest.param(
+            {"status": "withdrawn", "withdrawn_code": "assessment_audio_purged"},
+            id="withdrawn-without-a-reason",
+        ),
     ],
 )
 def test_the_rebuilt_table_refuses_a_submission_not_shaped_like_its_kind(
@@ -495,6 +508,8 @@ def _unconstrained_submissions() -> tuple[tuple[str, list[Any]], ...]:
         ("artifact_id = NULL", "a recording with no artifact"),
         ("response_digest = repeat('b', 64)", "a recording carrying text"),
         ("kind = NULL", "kind is missing"),
+        ("superseded_by = submission_id", "superseded exactly when it names a successor"),
+        ("status = 'withdrawn'", "withdrawn exactly when it gives a code and a reason"),
     ],
 )
 def test_submission_kind_shape_fires_on_a_restore_that_predates_the_constraints(
@@ -527,7 +542,11 @@ def test_submission_kind_shape_fires_on_a_written_answer_that_lost_its_text_whil
         speaking,
         *_unconstrained_submissions(),
         (sql, parameters),
-        ("UPDATE assessment_submissions SET status = 'pending' WHERE kind = 'text'", []),
+        (
+            "UPDATE assessment_submissions SET status = 'pending', withdrawn_code = NULL, "
+            "withdrawn_reason = NULL WHERE kind = 'text'",
+            [],
+        ),
     )
 
     assert checks["submission_kind_shape"].status == "failed"

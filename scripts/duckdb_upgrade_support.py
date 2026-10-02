@@ -17,12 +17,13 @@ import argparse
 import hashlib
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from linguawiki.db.backup import registered_tables
 from linguawiki.db.connection import open_reader, open_temporary, open_writer
 from linguawiki.db.schema import TABLE_ORDER
+from linguawiki.ids import AssessmentId
 from linguawiki.paths import workspace_paths
 from linguawiki.services import artifacts as artifact_service
 from linguawiki.services import assessment as assessment_service
@@ -990,6 +991,54 @@ def _spoken_package() -> dict[str, object]:
     }
 
 
+def _judging_rows(paths: object) -> None:
+    """A judge's claim and release, and a served round, on the run `_captured` judged.
+
+    Written directly, as `_job_row` is: the commands that own these tables (`assessment
+    claim`, `release`, and batched serving) arrive later in C6. The rows are the ones those
+    commands write -- a lease the judge gave back before the verdict that judged the
+    submission, and a one-task round naming the task the run served -- so `db check` holds
+    them to the same rules on both versions.
+    """
+
+    with (
+        open_writer(paths, command="seed", clock=Clock()) as database,  # type: ignore[arg-type]
+        database.transaction() as tx,
+    ):
+        now = tx.now()
+        submission_id, run_id = tx.one(
+            "SELECT submission_id, run_id FROM assessment_submissions "
+            "WHERE status = 'judged' ORDER BY submission_id LIMIT 1"
+        )
+        content_id, dimension = tx.one(
+            "SELECT content_id, dimension FROM assessment_run_tasks WHERE run_id = ? "
+            "ORDER BY sequence LIMIT 1",
+            [run_id],
+        )
+        claim_id = str(AssessmentId.new())
+        tx.execute(
+            "INSERT INTO judging_claims (claim_id, submission_id, judge, claimed_at, "
+            "lease_expires_at) VALUES (?, ?, ?, ?, ?)",
+            [claim_id, submission_id, "upgrade-fixture-judge", now, now + timedelta(minutes=10)],
+        )
+        tx.execute(
+            "INSERT INTO judging_releases (claim_id, released_at, terminal, code, reason) "
+            "VALUES (?, ?, FALSE, NULL, ?)",
+            [claim_id, now, "the judge restarted before it listened"],
+        )
+        batch_id = str(AssessmentId.new())
+        tx.execute(
+            "INSERT INTO assessment_batches (batch_id, run_id, idempotency_key, request_hash, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            [batch_id, run_id, "upgrade-fixture-round-1", "d" * 64, now],
+        )
+        tx.execute(
+            "INSERT INTO assessment_batch_tasks (batch_id, position, content_id, dimension) "
+            "VALUES (?, 1, ?, ?)",
+            [batch_id, content_id, dimension],
+        )
+
+
 def _job_row(paths: object) -> None:
     """The one table no Stage 2 workflow writes: local job state."""
 
@@ -1039,6 +1088,7 @@ def seed(root: Path) -> None:
     _spoken(paths, root=root)
     _listening(paths, root=root)
     _captured(paths)
+    _judging_rows(paths)
     _job_row(paths)
 
 

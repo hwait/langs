@@ -2,7 +2,7 @@
   "application_version": "0.1.0",
   "database_schema_version": 35,
   "duckdb_version": "1.5.5",
-  "exported_at": "2026-10-02T19:26:31.375597Z",
+  "exported_at": "2026-10-02T20:02:43.495418Z",
   "migrations": [
     [
       1,
@@ -177,7 +177,7 @@
     [
       35,
       "0035_submission_lifecycle",
-      "0528f2ad5dd8d64baeda3a089bec380749f9cda4b3d929448e2b82695405f9c4"
+      "83fa5c957f1bf6a94c40badfcf618a66655a597463365980b7b79f0ba859dbea"
     ]
   ],
   "schema_name": "linguawiki.portable-export.v1",
@@ -5036,5 +5036,5 @@
       "table": "jobs"
     }
   ],
-  "workspace_id": "wsp_01M3Z1A5WBYTMQKSSE6F5XEH7H"
+  "workspace_id": "wsp_01M3Z3CFCC24CWRXKGJWT9M57B"
 }

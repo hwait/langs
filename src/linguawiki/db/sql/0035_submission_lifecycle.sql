@@ -72,25 +72,37 @@ CREATE TABLE assessment_submissions (
     withdrawn_reason    VARCHAR,
     created_at          TIMESTAMP NOT NULL,
     updated_at          TIMESTAMP NOT NULL,
-    CHECK ((status = 'superseded') = (superseded_by IS NOT NULL)),
-    CHECK ((status = 'withdrawn') = (withdrawn_code IS NOT NULL AND withdrawn_reason IS NOT NULL)),
-    -- A recording is its artifact; a written answer has none.
-    CHECK ((kind = 'recording') = (artifact_id IS NOT NULL)),
-    -- And a recording carries no text: its words, if anybody keeps them, are a transcript.
+    -- Every rule that spans columns is one CHECK, deliberately. DuckDB 1.4.1 -- the
+    -- release the upgrade gate writes with -- fails an UPDATE with "Not all columns
+    -- required for the CHECK constraint are present in the UPDATED chunk" when the update
+    -- touches one multi-column CHECK and not another that shares a column with it: as
+    -- separate CHECKs, `status` = 'judged' touched the text rule (which names `status`)
+    -- and not the artifact rule, and both name `kind`. One CHECK is touched by every
+    -- update that touches any of it. `test_duckdb_update_limits` holds every UPDATE in
+    -- the package to that, and `submission_kind_shape` re-asserts each clause by name.
     CHECK (
-        kind = 'text'
-        OR (response_visibility IS NULL AND response_text IS NULL AND response_digest IS NULL)
-    ),
-    CHECK (
-        kind = 'recording'
-        OR (
-            response_visibility IS NOT NULL
-            AND response_digest IS NOT NULL
-            AND (response_text IS NOT NULL OR status = 'withdrawn')
-        )
-    ),
-    -- `withheld` keeps a digest and nothing else, wherever the text came from.
-    CHECK (response_visibility IS DISTINCT FROM 'withheld' OR response_text IS NULL)
+        -- Superseded exactly when it names a successor; withdrawn exactly when it says
+        -- why, by code and in words.
+        ((status = 'superseded') = (superseded_by IS NOT NULL))
+        AND ((status = 'withdrawn') = (withdrawn_code IS NOT NULL AND withdrawn_reason IS NOT NULL))
+        AND CASE kind
+            -- A recording is its artifact, and carries no text: its words, if anybody
+            -- keeps them, are a transcript.
+            WHEN 'recording' THEN
+                artifact_id IS NOT NULL
+                AND response_visibility IS NULL
+                AND response_text IS NULL
+                AND response_digest IS NULL
+            -- A written answer has no artifact; it has its retained form and digest, and
+            -- its text unless a withdrawal cleared it. `withheld` keeps no text.
+            ELSE
+                artifact_id IS NULL
+                AND response_visibility IS NOT NULL
+                AND response_digest IS NOT NULL
+                AND (response_text IS NOT NULL OR status = 'withdrawn')
+                AND (response_visibility IS DISTINCT FROM 'withheld' OR response_text IS NULL)
+        END
+    )
 );
 
 INSERT INTO assessment_submissions SELECT * FROM assessment_submissions__0035;

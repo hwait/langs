@@ -16,7 +16,10 @@ at the design decision it invalidates rather than at a mystery in a service.
 
 from __future__ import annotations
 
+import itertools
+import re
 from collections.abc import Iterator
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -218,3 +221,75 @@ def test_the_pinned_duckdb_is_the_one_these_facts_were_established_on() -> None:
     assert (int(major), int(minor)) >= (1, 4), (
         f"duckdb {duckdb.__version__} predates the versions these limits were measured on"
     )
+
+
+# --- an UPDATE against overlapping multi-column CHECKs ------------------------------------
+
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "linguawiki"
+_ADJACENT_LITERALS = re.compile(r'"\s*\n(?:\s*#[^\n]*\n)*\s*f?"')
+_UPDATE = re.compile(r"UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE", re.S)
+
+
+def _issued_updates() -> list[tuple[str, str, frozenset[str]]]:
+    """Every `UPDATE <table> SET ... WHERE` the package issues: (file, table, columns set).
+
+    Python's adjacent string literals are joined first, because every statement here is
+    split across lines. A statement whose table is interpolated is not seen, which is why
+    the test below also asserts that it found the statements it is about.
+    """
+
+    found = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        text = _ADJACENT_LITERALS.sub("", path.read_text(encoding="utf-8"))
+        for match in _UPDATE.finditer(text):
+            columns = frozenset(re.findall(r"(\w+)\s*=", match.group(2)))
+            found.append((path.name, match.group(1), columns))
+    return found
+
+
+def test_an_update_touching_one_of_two_overlapping_checks_is_refused_by_duckdb_1_4_1() -> None:
+    """Why `assessment_submissions` holds every cross-column rule in one CHECK.
+
+    DuckDB 1.4.1 -- the release `check_duckdb_upgrade.py` writes learner data with --
+    raises `INTERNAL Error: Not all columns required for the CHECK constraint are present
+    in the UPDATED chunk!` and invalidates the database when an UPDATE touches one
+    multi-column CHECK and not another that shares a column with it. 0035's first draft
+    split the kind rules across four CHECKs; `SET status = 'judged'` touched the one that
+    names `status` and not the one that names `kind` and `artifact_id`, and the gate died
+    at the first judged recording.
+
+    The pinned release does not have the bug, so a behavioural test here would pass on
+    the very schema that broke. This holds the schema and the statements to a rule that
+    excludes it instead: for every UPDATE the package issues, the multi-column CHECKs of
+    its table are either all touched or all untouched wherever two of them share a column.
+    The rule is conservative -- 1.4.1 sometimes tolerates what it forbids, depending on
+    declaration order -- and over 4,000 randomized tables it never let a failure through.
+    """
+
+    from linguawiki.db import migrations as migration_module
+
+    connection = duckdb.connect()
+    try:
+        for migration in migration_module.migrations():
+            connection.execute(migration.sql)
+        checks: dict[str, list[frozenset[str]]] = {}
+        for table, columns in connection.execute(
+            "SELECT table_name, constraint_column_names FROM duckdb_constraints() "
+            "WHERE constraint_type = 'CHECK' ORDER BY table_name, constraint_index"
+        ).fetchall():
+            distinct = frozenset(str(column) for column in columns)
+            if len(distinct) > 1:
+                checks.setdefault(str(table), []).append(distinct)
+    finally:
+        connection.close()
+
+    updates = _issued_updates()
+    assert any(table == "assessment_submissions" for _, table, _ in updates)
+    hazards = [
+        f"{source}: UPDATE {table} SET {sorted(touched)} touches {sorted(first)} "
+        f"and not {sorted(second)}"
+        for source, table, touched in updates
+        for first, second in itertools.permutations(checks.get(table, []), 2)
+        if first & touched and not second & touched and first & second
+    ]
+    assert hazards == []

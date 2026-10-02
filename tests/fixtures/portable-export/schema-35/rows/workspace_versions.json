@@ -1,29 +1,29 @@
 [
   {
-    "applied_at": "2026-10-02T19:26:30.815651Z",
-    "audit_event_id": "evt_01M3Z1A6CYBSYWG4T7CSGSR8K0",
+    "applied_at": "2026-10-02T20:02:42.987164Z",
+    "audit_event_id": "evt_01M3Z3CFN938HZYHPJSS73YZWR",
     "component": "core",
     "component_key": "core",
-    "sha256": "2a29bb6394ea5ba456944b0da87ca76503d2cdff2bbd7ee8314371eb16e84a77",
+    "sha256": "2f6b9a04064e800aed1245d63ace0390056924af8fdb53f7204893b2efda66ac",
     "version": "0.1.0",
-    "workspace_id": "wsp_01M3Z1A5WBYTMQKSSE6F5XEH7H"
+    "workspace_id": "wsp_01M3Z3CFCC24CWRXKGJWT9M57B"
   },
   {
-    "applied_at": "2026-10-02T19:26:30.815651Z",
-    "audit_event_id": "evt_01M3Z1A6CYBSYWG4T7CSGSR8K0",
+    "applied_at": "2026-10-02T20:02:42.987164Z",
+    "audit_event_id": "evt_01M3Z3CFN938HZYHPJSS73YZWR",
     "component": "database_schema",
     "component_key": "database_schema",
-    "sha256": "5f0908bccee21acde58897390e6086c75780d4bbf3ad0d2faf8244f8c58f0b87",
+    "sha256": "1768734f4c5fe761182fc2dbc655a4825df20e969936ad784c27cbd7f8cc122b",
     "version": "35",
-    "workspace_id": "wsp_01M3Z1A5WBYTMQKSSE6F5XEH7H"
+    "workspace_id": "wsp_01M3Z3CFCC24CWRXKGJWT9M57B"
   },
   {
-    "applied_at": "2026-10-02T19:26:30.815651Z",
-    "audit_event_id": "evt_01M3Z1A6CYBSYWG4T7CSGSR8K0",
+    "applied_at": "2026-10-02T20:02:42.987164Z",
+    "audit_event_id": "evt_01M3Z3CFN938HZYHPJSS73YZWR",
     "component": "skill_bundle",
     "component_key": "skill_bundle",
     "sha256": "aa89d9bfbae7a07d2b84baf11d280fcbbeceb355f0eb49859fc7e9a39d7e40b5",
     "version": "0.1.0",
-    "workspace_id": "wsp_01M3Z1A5WBYTMQKSSE6F5XEH7H"
+    "workspace_id": "wsp_01M3Z3CFCC24CWRXKGJWT9M57B"
   }
 ]
