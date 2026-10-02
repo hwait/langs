@@ -1124,11 +1124,19 @@
       },
       "SubmissionReport": {
         "additionalProperties": false,
-        "description": "Which recording answers which served task, and where its judgement stands.",
+        "description": "Which answer -- a recording, or a written answer -- answers which served task, and\nwhere its judgement stands.\n\nNever the learner's words. A written answer's text is handed to the judge by `pending`\nand `claim` and to nobody else; this report reaches the screen, and the read model does\nnot carry what a learner wrote. The digest says which answer it is without saying what\nit says.",
         "properties": {
           "artifact_id": {
-            "title": "Artifact Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
           },
           "capture_id": {
             "title": "Capture Id",
@@ -1141,6 +1149,23 @@
           "created_at": {
             "title": "Created At",
             "type": "string"
+          },
+          "kind": {
+            "default": "recording",
+            "title": "Kind",
+            "type": "string"
+          },
+          "response_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Response Digest"
           },
           "run_id": {
             "title": "Run Id",
@@ -1196,7 +1221,6 @@
           "run_id",
           "content_id",
           "capture_id",
-          "artifact_id",
           "status",
           "created_at"
         ],
@@ -1369,6 +1393,43 @@
           "reason"
         ],
         "title": "WithdrawnSubmission",
+        "type": "object"
+      },
+      "WrittenSubmissionReport": {
+        "additionalProperties": false,
+        "description": "What became of one written answer. Never its text: the caller sent it.",
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "submission": {
+            "$ref": "#/components/schemas/SubmissionReport"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run_id",
+          "content_id",
+          "submission"
+        ],
+        "title": "WrittenSubmissionReport",
         "type": "object"
       },
       "linguawiki.cli.error.v1": {
@@ -1866,7 +1927,8 @@
                     "enum": [
                       "any",
                       "machine",
-                      "machine+recorded"
+                      "machine+recorded",
+                      "machine+judged"
                     ]
                   },
                   "track": {
@@ -3484,6 +3546,193 @@
           }
         },
         "summary": "Record one play of an outstanding task's recording, before it is heard"
+      }
+    },
+    "/runs/{run_id}/tasks/{content_id}/submission": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_submit",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A task this run served, by its content identifier.",
+            "in": "path",
+            "name": "content_id",
+            "required": true,
+            "schema": {
+              "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "response": {
+                    "maxLength": 20000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "submission_key": {
+                    "description": "The page's own identifier for this answer, and the operation's idempotency key: the same key with the same answer replays the first call's result; with a different answer, or another task, it is refused with idempotency_conflict naming the recorded digest.",
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "submission_key",
+                  "response"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/WrittenSubmissionReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Hand in the learner's written answer to an outstanding written task, for a judge"
       }
     }
   },

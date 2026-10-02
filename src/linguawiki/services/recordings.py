@@ -55,7 +55,7 @@ from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.ids import AssessmentId, EventId
 from linguawiki.models import ContractModel
 from linguawiki.paths import WorkspacePaths
-from linguawiki.placement import RECORDED_JUDGED_TASK_TYPES, SPOKEN_MODALITY
+from linguawiki.placement import judged_spoken_task, written_judging_permitted
 from linguawiki.services import artifacts as artifact_service
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import learners as learner_service
@@ -111,13 +111,27 @@ def track_recording_policy(database: Database, track_id: str) -> RecordingPolicy
 
 
 class SubmissionReport(ContractModel):
-    """Which recording answers which served task, and where its judgement stands."""
+    """Which answer -- a recording, or a written answer -- answers which served task, and
+    where its judgement stands.
+
+    Never the learner's words. A written answer's text is handed to the judge by `pending`
+    and `claim` and to nobody else; this report reaches the screen, and the read model does
+    not carry what a learner wrote. The digest says which answer it is without saying what
+    it says.
+    """
 
     submission_id: str
     run_id: str
     content_id: str
+    #: `recording` or `text`.
+    kind: str = "recording"
+    #: The capture's identifier for a recording; the producer's submission key for a
+    #: written answer.
     capture_id: str
-    artifact_id: str
+    #: The recording, for `recording`; `None` for a written answer, which names none.
+    artifact_id: str | None = None
+    #: The sha256 of a written answer's full text, kept even when the text is not.
+    response_digest: str | None = None
     status: str
     superseded_by: str | None = None
     withdrawn_code: str | None = None
@@ -149,6 +163,9 @@ _SUBMISSION_COLUMNS = (
     "submission_id, run_id, content_id, capture_id, artifact_id, status, superseded_by, "
     "withdrawn_code, withdrawn_reason, created_at"
 )
+#: What a reader selects: the columns a recording is inserted with, then the kind and the
+#: digest, which a written answer adds. Never `response_text`.
+_SUBMISSION_READ_COLUMNS = _SUBMISSION_COLUMNS + ", kind, response_digest"
 
 
 def _submission_from(row: tuple[Any, ...]) -> SubmissionReport:
@@ -157,12 +174,14 @@ def _submission_from(row: tuple[Any, ...]) -> SubmissionReport:
         run_id=str(row[1]),
         content_id=str(row[2]),
         capture_id=str(row[3]),
-        artifact_id=str(row[4]),
+        artifact_id=None if row[4] is None else str(row[4]),
         status=str(row[5]),
         superseded_by=None if row[6] is None else str(row[6]),
         withdrawn_code=None if row[7] is None else str(row[7]),
         withdrawn_reason=None if row[8] is None else str(row[8]),
         created_at=aware_utc(row[9]).isoformat(),
+        kind=str(row[10]),
+        response_digest=None if row[11] is None else str(row[11]),
     )
 
 
@@ -170,7 +189,7 @@ def live_submission(database: Database, run_id: str, content_id: str) -> Submiss
     """The submission that answers this served task now: pending or judged, at most one."""
 
     row = database.one(
-        f"SELECT {_SUBMISSION_COLUMNS} FROM assessment_submissions "
+        f"SELECT {_SUBMISSION_READ_COLUMNS} FROM assessment_submissions "
         "WHERE run_id = ? AND content_id = ? AND status IN ('pending', 'judged') "
         "ORDER BY created_at DESC, submission_id DESC LIMIT 1",
         [run_id, content_id],
@@ -182,7 +201,7 @@ def latest_submission(database: Database, run_id: str, content_id: str) -> Submi
     """The most recent submission for a served task, whatever became of it."""
 
     row = database.one(
-        f"SELECT {_SUBMISSION_COLUMNS} FROM assessment_submissions "
+        f"SELECT {_SUBMISSION_READ_COLUMNS} FROM assessment_submissions "
         "WHERE run_id = ? AND content_id = ? AND status <> 'superseded' "
         "ORDER BY created_at DESC, submission_id DESC LIMIT 1",
         [run_id, content_id],
@@ -190,9 +209,23 @@ def latest_submission(database: Database, run_id: str, content_id: str) -> Submi
     return None if row is None else _submission_from(row)
 
 
+def _answer_name(submission: SubmissionReport) -> str:
+    """How a refusal names an answer: by its recording, or as the written answer it is."""
+
+    if submission.kind == "text":
+        return f"written answer {submission.submission_id}"
+    return f"recording {submission.artifact_id}"
+
+
+def submission_by_key(database: Database, capture_id: str) -> SubmissionReport | None:
+    """The submission a producer's identifier -- capture ID or submission key -- made."""
+
+    return _submission_by_capture(database, capture_id)
+
+
 def _submission_by_capture(database: Database, capture_id: str) -> SubmissionReport | None:
     row = database.one(
-        f"SELECT {_SUBMISSION_COLUMNS} FROM assessment_submissions WHERE capture_id = ?",
+        f"SELECT {_SUBMISSION_READ_COLUMNS} FROM assessment_submissions WHERE capture_id = ?",
         [capture_id],
     )
     return None if row is None else _submission_from(row)
@@ -348,8 +381,8 @@ def _preflight(
     if live is not None and live.status == "judged":
         raise LinguaWikiError(
             "assessment_task_already_judged",
-            f"{content_id} was already judged from recording {live.artifact_id}; the "
-            "learner's answer was taken",
+            f"{content_id} was already judged from {_answer_name(live)}; the learner's "
+            "answer was taken",
             details=(ErrorDetail(field="content_id", reason=live.submission_id),),
         )
     shown = assessment_service.served_task_report(database, run_id, content_id=content_id)
@@ -359,7 +392,7 @@ def _preflight(
             f"{content_id} is {shown.status}, so it no longer takes an answer",
             details=(ErrorDetail(field="content_id", reason=f"task is {shown.status}"),),
         )
-    if shown.modality != SPOKEN_MODALITY or shown.task_type not in RECORDED_JUDGED_TASK_TYPES:
+    if not judged_spoken_task(modality=shown.modality, task_type=shown.task_type):
         raise LinguaWikiError(
             "capture_not_spoken",
             f"{content_id} is a {shown.modality} {shown.task_type} task, and a recording "
@@ -842,6 +875,9 @@ def _register_and_bind(
                 "updated_at = ? WHERE submission_id = ?",
                 [submission_id, now, previous.submission_id],
             )
+            # A recording answers only a spoken task, and a written answer only a written
+            # one (`_preflight`), so what a capture supersedes is always a recording.
+            assert previous.artifact_id is not None
             artifact_service.write_purge(
                 transaction,
                 root,
@@ -1134,8 +1170,8 @@ def assert_judgeable(
     if live.artifact_id != artifact_id:
         raise LinguaWikiError(
             "assessment_audio_not_submitted",
-            f"{content_id} is answered by recording {live.artifact_id}, not {artifact_id}; a "
-            "verdict is about the recording the learner submitted",
+            f"{content_id} is answered by {_answer_name(live)}, not {artifact_id}; a "
+            "verdict is about the answer the learner submitted",
             details=(
                 ErrorDetail(
                     field="audio_artifact",
@@ -1188,6 +1224,121 @@ def assert_judgeable(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class JudgeableText:
+    """A written answer proven to be the one a judge may score this task from."""
+
+    submission: SubmissionReport
+    text: str
+    digest: str
+
+
+#: The refusals about the written answer itself rather than about what a caller named.
+#: When one refuses a verdict or a claim, no judge can read the answer whole any more, so
+#: its submission is withdrawn -- with its text cleared, because the reason it cannot be
+#: read is that it may no longer be kept, or that what is kept is not what was written.
+TEXT_FAILURES: frozenset[str] = frozenset(
+    {"assessment_response_not_retained", "assessment_response_altered"}
+)
+
+
+def _text_refusal(code: str, message: str, *, submission_id: str) -> LinguaWikiError:
+    return LinguaWikiError(
+        code, message, details=(ErrorDetail(field="submission", reason=submission_id),)
+    )
+
+
+def assert_text_judgeable(
+    database: Database, *, submission_id: str, run_id: str, content_id: str
+) -> JudgeableText:
+    """Whether a judge may score this served task from this written answer -- the text
+    counterpart of `assert_judgeable`, and like it the one check: `pending` and `claim`
+    run it before handing the text out, `plan_verdict` before a verdict lands, and
+    `db check` over every written answer still waiting.
+
+    - it is a written answer in this run, for this task, and the task's live answer;
+    - its run's track -- resolved through `assessment_runs` -- still satisfies
+      `written_judging_permitted`: consent to keep it whole may have gone since it was
+      handed in, and a judgement of a fragment is not a judgement of the writing;
+    - it still holds its full text, and the text hashes to the digest it arrived with.
+    """
+
+    row = database.one(
+        "SELECT submission.run_id, submission.content_id, submission.kind, "
+        "submission.response_visibility, submission.response_text, submission.response_digest, "
+        "run.track_id FROM assessment_submissions submission "
+        "LEFT JOIN assessment_runs run ON run.run_id = submission.run_id "
+        "WHERE submission.submission_id = ?",
+        [submission_id],
+    )
+    if row is None or str(row[2]) != "text":
+        raise _text_refusal(
+            "assessment_submission_not_found",
+            f"no written answer {submission_id} in this workspace",
+            submission_id=submission_id,
+        )
+    if row[6] is None:
+        raise LinguaWikiError(
+            "assessment_run_not_found",
+            f"no assessment run with ID {row[0]}",
+            details=(ErrorDetail(field="run", reason="unknown run"),),
+        )
+    if (str(row[0]), str(row[1])) != (run_id, content_id):
+        raise _text_refusal(
+            "assessment_submission_mismatch",
+            f"{submission_id} answers {row[1]} in run {row[0]}, not {content_id} in run {run_id}",
+            submission_id=submission_id,
+        )
+    live = live_submission(database, run_id, content_id)
+    if live is None or live.submission_id != submission_id:
+        raise _text_refusal(
+            "assessment_submission_missing",
+            f"{submission_id} is not the answer {content_id} waits on in run {run_id}, so "
+            "there is nothing a judge was asked to read",
+            submission_id=submission_id,
+        )
+    preferences = learner_service.track_context(database, str(row[6])).preferences
+    if not written_judging_permitted(preferences):
+        raise _text_refusal(
+            "assessment_response_not_retained",
+            f"{submission_id} is judged from the whole answer, and its track no longer agrees "
+            "to a written answer being kept whole; a judgement of what may be kept would be "
+            "a judgement of a fragment",
+            submission_id=submission_id,
+        )
+    text, digest = row[4], row[5]
+    if text is None or str(row[3]) != "full":
+        raise _text_refusal(
+            "assessment_response_not_retained",
+            f"{submission_id} no longer holds the whole answer it was handed in with, so "
+            "there is nothing whole to judge",
+            submission_id=submission_id,
+        )
+    if hashlib.sha256(str(text).encode("utf-8")).hexdigest() != str(digest):
+        raise _text_refusal(
+            "assessment_response_altered",
+            f"{submission_id} no longer holds the text it was handed in with; a judgement of "
+            "it would be a judgement of something the learner never wrote",
+            submission_id=submission_id,
+        )
+    return JudgeableText(submission=live, text=str(text), digest=str(digest))
+
+
+def text_judgeable_problem(
+    database: Database, *, submission_id: str, run_id: str, content_id: str
+) -> LinguaWikiError | None:
+    """`assert_text_judgeable` as an answer rather than a refusal, for the readers that
+    report."""
+
+    try:
+        assert_text_judgeable(
+            database, submission_id=submission_id, run_id=run_id, content_id=content_id
+        )
+    except LinguaWikiError as failure:
+        return failure
+    return None
+
+
 def judgeable_problem(
     database: Database, root: Path, *, artifact_id: str, run_id: str, content_id: str
 ) -> LinguaWikiError | None:
@@ -1222,11 +1373,17 @@ class PendingTask(ContractModel):
 class PendingJudgement(ContractModel):
     submission: SubmissionReport
     task: PendingTask
+    #: `recording` or `text`: which of the fields below carry the answer.
+    kind: str = "recording"
     #: The recording's absolute path inside this workspace, resolved with containment.
-    #: `None` when it cannot be judged, with the reason beside it.
+    #: `None` when it cannot be judged, with the reason beside it, and for a written answer.
     audio_path: str | None = None
     media_type: str | None = None
     sha256: str | None = None
+    #: A written answer's whole text, as retained -- `full`, which is the only form a
+    #: written answer is judged from. `None` for a recording, and for a written answer that
+    #: cannot be judged. Only `pending` and `claim` carry it: they are how the judge reads.
+    response_text: str | None = None
     judgeable: bool
     problem_code: str | None = None
     problem: str | None = None
@@ -1266,7 +1423,7 @@ def pending_entries(database: Database, root: Path, run_id: str) -> list[Pending
     held = judging.held_submissions(database, run_id)
     entries: list[PendingJudgement] = []
     for row in database.query(
-        f"SELECT {_SUBMISSION_COLUMNS} FROM assessment_submissions "
+        f"SELECT {_SUBMISSION_READ_COLUMNS} FROM assessment_submissions "
         "WHERE run_id = ? AND status = 'pending' ORDER BY created_at, submission_id",
         [run_id],
     ):
@@ -1295,18 +1452,35 @@ def pending_entries(database: Database, root: Path, run_id: str) -> list[Pending
             "verdict_held": submission.submission_id in held,
         }
         try:
-            audio = assert_judgeable(
-                database,
-                root,
-                artifact_id=submission.artifact_id,
-                run_id=run_id,
-                content_id=submission.content_id,
-            )
+            if submission.kind == "text":
+                written = assert_text_judgeable(
+                    database,
+                    submission_id=submission.submission_id,
+                    run_id=run_id,
+                    content_id=submission.content_id,
+                )
+                answer: dict[str, Any] = {"response_text": written.text}
+            else:
+                # A recording names its artifact; 0035's CHECK and `submission_kind_shape`
+                # hold that, so an absent one is damage `assert_judgeable` names.
+                audio = assert_judgeable(
+                    database,
+                    root,
+                    artifact_id=str(submission.artifact_id),
+                    run_id=run_id,
+                    content_id=submission.content_id,
+                )
+                answer = {
+                    "audio_path": str(audio.path),
+                    "media_type": audio.media_type,
+                    "sha256": audio.sha256,
+                }
         except LinguaWikiError as failure:
             entries.append(
                 PendingJudgement(
                     submission=submission,
                     task=task,
+                    kind=submission.kind,
                     judgeable=False,
                     problem_code=failure.payload.code,
                     problem=failure.payload.message,
@@ -1318,10 +1492,9 @@ def pending_entries(database: Database, root: Path, run_id: str) -> list[Pending
             PendingJudgement(
                 submission=submission,
                 task=task,
-                audio_path=str(audio.path),
-                media_type=audio.media_type,
-                sha256=audio.sha256,
+                kind=submission.kind,
                 judgeable=True,
+                **answer,
                 **judging_state,
             )
         )
@@ -1335,11 +1508,12 @@ def pending(
     track: str | None = None,
     clock: Clock | None = None,
 ) -> PendingReport:
-    """Every recording in a run waiting for a judge, with what the judge needs to hear it.
+    """Every answer in a run waiting for a judge, with what the judge needs to judge it.
 
     The judge reads the audio through this contract, never by guessing a path: the path is
     the one `assert_judgeable` proved holds the submitted bytes, and a recording that fails
-    the check is listed with its reason rather than handed out.
+    the check is listed with its reason rather than handed out. A written answer carries
+    its text, which `assert_text_judgeable` proved is the whole answer, still consented to.
 
     A reader, so it never writes: an unjudgeable recording is *listed* with its reason, and
     a submission whose judging attempts ran out is listed as it stands. Settling either is
@@ -1402,8 +1576,10 @@ def _filesystem_checks(paths: WorkspacePaths, database: Database) -> list[CheckR
     for kind, (run_id, content_id, artifact_id) in [
         ("pending", tuple(entry))
         for entry in database.query(
+            # Recordings only: a written answer names no artifact, and is held to its own
+            # check below rather than read as a recording that has gone missing.
             "SELECT run_id, content_id, artifact_id FROM assessment_submissions "
-            "WHERE status = 'pending' ORDER BY 1, 2"
+            "WHERE status = 'pending' AND kind = 'recording' ORDER BY 1, 2"
         )
     ] + [
         ("judged", tuple(entry))
@@ -1422,6 +1598,21 @@ def _filesystem_checks(paths: WorkspacePaths, database: Database) -> list[CheckR
         if problem is not None:
             unjudgeable.append(
                 f"{kind} {run_id}/{content_id} on {artifact_id}: {problem.payload.code}"
+            )
+    unreadable: list[str] = []
+    for submission_id, run_id, content_id in database.query(
+        "SELECT submission_id, run_id, content_id FROM assessment_submissions "
+        "WHERE status = 'pending' AND kind = 'text' ORDER BY 2, 3, 1"
+    ):
+        problem = text_judgeable_problem(
+            database,
+            submission_id=str(submission_id),
+            run_id=str(run_id),
+            content_id=str(content_id),
+        )
+        if problem is not None:
+            unreadable.append(
+                f"{run_id}/{content_id} written answer {submission_id}: {problem.payload.code}"
             )
     return [
         CheckResult(
@@ -1446,6 +1637,19 @@ def _filesystem_checks(paths: WorkspacePaths, database: Database) -> list[CheckR
             ),
             context={"recordings": "; ".join(unjudgeable[:50])} if unjudgeable else {},
         ),
+        CheckResult(
+            name="pending_written_answers_judgeable",
+            status="failed" if unreadable else "ok",
+            message=(
+                "a written answer waiting for a judge can no longer be judged whole: its "
+                "track stopped agreeing to keep it, or its text is not what was handed in; "
+                "`assessment claim` withdraws it"
+                if unreadable
+                else "every written answer waiting for a judge is whole, unaltered, and "
+                "still consented to"
+            ),
+            context={"submissions": "; ".join(unreadable[:50])} if unreadable else {},
+        ),
     ]
 
 
@@ -1456,8 +1660,10 @@ __all__ = [
     "MAXIMUM_CAPTURE_BYTES",
     "RECORDING_FAILURES",
     "STAGING_DIRECTORY",
+    "TEXT_FAILURES",
     "CaptureReport",
     "JudgeableAudio",
+    "JudgeableText",
     "PendingJudgement",
     "PendingReport",
     "PendingTask",
@@ -1465,6 +1671,7 @@ __all__ = [
     "RecoveryReport",
     "SubmissionReport",
     "assert_judgeable",
+    "assert_text_judgeable",
     "capture",
     "filesystem_checks",
     "judgeable_problem",
@@ -1474,6 +1681,8 @@ __all__ = [
     "pending_entries",
     "recording_policy",
     "recover",
+    "submission_by_key",
+    "text_judgeable_problem",
     "track_recording_policy",
     "unaccounted_staged_files",
 ]

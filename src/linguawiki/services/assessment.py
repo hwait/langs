@@ -54,11 +54,10 @@ from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import (
     ALGORITHM_VERSION,
     DEFAULT_SCORING,
-    RECORDED_JUDGED_TASK_TYPES,
-    RECORDED_SCORING,
+    JUDGED_SCORING,
+    RECORDING_SCORINGS,
     REUSE_WINDOW_MONTHS,
     SCORING_POLICY_VERSION,
-    SPOKEN_MODALITY,
     Candidate,
     DimensionState,
     assert_machine_scorable,
@@ -69,6 +68,8 @@ from linguawiki.placement import (
     credible_interval,
     estimated_level,
     initial_state,
+    judged_spoken_task,
+    judged_written_task,
     posterior_mean,
     posterior_sd,
     record_score,
@@ -78,6 +79,7 @@ from linguawiki.placement import (
     servable_candidate,
     servable_under,
     unavailable_reason,
+    written_judging_permitted,
 )
 from linguawiki.provenance import PROMOTED_LIFECYCLES
 from linguawiki.services import estimates as estimate_service
@@ -88,7 +90,7 @@ from linguawiki.services import packs as pack_service
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from linguawiki.services.recordings import JudgeableAudio
+    from linguawiki.services.recordings import JudgeableAudio, JudgeableText
     from linguawiki.services.withdrawal import Outstanding, Settlement, SettlementOutcome
 
 #: Modalities a workspace can always offer, whatever the learner's equipment.
@@ -951,6 +953,7 @@ def start(
                     scoring=scoring,
                     recorded=recorded,
                     recording=recording_permitted(record.preferences),
+                    writing=written_judging_permitted(record.preferences),
                 )[1]
             if reason is not None:
                 state = close_dimension(state, reason=reason)
@@ -1195,13 +1198,19 @@ def next_task(
                 else _recorded_task_ids(database, pack_row["pack_id"])
             )
             # Read now, not from the run: consent withdrawn after the run opened stops the
-            # next spoken task from being served, whatever the run was opened under.
+            # next spoken or written judged task from being served, whatever the run was
+            # opened under.
             recording = recording_permitted(record.preferences)
+            writing = written_judging_permitted(record.preferences)
             candidates = tuple(
                 candidate
                 for candidate in _candidates(database, pack_row["pack_id"])
                 if servable_candidate(
-                    candidate, scoring=scoring, recorded=recorded, recording=recording
+                    candidate,
+                    scoring=scoring,
+                    recorded=recorded,
+                    recording=recording,
+                    writing=writing,
                 )
             )
             excluded = _excluded_task_ids(
@@ -1722,6 +1731,7 @@ def _judged_recording(
     assessor_kind: str,
     answered: bool,
     requires_recording: bool = False,
+    requires_text: bool = False,
 ) -> JudgeableAudio | Settlement | None:
     """The submitted recording a verdict rests on, checked now -- or `None` if there is none.
 
@@ -1742,7 +1752,31 @@ def _judged_recording(
     if answered:
         return None
     live = recording_service.live_submission(database, run_id, content_id)
+    if live is not None and live.kind == "text":
+        # A written answer is judged through `_judged_text`, which is reached by naming it.
+        # A verdict that named a recording, or nothing, for a task a written answer
+        # answers would otherwise be told about a recording that does not exist.
+        raise LinguaWikiError(
+            "assessment_submission_required",
+            f"{content_id} is answered by written answer {live.submission_id}; a verdict "
+            "names the answer it judged, with --submission",
+            details=(
+                ErrorDetail(
+                    field="submission",
+                    reason="absent",
+                    context={"submission": live.submission_id},
+                ),
+            ),
+        )
     if live is None and audio_artifact is None:
+        if requires_text:
+            raise LinguaWikiError(
+                "assessment_submission_required",
+                f"{content_id} is a written task in a run opened for judged writing, and no "
+                "answer to it has been submitted; a verdict is reached from the learner's "
+                "submitted answer, so submit it first",
+                details=(ErrorDetail(field="submission", reason="nothing submitted"),),
+            )
         if requires_recording:
             raise LinguaWikiError(
                 "assessment_recording_required",
@@ -1790,6 +1824,97 @@ def _judged_recording(
                 code=failure.payload.code,
                 reason=failure.payload.message,
                 refusal=failure,
+            )
+        raise
+
+
+def _judged_text(
+    database: Database,
+    named: _NamedSubmission,
+    *,
+    run_id: str,
+    content_id: str,
+    request: VerdictRequest,
+    answered: bool,
+) -> JudgeableText | Settlement | None:
+    """The written answer a verdict rests on, checked now -- or `None` once the task is
+    answered and the verdict can only be a repeat.
+
+    The text counterpart of `_judged_recording`. `recordings.assert_text_judgeable` is the
+    check -- the answer is the live one, its track still keeps a written answer whole, and
+    its text is what was handed in -- run again inside this writer, as `pending` ran it
+    before handing the text out. Eligibility is revalidated *here*, at application, because
+    consent can go between the claim and the verdict. When it fails because of the answer
+    itself, the outcome is a `Settlement`: withdrawn, its text cleared where it may no
+    longer be kept, and the failure raised once that has committed.
+
+    The judge supplies the score and nothing else about the answer: its words are the
+    submission's, so a response the verdict brings must be that answer, and an excerpt of
+    the caller's own choosing is refused rather than stored beside the real one.
+    """
+
+    from linguawiki.services import recordings as recording_service
+    from linguawiki.services.withdrawal import NOT_RETAINED_CODE, Settlement
+
+    if request.audio_artifact is not None:
+        raise LinguaWikiError(
+            "assessment_audio_not_submitted",
+            f"{named.submission_id} is a written answer, and a verdict on it is reached by "
+            f"reading it, not from recording {request.audio_artifact}",
+            details=(ErrorDetail(field="audio_artifact", reason="a written answer"),),
+        )
+    if request.response_excerpt is not None:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            f"{named.submission_id} is a written answer, so what is kept of it is decided "
+            "from the answer itself; a verdict does not bring an excerpt of its own",
+            details=(ErrorDetail(field="response_excerpt", reason="a written answer"),),
+        )
+    if request.applying is None:
+        if request.score is None:
+            raise LinguaWikiError(
+                "assessment_score_required",
+                f"{named.submission_id} is a written answer a judge scores against the "
+                "rubric; the verdict supplies the score it reached",
+                details=(ErrorDetail(field="score", reason="a judged written answer"),),
+            )
+        if request.assessor_kind not in evidence_policy.JUDGING_ASSESSORS:
+            raise LinguaWikiError(
+                "assessment_judge_required",
+                f"a written answer is judged by an ai or human assessor, not a "
+                f"{request.assessor_kind} one",
+                details=(ErrorDetail(field="assessor_kind", reason=request.assessor_kind),),
+            )
+        if request.response is not None and (
+            hashlib.sha256(request.response.encode("utf-8")).hexdigest() != named.response_digest
+        ):
+            raise LinguaWikiError(
+                "assessment_response_not_submitted",
+                f"the response this verdict brings is not {named.submission_id}'s answer; a "
+                "verdict is about the answer the learner handed in, so leave the response "
+                "out and the submission supplies it",
+                details=(
+                    ErrorDetail(
+                        field="response",
+                        reason="not the submitted answer",
+                        context={"recorded": str(named.response_digest)},
+                    ),
+                ),
+            )
+    if answered:
+        return None
+    try:
+        return recording_service.assert_text_judgeable(
+            database, submission_id=named.submission_id, run_id=run_id, content_id=content_id
+        )
+    except LinguaWikiError as failure:
+        if failure.payload.code in recording_service.TEXT_FAILURES:
+            return Settlement(
+                submission_id=named.submission_id,
+                code=failure.payload.code,
+                reason=failure.payload.message,
+                refusal=failure,
+                clear_text=failure.payload.code == NOT_RETAINED_CODE,
             )
         raise
 
@@ -1969,6 +2094,8 @@ class VerdictWrite:
 class _NamedSubmission:
     submission_id: str
     artifact_id: str | None
+    kind: str = "recording"
+    response_digest: str | None = None
 
 
 def _named_submission(
@@ -1990,7 +2117,8 @@ def _named_submission(
     row = database.one(
         "SELECT submission.run_id, submission.content_id, submission.kind, submission.status, "
         "submission.superseded_by, submission.withdrawn_code, submission.withdrawn_reason, "
-        "submission.artifact_id, run.track_id FROM assessment_submissions submission "
+        "submission.artifact_id, run.track_id, submission.response_digest "
+        "FROM assessment_submissions submission "
         "JOIN assessment_runs run ON run.run_id = submission.run_id "
         "WHERE submission.submission_id = ?",
         [submission_id],
@@ -2022,14 +2150,9 @@ def _named_submission(
                 ),
             ),
         )
-    if str(row[2]) != "recording":
-        # Text submissions arrive with their own revalidation (eligibility, §2a); until that
-        # exists, a verdict on one is refused rather than applied unchecked.
-        raise LinguaWikiError(
-            "assessment_submission_kind_unsupported",
-            f"{submission_id} is a {row[2]} submission, and this release judges recordings only",
-            details=(ErrorDetail(field="submission", reason=str(row[2])),),
-        )
+    # Either kind is judged here. A written answer's own revalidation -- that the track
+    # still keeps it whole, and the text is what was handed in -- is `_judged_text`'s,
+    # once this has established it is the task's live answer.
     status = str(row[3])
     live = recording_service.live_submission(database, run_id, content_id)
     if status == "withdrawn":
@@ -2078,7 +2201,10 @@ def _named_submission(
             details=(ErrorDetail(field="submission", reason="superseded", context=context),),
         )
     return _NamedSubmission(
-        submission_id=submission_id, artifact_id=None if row[7] is None else str(row[7])
+        submission_id=submission_id,
+        artifact_id=None if row[7] is None else str(row[7]),
+        kind=str(row[2]),
+        response_digest=None if row[9] is None else str(row[9]),
     )
 
 
@@ -2311,9 +2437,25 @@ def plan_verdict(
     score = request.score if held_row is None else float(held_row[1])
     response = request.response if held_row is None else None
     assessor_kind = request.assessor_kind
+    answered = str(served[2]) == "answered"
     # Every refusal below runs before any transaction opens, so a refused call leaves the
     # task still `served` and answerable rather than half-recorded.
     warnings: list[str] = []
+    # A written answer is judged from its own text, checked here before anything below
+    # could read the verdict as a recording's or score it from a key it does not have.
+    written: JudgeableText | None = None
+    if named is not None and named.kind == "text":
+        checked = _judged_text(
+            database,
+            named,
+            run_id=run_id,
+            content_id=content_id,
+            request=request,
+            answered=answered,
+        )
+        if isinstance(checked, Settlement):
+            return checked
+        written = checked
     if score is None:
         if response is None:
             raise LinguaWikiError(
@@ -2372,28 +2514,39 @@ def plan_verdict(
     audio_artifact = request.audio_artifact
     if audio_artifact is None and named is not None:
         audio_artifact = named.artifact_id
-    answered = str(served[2]) == "answered"
-    bound = _judged_recording(
-        database,
-        root,
-        run_id=run_id,
-        content_id=content_id,
-        audio_artifact=audio_artifact,
-        assessor_kind=assessor_kind,
-        answered=answered,
-        # A run opened for recorded judging serves a spoken task *to be recorded*: a
-        # verdict on one with nothing submitted would be a result no purge could ever
-        # reach, standing on audio nobody holds.
-        requires_recording=(
-            _run_scoring(conditions) == RECORDED_SCORING
-            and candidate.modality == SPOKEN_MODALITY
-            and candidate.task_type in RECORDED_JUDGED_TASK_TYPES
-        ),
-    )
-    if isinstance(bound, Settlement):
-        return bound
-    judged = bound
-    submission_id = None if judged is None else judged.submission.submission_id
+    judged: JudgeableAudio | None = None
+    if named is None or named.kind != "text":
+        bound = _judged_recording(
+            database,
+            root,
+            run_id=run_id,
+            content_id=content_id,
+            audio_artifact=audio_artifact,
+            assessor_kind=assessor_kind,
+            answered=answered,
+            # A run opened for recorded judging serves a spoken task *to be recorded*: a
+            # verdict on one with nothing submitted would be a result no purge could ever
+            # reach, standing on audio nobody holds.
+            requires_recording=(
+                _run_scoring(conditions) in RECORDING_SCORINGS
+                and judged_spoken_task(modality=candidate.modality, task_type=candidate.task_type)
+            ),
+            # And one opened for judged writing serves a written task *to be submitted*: a
+            # verdict reached without the answer would rest on words nobody kept.
+            requires_text=(
+                _run_scoring(conditions) == JUDGED_SCORING
+                and judged_written_task(modality=candidate.modality, task_type=candidate.task_type)
+            ),
+        )
+        if isinstance(bound, Settlement):
+            return bound
+        judged = bound
+    if judged is not None:
+        submission_id: str | None = judged.submission.submission_id
+    elif written is not None:
+        submission_id = written.submission.submission_id
+    else:
+        submission_id = None
     if request.claim_id is not None:
         _assert_claim(
             database,
@@ -2423,14 +2576,34 @@ def plan_verdict(
             ensure_ascii=False,
             sort_keys=True,
         )
+    elif named is not None and named.kind == "text" and written is None:
+        # Answered already, so this can only be a repeat, compared with the result and
+        # never written: the answer it judged is the submission's, by its digest, kept as
+        # the verdict asked -- whole unless it asked for less.
+        visibility = request.response_visibility or "full"
+        excerpt, response_hash = None, named.response_digest
+        rubric_json = json.dumps(
+            retain_rubric(request.rubric, preferences=record_track.preferences),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     else:
+        if written is not None:
+            # The answer judged is the one the learner handed in, read from the submission
+            # -- through the same retention rule as every other copy, against the consent
+            # in force now, which `_judged_text` has just found still keeps it whole. A
+            # judge may ask to keep less of it on the result; never more.
+            response = written.text
+            requested: str | None = request.response_visibility or "full"
+        else:
+            requested = request.response_visibility
         # The response goes through retention either way. Scoring in the background and
         # discarding the result would make the stored score unexplainable, and a
         # caller-supplied excerpt reaches the column by the same route so that the consent
         # rule covers both and not only the one this stage added.
         visibility, excerpt, digest = evidence_service.retain_response(
             response if response is not None else request.response_excerpt,
-            requested=request.response_visibility,
+            requested=requested,
             preferences=record_track.preferences,
         )
         # `response_hash` promises the hash of the *response*, so that a withheld answer

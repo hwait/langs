@@ -213,7 +213,10 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
             assert "idempotency_key" not in body["properties"]
             continue
         keyed.append(template)
-        assert "idempotency_key" in body["properties"], template
+        # The key is `idempotency_key` beside the request, or -- for a written answer -- the
+        # producer's own `submission_key`; either way the document says it replays.
+        assert route.key_field in body["properties"], template
+        assert "replays" in body["properties"][route.key_field]["description"], template
         assert "409" in operation["responses"], template
 
     # Named rather than counted, so a new mutating route added without a key fails here
@@ -225,6 +228,7 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
         "/runs/{run_id}/tasks",
         "/runs/{run_id}/tasks/{content_id}/captures/{capture_id}",
         "/runs/{run_id}/tasks/{content_id}/plays",
+        "/runs/{run_id}/tasks/{content_id}/submission",
     ]
 
 

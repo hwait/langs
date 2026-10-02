@@ -1524,8 +1524,7 @@ def test_withdrawing_transcript_consent_withdraws_written_answers_and_clears_the
             "'withheld', NULL, NULL, ?)",
             [verdict_id, submission_id, now],
         )
-    # Not checked clean here: until written answers land, `db check` reads every pending
-    # submission as a recording. Withdrawn, it is no longer one it reads.
+    assert_clean(polish_workspace)
 
     updated = learner_service.update_track(
         polish_workspace.paths,
@@ -1723,3 +1722,517 @@ def test_abandoning_voids_a_superseded_answers_held_verdict_naming_its_successor
     ]
     assert outcome_of(speaking, held.verdict_id) == ("void", withdrawal.SUPERSEDED_CODE)
     assert_clean(speaking)
+
+
+# --- text submissions --------------------------------------------------------------------------
+#
+# Written answers are synthetic sentences written for these tests, never anything a learner
+# wrote. The pilot pack's `writing` dimension serves `extended-productive` tasks in the
+# `writing` modality, which is what `machine+judged` adds.
+
+ANSWER = (
+    "Dzień dobry, pralka nie działa od wczoraj. Kiedy może pan przyjść ją naprawić? "
+    "Jestem w domu po siedemnastej. Pozdrawiam, Anna."
+)
+
+
+def keep_writing(workspace: PolishWorkspace, consent: bool | None = True) -> None:
+    learner_service.update_track(
+        workspace.paths,
+        preferences=learner_service.TrackPreferences(transcript_retention_consent=consent),
+        clock=workspace.clock,
+    )
+
+
+def unset_transcript_consent(workspace: PolishWorkspace) -> None:
+    with (
+        open_writer(workspace.paths, command="test.tamper") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "DELETE FROM track_preferences WHERE key = 'transcript_retention_consent'"
+        )
+
+
+@pytest.fixture
+def writing(polish_workspace: PolishWorkspace) -> PolishWorkspace:
+    keep_writing(polish_workspace)
+    return polish_workspace
+
+
+def start_written(
+    workspace: PolishWorkspace, *, scoring: str = "machine+judged"
+) -> assessment_service.AssessmentRunReport:
+    return assessment_service.start(
+        workspace.paths, dimensions=["writing"], scoring=scoring, clock=workspace.clock
+    )
+
+
+def hand_in(
+    workspace: PolishWorkspace,
+    run_id: str,
+    content_id: str,
+    *,
+    key: str = "answer-1",
+    response: str = ANSWER,
+) -> Any:
+    from linguawiki.services import written_answers
+
+    return written_answers.submit(
+        workspace.paths,
+        run=run_id,
+        content_id=content_id,
+        submission_key=key,
+        response=response,
+        clock=workspace.clock,
+        actor="client",
+    )
+
+
+def written(workspace: PolishWorkspace, *, key: str = "answer-1") -> tuple[str, str, str]:
+    """A writing run with one written answer waiting: `(run_id, content_id, submission_id)`."""
+
+    run_id = start_written(workspace).run_id
+    task = serve(workspace, run_id)
+    assert task.modality == "writing" and task.task_type == "extended-productive"
+    report = hand_in(workspace, run_id, task.content_id, key=key)
+    return run_id, task.content_id, report.submission.submission_id
+
+
+def digest(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def text_anywhere(workspace: PolishWorkspace, text: str) -> list[str]:
+    """Every column of every table this stage writes that holds any part of `text`."""
+
+    fragment = text[:30]
+    found: list[str] = []
+    for table in (
+        "assessment_submissions",
+        "assessment_verdicts",
+        "assessment_verdict_outcomes",
+        "assessment_results",
+        "judging_claims",
+        "judging_releases",
+        "domain_events",
+        "audit_log",
+    ):
+        for row in rows(workspace, f"SELECT * FROM {table}"):
+            if any(isinstance(value, str) and fragment in value for value in row):
+                found.append(table)
+    return found
+
+
+def test_a_written_answer_is_handed_in_claimed_with_its_text_and_judged(
+    writing: PolishWorkspace,
+) -> None:
+    from linguawiki.services import assessment_view as view_service
+
+    run_id, content_id, submission_id = written(writing)
+
+    stored = rows(
+        writing,
+        "SELECT kind, capture_id, artifact_id, response_visibility, response_text, "
+        "response_digest, status FROM assessment_submissions WHERE submission_id = ?",
+        [submission_id],
+    )
+    assert stored == [("text", "answer-1", None, "full", ANSWER, digest(ANSWER), "pending")]
+    # Registration does not score: the task waits, and the screen says what for -- without
+    # the learner's words, which the page already has and the read model does not carry.
+    screen = view_service.run_screen(writing.paths, run=run_id, clock=writing.clock)
+    (task,) = screen.outstanding
+    assert task.content_id == content_id and task.state == "awaiting-judge"
+    assert task.answer_with == "text"
+    assert task.submission is not None and task.submission.kind == "text"
+    assert task.submission.response_digest == digest(ANSWER)
+    assert ANSWER[:30] not in screen.model_dump_json()
+
+    waiting = recording_service.pending(writing.paths, run=run_id, clock=writing.clock)
+    (entry,) = waiting.pending
+    assert (entry.kind, entry.judgeable, entry.response_text) == ("text", True, ANSWER)
+    assert entry.audio_path is None and entry.sha256 is None
+
+    report = claim(writing, run_id)
+    (claimed,) = report.claimed
+    assert (claimed.kind, claimed.response_text) == ("text", ANSWER)
+    applied = verdict(writing, run_id, content_id, submission_id, score=0.6, claim=claimed.claim_id)
+
+    assert applied.verdict_status == "applied" and applied.tasks_recorded == 1
+    result = rows(
+        writing,
+        "SELECT response_visibility, response_excerpt, response_hash, audio_artifact_id, "
+        "observed_at = (SELECT created_at FROM assessment_submissions WHERE submission_id = ?) "
+        "FROM assessment_results WHERE run_id = ?",
+        [submission_id, run_id],
+    )
+    assert result == [("full", ANSWER, digest(ANSWER), None, True)]
+    assert submission_state(writing, submission_id) == ("judged", None)
+    assert_clean(writing)
+
+
+def test_a_resent_answer_replays_and_a_reused_key_or_a_second_answer_is_refused(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+
+    again = hand_in(writing, run_id, content_id)
+    assert again.replayed and again.submission.submission_id == submission_id
+
+    conflict = refusal(hand_in, writing, run_id, content_id, response=ANSWER + " Dziękuję.")
+    assert conflict.payload.code == "idempotency_conflict"
+    assert digest(ANSWER) in conflict.payload.message
+    assert conflict.payload.details[0].context["response_digest"] == digest(ANSWER)
+
+    second = refusal(hand_in, writing, run_id, content_id, key="answer-2", response="Inna.")
+    assert second.payload.code == "assessment_task_already_submitted"
+    assert second.payload.details[0].context["submission_id"] == submission_id
+
+    assert rows(
+        writing, "SELECT count(*) FROM assessment_submissions WHERE run_id = ?", [run_id]
+    ) == [(1,)]
+    # One event, bound to the key, carrying the digest and never the words.
+    events = rows(
+        writing,
+        "SELECT payload_json FROM domain_events WHERE idempotency_key = 'answer-1'",
+    )
+    assert len(events) == 1 and ANSWER[:30] not in str(events[0][0])
+    assert_clean(writing)
+
+
+def test_a_key_another_operation_used_or_a_recording_holds_is_refused(
+    writing: PolishWorkspace,
+) -> None:
+    run_id = start_written(writing).run_id
+    task = assessment_service.next_task(
+        writing.paths, run=run_id, clock=writing.clock, idempotency_key="serve-1"
+    )
+    assert isinstance(task, assessment_service.NextTaskReport)
+
+    reused = refusal(hand_in, writing, run_id, task.content_id, key="serve-1")
+
+    assert reused.payload.code == "idempotency_conflict"
+    assert rows(writing, "SELECT count(*) FROM assessment_submissions") == [(0,)]
+
+
+@pytest.mark.parametrize("consent", [None, False], ids=["excerpt-only", "declined"])
+def test_a_track_that_does_not_keep_writing_whole_is_never_served_it_and_cannot_hand_it_in(
+    polish_workspace: PolishWorkspace, consent: bool | None
+) -> None:
+    from linguawiki.placement import WRITING_NOT_RETAINED
+
+    if consent is None:
+        # The workspace fixture consents, and a preference cannot be unset through
+        # `track update`; an excerpt-only track is one that never said yes.
+        unset_transcript_consent(polish_workspace)
+    else:
+        keep_writing(polish_workspace, consent)
+
+    judged_run = start_written(polish_workspace)
+    (dimension,) = judged_run.dimensions
+    assert dimension.status == "not-tested"
+    assert dimension.unavailable_reason == WRITING_NOT_RETAINED
+    assert any(WRITING_NOT_RETAINED in warning for warning in judged_run.warnings)
+
+    # Under `any` the task is served for a judge to record directly, and handing it in for
+    # later judging is still refused: the boundary is the same whichever run asks.
+    run_id = start_written(polish_workspace, scoring="any").run_id
+    task = serve(polish_workspace, run_id)
+    refused = refusal(hand_in, polish_workspace, run_id, task.content_id)
+
+    assert refused.payload.code == "transcript_consent_required"
+    assert text_anywhere(polish_workspace, ANSWER) == []
+    assert_clean(polish_workspace)
+
+
+def test_machine_recorded_keeps_its_meaning_and_does_not_serve_writing(
+    writing: PolishWorkspace,
+) -> None:
+    from linguawiki.placement import NO_MACHINE_SCORABLE_TASK
+
+    report = start_written(writing, scoring="machine+recorded")
+
+    (dimension,) = report.dimensions
+    assert (dimension.status, dimension.unavailable_reason) == (
+        "not-tested",
+        NO_MACHINE_SCORABLE_TASK,
+    )
+
+
+def test_machine_judged_still_serves_what_machine_recorded_serves(
+    speaking: PolishWorkspace,
+) -> None:
+    report = assessment_service.start(
+        speaking.paths,
+        dimensions=["pronunciation", "reading", "writing"],
+        modalities=["text", "audio", "speech", "writing"],
+        scoring="machine+judged",
+        clock=speaking.clock,
+    )
+
+    assert {entry.dimension: entry.status for entry in report.dimensions} == {
+        "pronunciation": "open",
+        "reading": "open",
+        "writing": "open",
+    }
+
+
+def test_the_eligibility_predicate_is_the_retention_rule() -> None:
+    """`written_judging_permitted` and `retain_response` must agree for every consent value:
+    the predicate stands for "retention keeps the answer whole", and drifting from it would
+    serve writing that is then judged on a fragment."""
+
+    from linguawiki.placement import written_judging_permitted
+    from linguawiki.services import evidence as evidence_service
+
+    for consent in (True, False, None, "yes", 1):
+        preferences = {} if consent is None else {"transcript_retention_consent": consent}
+        try:
+            visibility = evidence_service.retain_response(
+                ANSWER, requested="full", preferences=preferences
+            )[0]
+        except LinguaWikiError:
+            visibility = "refused"
+        assert written_judging_permitted(preferences) == (visibility == "full"), consent
+
+
+def test_withdrawing_transcript_consent_after_handing_in_leaves_no_text_anywhere(
+    writing: PolishWorkspace,
+) -> None:
+    """End to end through `submit`: the answer, a claim, a release, then consent goes."""
+
+    run_id, content_id, submission_id = written(writing)
+    claim_id = claimed_one(writing, run_id)
+    release(writing, claim_id, reason="the judge restarted")
+
+    updated = learner_service.update_track(
+        writing.paths,
+        preferences=learner_service.TrackPreferences(transcript_retention_consent=False),
+        clock=writing.clock,
+    )
+
+    stored = rows(
+        writing,
+        "SELECT status, withdrawn_code, response_text, response_digest "
+        "FROM assessment_submissions WHERE submission_id = ?",
+        [submission_id],
+    )
+    assert stored == [("withdrawn", withdrawal.NOT_RETAINED_CODE, None, digest(ANSWER))]
+    assert any(submission_id in warning for warning in updated.warnings)
+    assert text_anywhere(writing, ANSWER) == []
+    late = refusal(verdict, writing, run_id, content_id, submission_id, claim=None)
+    assert late.payload.code == "assessment_submission_withdrawn"
+    assert late.payload.details[0].context["code"] == withdrawal.NOT_RETAINED_CODE
+    assert rows(writing, "SELECT count(*) FROM assessment_verdicts") == [(0,)]
+    assert_clean(writing)
+
+
+def test_a_verdict_that_finds_eligibility_gone_withdraws_the_answer_and_clears_its_text(
+    writing: PolishWorkspace,
+) -> None:
+    """Consent is revalidated where the verdict lands, not where it was claimed. The
+    preference is changed beneath `update_track`, as a restore or hand edit could: no
+    consent hook ran, so only the verdict's own check stands between it and a fragment."""
+
+    run_id, content_id, submission_id = written(writing)
+    claim_id = claimed_one(writing, run_id)
+    unset_transcript_consent(writing)
+    assert "pending_written_answers_judgeable" in failed_checks(writing)
+
+    refused = refusal(verdict, writing, run_id, content_id, submission_id, claim=claim_id)
+
+    assert refused.payload.code == withdrawal.NOT_RETAINED_CODE
+    assert submission_state(writing, submission_id) == ("withdrawn", withdrawal.NOT_RETAINED_CODE)
+    assert text_anywhere(writing, ANSWER) == []
+    assert rows(writing, "SELECT count(*) FROM assessment_verdicts") == [(0,)]
+    assert_clean(writing)
+
+
+def test_a_claim_withdraws_a_written_answer_whose_text_was_altered(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, _, submission_id = written(writing)
+    with (
+        open_writer(writing.paths, command="test.tamper") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE assessment_submissions SET response_text = 'Coś innego.', updated_at = now() "
+            "WHERE submission_id = ?",
+            [submission_id],
+        )
+    waiting = recording_service.pending(writing.paths, run=run_id, clock=writing.clock)
+    assert waiting.pending[0].problem_code == "assessment_response_altered"
+    assert waiting.pending[0].response_text is None
+
+    report = claim(writing, run_id)
+
+    assert report.claimed == ()
+    assert [entry.code for entry in report.withdrawn] == ["assessment_response_altered"]
+    assert submission_state(writing, submission_id) == (
+        "withdrawn",
+        "assessment_response_altered",
+    )
+    assert_clean(writing)
+
+
+def test_a_held_verdict_on_a_written_answer_is_retained_again_when_the_run_resumes(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+    pause(writing, run_id)
+
+    held = verdict(writing, run_id, content_id, submission_id, score=0.4)
+    assert held.held and held.verdict_status == "held"
+    assert rows(
+        writing,
+        "SELECT response_visibility, response_hash FROM assessment_verdicts "
+        "WHERE submission_id = ?",
+        [submission_id],
+    ) == [("full", digest(ANSWER))]
+
+    resumed = resume(writing, run_id)
+
+    assert [entry.submission_id for entry in resumed.applied_verdicts] == [submission_id]
+    assert rows(
+        writing,
+        "SELECT response_visibility, response_excerpt, raw_score FROM assessment_results "
+        "WHERE run_id = ?",
+        [run_id],
+    ) == [("full", ANSWER, 0.4)]
+    assert_clean(writing)
+
+
+def test_a_verdict_on_a_written_answer_must_name_it_and_bring_nothing_of_its_own(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+
+    unnamed = refusal(verdict, writing, run_id, content_id, None)
+    assert unnamed.payload.code == "assessment_submission_required"
+    assert submission_id in unnamed.payload.message
+    other_words = refusal(
+        assessment_service.record,
+        writing.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=submission_id,
+        response="Zupełnie inna odpowiedź.",
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=writing.clock,
+    )
+    assert other_words.payload.code == "assessment_response_not_submitted"
+    no_score = refusal(
+        assessment_service.record,
+        writing.paths,
+        run=run_id,
+        content_id=content_id,
+        submission=submission_id,
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=writing.clock,
+    )
+    assert no_score.payload.code == "assessment_score_required"
+    deterministic = refusal(
+        assessment_service.record,
+        writing.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=submission_id,
+        clock=writing.clock,
+    )
+    assert deterministic.payload.code == "assessment_judge_required"
+    assert submission_state(writing, submission_id) == ("pending", None)
+    assert rows(writing, "SELECT count(*) FROM assessment_verdicts") == [(0,)]
+
+
+def test_a_judged_written_task_in_a_judged_run_takes_no_verdict_without_its_answer(
+    writing: PolishWorkspace,
+) -> None:
+    run_id = start_written(writing).run_id
+    task = serve(writing, run_id)
+
+    refused = refusal(verdict, writing, run_id, task.content_id, None)
+
+    assert refused.payload.code == "assessment_submission_required"
+    assert results(writing, run_id) == 0
+
+
+def test_a_written_answer_is_refused_for_a_task_that_is_not_written_or_not_served(
+    speaking: PolishWorkspace,
+) -> None:
+    keep_writing(speaking)
+    run_id, content_id, _, _ = submitted(speaking, 501)
+
+    spoken = refusal(hand_in, speaking, run_id, content_id)
+    assert spoken.payload.code == "assessment_task_already_submitted"
+    other_run = start_spoken(speaking, ("pronunciation",))
+    task = serve(speaking, other_run)
+    assert refusal(hand_in, speaking, other_run, task.content_id, key="k2").payload.code == (
+        "assessment_task_not_written"
+    )
+    blank = refusal(hand_in, speaking, other_run, task.content_id, key="k3", response="  ")
+    assert blank.payload.code == "invalid_arguments"
+    unserved = refusal(hand_in, speaking, other_run, "cnt_" + "0" * 26, key="k4")
+    assert unserved.payload.code == "assessment_task_not_served"
+
+
+def test_handing_in_settles_what_lapsed_first_and_says_so(writing: PolishWorkspace) -> None:
+    run_id, content_id, submission_id = written(writing)
+    for _ in range(judging.JUDGING_POLICY.max_attempts):
+        claimed_one(writing, run_id)
+        lapse(writing)
+
+    # The sweep runs before the submit's own work: the exhausted answer is withdrawn, its
+    # task skipped, and the refusal that follows -- the task no longer takes an answer --
+    # names the withdrawal, because it committed whatever the command then decided.
+    refused = refusal(hand_in, writing, run_id, content_id, key="answer-2", response="Inna.")
+
+    assert refused.payload.code == "assessment_task_settled"
+    settled = [detail for detail in refused.payload.details if detail.field == "settled"]
+    assert [detail.context["submission_id"] for detail in settled] == [submission_id]
+    assert submission_state(writing, submission_id) == ("withdrawn", judging.EXHAUSTED_CODE)
+    assert any(
+        command == "assessment.submit" for command, _ in audits_naming(writing, submission_id)
+    )
+    # A retry of the original answer replays it, as it now stands.
+    again = hand_in(writing, run_id, content_id)
+    assert again.replayed and again.submission.status == "withdrawn"
+    assert_clean(writing)
+
+
+def test_the_cli_hands_in_a_written_answer_from_a_file(
+    writing: PolishWorkspace, capsys: pytest.CaptureFixture[str], tmp_path: Any
+) -> None:
+    run_id = start_written(writing).run_id
+    task = serve(writing, run_id)
+    answer_file = tmp_path / "answer.txt"
+    answer_file.write_text(ANSWER, encoding="utf-8")
+
+    arguments = (
+        "assessment",
+        "submit",
+        "--run",
+        run_id,
+        "--content-id",
+        task.content_id,
+        "--submission-key",
+        "cli-answer",
+        "--response-file",
+        str(answer_file),
+    )
+    code, handed_in = _cli(writing, capsys, *arguments)
+    assert code == 0, handed_in
+    assert handed_in["data"]["submission"]["kind"] == "text"
+    assert ANSWER[:30] not in json.dumps(handed_in)
+    code, again = _cli(writing, capsys, *arguments)
+    assert code == 0 and again["data"]["replayed"] is True
+
+    code, waiting = _cli(writing, capsys, "assessment", "pending", "--run", run_id)
+    assert code == 0
+    assert waiting["data"]["pending"][0]["response_text"] == ANSWER

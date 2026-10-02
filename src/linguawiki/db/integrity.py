@@ -1441,6 +1441,11 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "  WHEN submission.kind = 'recording' "
             "    AND result.audio_artifact_id IS DISTINCT FROM submission.artifact_id "
             "    THEN 'its result rests on another recording' "
+            # A written answer is read, not heard: a result judged from one that names a
+            # recording claims acoustic evidence nobody submitted, and a purge of that
+            # recording would invalidate a judgement of writing.
+            "  WHEN submission.kind = 'text' AND result.audio_artifact_id IS NOT NULL "
+            "    THEN 'a written answer''s result rests on a recording' "
             "  WHEN (SELECT count(*) FROM assessment_verdict_outcomes other "
             "    WHERE other.outcome = 'applied' AND other.result_id = outcome.result_id) > 1 "
             "    THEN 'its result is claimed by another verdict too' "

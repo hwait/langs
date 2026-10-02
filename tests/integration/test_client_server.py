@@ -915,3 +915,48 @@ def test_finalizing_checks_the_key_before_returning_a_stored_result(
 
     assert reused.status == 409
     assert reused.payload["error"]["code"] == "idempotency_conflict"
+
+
+def test_a_written_answer_is_handed_in_over_http_and_waits_for_a_judge(
+    polish_workspace: PolishWorkspace, running: RunningServer
+) -> None:
+    """The route is a transport for `written_answers.submit`: the same replay, the same
+    conflict naming the recorded digest, and a screen that says the task waits without
+    carrying the words."""
+
+    import hashlib
+
+    answer = "Dzień dobry, pralka nie działa. Kiedy może pan przyjść? Pozdrawiam, Anna."
+    opened = running.request(
+        "POST", "/runs", body={"dimensions": ["writing"], "scoring": "machine+judged"}
+    )
+    assert opened.status == 200, opened.payload
+    run_id = opened.payload["data"]["run_id"]
+    served = running.request("POST", f"/runs/{run_id}/tasks", body={})
+    content_id = served.payload["data"]["content_id"]
+    path = f"/runs/{run_id}/tasks/{content_id}/submission"
+    body = {"submission_key": "page-answer-1", "response": answer}
+
+    first = running.request("POST", path, body=body)
+    again = running.request("POST", path, body=body)
+    changed = running.request("POST", path, body={**body, "response": answer + " Dzięki."})
+    second = running.request(
+        "POST", path, body={"submission_key": "page-answer-2", "response": "Inna odpowiedź."}
+    )
+    blank_key = running.request("POST", path, body={"response": answer})
+    screen = running.request("GET", f"/runs/{run_id}/screen")
+
+    assert first.status == 200, first.payload
+    submission = first.payload["data"]["submission"]
+    assert submission["kind"] == "text" and submission["status"] == "pending"
+    assert answer not in json.dumps(first.payload)
+    assert again.status == 200 and again.payload["data"]["replayed"] is True
+    assert changed.status == 409
+    assert changed.payload["error"]["code"] == "idempotency_conflict"
+    assert hashlib.sha256(answer.encode()).hexdigest() in changed.payload["error"]["message"]
+    assert second.status == 422
+    assert second.payload["error"]["code"] == "assessment_task_already_submitted"
+    assert blank_key.status == 400
+    (task,) = screen.payload["data"]["outstanding"]
+    assert task["state"] == "awaiting-judge" and task["submission"]["kind"] == "text"
+    assert answer[:20] not in json.dumps(screen.payload)

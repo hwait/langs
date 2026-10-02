@@ -39,8 +39,8 @@ from linguawiki.services.recordings import SubmissionReport
 #: whether the learner presses a button or types is a question about rendering. A client
 #: that read the task type would draw a field for a task that shipped choices.
 AnswerMode = Literal["choice", "text", "recording"]
-#: Where an outstanding task stands. `awaiting-judge` is a spoken answer that has been
-#: recorded and submitted: the learner has answered, and nobody has marked it yet.
+#: Where an outstanding task stands. `awaiting-judge` is an answer that has been submitted
+#: -- a recording, or a written answer (`submission.kind`) -- and that nobody has marked yet.
 TaskState = Literal["awaiting-answer", "awaiting-judge"]
 
 
@@ -87,10 +87,11 @@ class OutstandingTask(ContractModel):
     #: show the same number -- nothing about plays lives only in a page.
     plays_used: int = 0
     plays_remaining: int | None = None
-    #: `awaiting-judge` once a recording has been submitted for it. Surfacing the wait
-    #: properly is C6's; this is here so the screen does not hide it.
+    #: `awaiting-judge` once an answer has been submitted for it, recorded or written.
     state: TaskState = "awaiting-answer"
-    #: The live submission answering this task, with the recording's artifact ID.
+    #: The live submission answering this task: its `kind`, and the recording's artifact
+    #: ID or a written answer's digest. Never a written answer's text -- the page sent it,
+    #: and the read model does not carry a learner's words.
     submission: SubmissionReport | None = None
 
 
@@ -108,8 +109,10 @@ class RunScreen(ContractModel):
     framework_id: str
     framework_levels: tuple[str, ...] = ()
     available_modalities: tuple[str, ...] = ()
-    #: `any` or `machine`, as the run was opened. Under `any` an outstanding task can need a
-    #: judge, which a client without one must not offer to answer.
+    #: The scoring condition the run was opened under (`placement.SCORING_CONDITIONS`).
+    #: Under `any` an outstanding task can need a judge, which a client without one must not
+    #: offer to answer; under `machine+recorded` and `machine+judged` the judged tasks it
+    #: serves are answered by a recording or a written submission, and wait for the judge.
     scoring: str = DEFAULT_SCORING
     dimensions: tuple[assessment_service.DimensionReport, ...] = ()
     #: At most one per *open* dimension, after the serve-time guard, and possibly one more

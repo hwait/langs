@@ -42,7 +42,7 @@ from linguawiki.services import assessment as assessment_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import recordings as recording_service
 from linguawiki.services.assessment import WithdrawnSubmission
-from linguawiki.services.withdrawal import Settlement, SettlementOutcome, settle
+from linguawiki.services.withdrawal import NOT_RETAINED_CODE, Settlement, SettlementOutcome, settle
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,7 +267,7 @@ def sweep_lapsed(
     """Settle what has lapsed in a run, before a writer's own work -- **the** entry point.
 
     Every writer touching the run calls this, and nothing else, first: claim, release,
-    record, set_status, finalize, serving, and (Tasks 5 and 6) submit and batch.
+    record, set_status, finalize, serving, submit, and (Task 6) batch.
 
     Its own short transaction, opened only when something has lapsed, rather than the
     caller's: what it settles is true whether or not the caller's work then succeeds -- a
@@ -475,13 +475,13 @@ def claim(
     attempts left is claimable. The connection closes when this returns: the judge holds
     nothing while it judges, so every other writer goes on working.
 
-    An **unjudgeable** recording is not handed out. `pending` is a reader and only lists
-    it with its reason; `claim` is a writer, so it withdraws it -- through
-    `withdrawal.settle`, with the recording failure's own code -- and reports it in
-    `withdrawn`. Handing it out would send a judge to fail on it, and leaving it would let
-    it hold its dimension for a verdict that can never land. A problem that is not about the
-    recording itself is left alone and reported as a warning: it is not this command's to
-    settle.
+    An **unjudgeable** answer is not handed out. `pending` is a reader and only lists it
+    with its reason; `claim` is a writer, so it withdraws it -- through `withdrawal.settle`,
+    with the failure's own code (`RECORDING_FAILURES` for a recording, `TEXT_FAILURES` for a
+    written answer) -- and reports it in `withdrawn`. Handing it out would send a judge to
+    fail on it, and leaving it would let it hold its dimension for a verdict that can never
+    land. A problem that is not about the answer itself is left alone and reported as a
+    warning: it is not this command's to settle.
 
     Not idempotent, deliberately: a claim whose response was lost is an attempt nobody
     acts on, and its lease running out returns the submission to the queue -- the same
@@ -526,7 +526,13 @@ def claim(
         unjudgeable = [
             entry
             for entry in entries
-            if not entry.judgeable and entry.problem_code in recording_service.RECORDING_FAILURES
+            if not entry.judgeable
+            and entry.problem_code
+            in (
+                recording_service.TEXT_FAILURES
+                if entry.kind == "text"
+                else recording_service.RECORDING_FAILURES
+            )
         ]
         claimable = [
             entry
@@ -553,6 +559,12 @@ def claim(
                             submission_id=entry.submission.submission_id,
                             code=str(entry.problem_code),
                             reason=str(entry.problem),
+                            # A written answer that may no longer be kept loses its text as
+                            # it is withdrawn -- the same statement, as a consent change
+                            # does it. One whose text was altered keeps what is there: it
+                            # is not the learner's, and the record of the damage is the
+                            # only account of it.
+                            clear_text=entry.problem_code == NOT_RETAINED_CODE,
                         ),
                     )
                     for entry in unjudgeable

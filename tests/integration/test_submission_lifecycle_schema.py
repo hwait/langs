@@ -724,3 +724,135 @@ def test_an_unbound_result_must_be_observed_when_it_was_recorded(
     assert checks["result_observation_times"].context["results"] == (
         f"{result_id} (observed_at is not when it was recorded)"
     )
+
+
+# --- written answers waiting for a judge (Task 5) ------------------------------------------
+
+
+def _served_written_task(workspace: PolishWorkspace) -> tuple[str, str]:
+    from linguawiki.services import assessment as assessment_service
+
+    run_id = assessment_service.start(
+        workspace.paths, dimensions=["writing"], clock=workspace.clock
+    ).run_id
+    served = assessment_service.next_task(workspace.paths, run=run_id, clock=workspace.clock)
+    assert isinstance(served, assessment_service.NextTaskReport)
+    assert served.modality == "writing"
+    return run_id, served.content_id
+
+
+def test_a_pending_written_answer_is_neither_an_orphan_nor_a_missing_recording(
+    speaking: PolishWorkspace,
+) -> None:
+    """A text submission names no artifact and no staging row while it *waits*: the orphan
+    relations, `submission_artifacts_agree`, and the recording check all leave it alone, and
+    its own check finds it whole."""
+
+    from tests.integration.test_client_audio import failed_checks
+
+    run_id, content_id = _served_written_task(speaking)
+    checks = _tamper(speaking, _text_submission(run_id, content_id))
+
+    assert {name for name, check in checks.items() if check.status == "failed"} == set()
+    assert checks["orphan_relations"].status == "ok"
+    assert checks["submission_artifacts_agree"].status == "ok"
+    assert checks["submission_kind_shape"].status == "ok"
+    # The disk-reading checks, `judged_recordings_judgeable` among them, run only in the
+    # service's `db check`.
+    assert failed_checks(speaking) == {}
+
+
+def test_a_pending_written_answer_on_a_task_that_is_not_outstanding_is_reported(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, content_id = _served_written_task(speaking)
+    checks = _tamper(
+        speaking,
+        _text_submission(run_id, content_id),
+        (
+            "UPDATE assessment_run_tasks SET status = 'skipped' WHERE run_id = ? "
+            "AND content_id = ?",
+            [run_id, content_id],
+        ),
+    )
+
+    assert checks["submission_artifacts_agree"].status == "failed"
+    assert (
+        "pending on a task that is not outstanding"
+        in (checks["submission_artifacts_agree"].context["submissions"])
+    )
+
+
+def test_a_written_answer_whose_text_changed_while_waiting_is_reported(
+    speaking: PolishWorkspace,
+) -> None:
+    from tests.integration.test_client_audio import failed_checks
+
+    run_id, content_id = _served_written_task(speaking)
+    sql, parameters = _text_submission(run_id, content_id)
+    parameters[list(parameters).index("Dzień dobry, nazywam się Anna.")] = "Coś innego."
+    _tamper(speaking, (sql, parameters))
+
+    failed = failed_checks(speaking)
+    assert set(failed) == {"pending_written_answers_judgeable"}
+    assert (
+        "assessment_response_altered"
+        in failed["pending_written_answers_judgeable"].context["submissions"]
+    )
+
+
+def test_a_written_answers_result_resting_on_a_recording_is_reported(
+    speaking: PolishWorkspace,
+) -> None:
+    from linguawiki.services import assessment as assessment_service
+    from linguawiki.services import written_answers
+
+    run_id, content_id = _served_written_task(speaking)
+    handed_in = written_answers.submit(
+        speaking.paths,
+        run=run_id,
+        content_id=content_id,
+        submission_key="schema-answer",
+        response="Dzień dobry, nazywam się Anna.",
+        clock=speaking.clock,
+    )
+    assessment_service.record(
+        speaking.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=handed_in.submission.submission_id,
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=speaking.clock,
+    )
+    _, _, recorded = _judged(speaking)
+    artifact_id = str(
+        rows(
+            speaking,
+            "SELECT submission.artifact_id FROM assessment_submissions submission "
+            "JOIN assessment_verdicts verdict USING (submission_id) WHERE verdict_id = ?",
+            [recorded],
+        )[0][0]
+    )
+    verdict_id = str(
+        rows(
+            speaking,
+            "SELECT verdict_id FROM assessment_verdicts WHERE submission_id = ?",
+            [handed_in.submission.submission_id],
+        )[0][0]
+    )
+
+    checks = _tamper(
+        speaking,
+        (
+            "UPDATE assessment_results SET audio_artifact_id = ? WHERE run_id = ? "
+            "AND content_id = ?",
+            [artifact_id, run_id, content_id],
+        ),
+    )
+
+    assert (
+        f"{verdict_id} (a written answer's result rests on a recording)"
+        in (checks["applied_verdicts_name_their_result"].context["verdicts"])
+    )

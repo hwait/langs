@@ -1,4 +1,4 @@
-"""The route table: eleven operations, each one service call wide.
+"""The route table: twelve operations, each one service call wide.
 
 A handler resolves its arguments, calls one service function, and returns the report. There
 is no business logic here and there must not be -- selection, scoring, the stop rule, the
@@ -25,6 +25,7 @@ from linguawiki.placement import DEFAULT_SCORING, SCORING_CONDITIONS
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import assessment_view as view_service
 from linguawiki.services import recordings as recording_service
+from linguawiki.services import written_answers as written_service
 
 #: The actor recorded against every mutation this server drives. The command name does not
 #: change between entry points -- that would make every audit query ask twice -- so this is
@@ -154,6 +155,12 @@ class Route:
     #: most it reads. The cap is the route's, because a recording is not a form field.
     upload: str | None = None
     upload_limit: int = 0
+    #: The body field that is this route's idempotency key. `idempotency_key` everywhere a
+    #: caller supplies one beside the request; a written answer's `submission_key` is the
+    #: producer's own identifier for the answer, stored on the submission, and it is the
+    #: key in exactly the sense the others are -- the same request under it replays, a
+    #: different one conflicts -- so the server retries on it the way it retries on them.
+    key_field: str = "idempotency_key"
 
 
 def _start(request: Request) -> Any:
@@ -271,6 +278,19 @@ def _capture(request: Request) -> Any:
     )
 
 
+def _submit(request: Request) -> Any:
+    return written_service.submit(
+        request.paths,
+        run=request.path_values["run_id"],
+        content_id=request.path_values["content_id"],
+        submission_key=request.required("submission_key", str),
+        response=request.required("response", str),
+        clock=request.clock,
+        command="assessment.submit",
+        actor=ACTOR,
+    )
+
+
 def _screen(request: Request) -> Any:
     return view_service.run_screen(
         request.paths, run=request.path_values["run_id"], clock=request.clock
@@ -385,6 +405,37 @@ ROUTES: tuple[Route, ...] = (
         response_models=(recording_service.CaptureReport,),
         upload="audio/*",
         upload_limit=recording_service.MAXIMUM_CAPTURE_BYTES,
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/runs/{RUN_ID}/tasks/{CONTENT_ID}/submission$"),
+        "assessment.submit",
+        _submit,
+        mutates=True,
+        summary="Hand in the learner's written answer to an outstanding written task, for a judge",
+        request_schema=_body(
+            {
+                "submission_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": written_service.MAXIMUM_SUBMISSION_KEY_CHARACTERS,
+                    "description": (
+                        "The page's own identifier for this answer, and the operation's "
+                        "idempotency key: the same key with the same answer replays the "
+                        "first call's result; with a different answer, or another task, "
+                        "it is refused with idempotency_conflict naming the recorded digest."
+                    ),
+                },
+                "response": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": written_service.MAXIMUM_WRITTEN_ANSWER_CHARACTERS,
+                },
+            },
+            required=["submission_key", "response"],
+        ),
+        response_models=(written_service.WrittenSubmissionReport,),
+        key_field="submission_key",
     ),
     Route(
         "POST",

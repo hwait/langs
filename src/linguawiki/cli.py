@@ -58,6 +58,7 @@ from linguawiki.services import speaking as speaking_service
 from linguawiki.services import transcripts as transcript_service
 from linguawiki.services import wiki as wiki_service
 from linguawiki.services import workspace as workspace_service
+from linguawiki.services import written_answers as written_service
 
 FORMATS = ("human", "json")
 # 0 succeeded, 1 ran but reported failures, 2 the command itself failed.
@@ -603,17 +604,32 @@ def _assessment_parser(subcommands: Any) -> None:
     )
     record.add_argument("--idempotency-key")
     _add_workspace(record)
+    # A written answer handed in for a judge: registration does not score, so the task
+    # stays served and waits, as a recording does. Long answers go in --response-file.
+    submit = actions.add_parser("submit", help="hand in a written answer for a judge to score")
+    submit.add_argument("--run")
+    _add_track_selector(submit)
+    submit.add_argument("--content-id", required=True)
+    submit.add_argument(
+        "--submission-key",
+        required=True,
+        help="this answer's own identifier; resending the same answer under it replays",
+    )
+    submit.add_argument("--response")
+    submit.add_argument(
+        "--response-file",
+        help="file holding the learner's answer, or - to read stdin",
+    )
+    _add_workspace(submit)
     pending = actions.add_parser(
-        "pending", help="recordings in a run waiting for a judge, with how to reach each"
+        "pending", help="answers in a run waiting for a judge, with how to reach each"
     )
     pending.add_argument("--run")
     _add_track_selector(pending)
     _add_workspace(pending)
     # A judge pulls work: each claim is one attempt under a lease, and the connection
     # closes before the judging starts.
-    claim = actions.add_parser(
-        "claim", help="hand pending recordings to a judge, each under a lease"
-    )
+    claim = actions.add_parser("claim", help="hand pending answers to a judge, each under a lease")
     claim.add_argument("--run")
     _add_track_selector(claim)
     claim.add_argument("--judge", required=True)
@@ -2265,29 +2281,42 @@ def _screen_lines(screen: view_service.RunScreen) -> str:
 
 def _pending_lines(report: recording_service.PendingReport) -> str:
     lines = [
-        f"{report.run_id}: {len(report.pending)} recording(s) waiting for a judge; recording "
+        f"{report.run_id}: {len(report.pending)} answer(s) waiting for a judge; recording "
         f"{'offered' if report.recording.offered else 'not offered'}, kept under "
         f"{report.recording.retention_policy}"
     ]
     for entry in report.pending:
-        where = entry.audio_path if entry.judgeable else f"cannot be judged: {entry.problem}"
         lines.append(
             f"  {entry.task.content_id} ({entry.task.dimension}, {entry.task.task_type}) "
-            f"recording {entry.submission.artifact_id}: {where}"
+            f"{_answer_line(entry)}"
         )
     return "\n".join(lines)
 
 
+def _answer_line(entry: recording_service.PendingJudgement) -> str:
+    """Where a judge finds an answer -- never the learner's words, which only the JSON
+    envelope carries: a terminal's scrollback is not somewhere a written answer is kept."""
+
+    if not entry.judgeable:
+        return f"{entry.kind} {entry.submission.submission_id}: cannot be judged: {entry.problem}"
+    if entry.kind == "text":
+        return (
+            f"written answer {entry.submission.submission_id}: "
+            f"{len(entry.response_text or '')} character(s), in response_text"
+        )
+    return f"recording {entry.submission.artifact_id}: {entry.audio_path}"
+
+
 def _claim_lines(report: judging_service.ClaimReport) -> str:
     lines = [
-        f"{report.run_id}: {report.judge} claimed {len(report.claimed)} recording(s) for "
+        f"{report.run_id}: {report.judge} claimed {len(report.claimed)} answer(s) for "
         f"{report.lease_seconds}s; {report.waiting} still waiting"
     ]
     for entry in report.claimed:
         lines.append(
             f"  claim {entry.claim_id}: {entry.task.content_id} ({entry.task.dimension}) "
-            f"submission {entry.submission.submission_id}, attempt {entry.attempts} of "
-            f"{report.max_attempts}, until {entry.lease_expires_at}: {entry.audio_path}"
+            f"attempt {entry.attempts} of {report.max_attempts}, until "
+            f"{entry.lease_expires_at}: {_answer_line(entry)}"
         )
     for withdrawn in report.withdrawn:
         lines.append(
@@ -2512,6 +2541,32 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             clock=clock,
             command=command,
         )
+    elif args.action == "submit":
+        response = _assessment_response(args)
+        if response is None:
+            raise LinguaWikiError(
+                "invalid_arguments",
+                "a written answer is handed in with --response or --response-file",
+                details=(ErrorDetail(field="response", reason="absent"),),
+            )
+        handed_in = written_service.submit(
+            paths,
+            run=args.run,
+            track=args.track,
+            content_id=args.content_id,
+            submission_key=args.submission_key,
+            response=response,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, handed_in, clock, handed_in.warnings),
+            f"{handed_in.content_id}: written answer {handed_in.submission.submission_id} "
+            f"is {handed_in.submission.status}"
+            + (" (already received)" if handed_in.replayed else "; waiting for a judge"),
+            args.format,
+        )
+        return 0
     elif args.action == "pending":
         waiting = recording_service.pending(paths, run=args.run, track=args.track, clock=clock)
         _print(
