@@ -1870,6 +1870,18 @@ def _judged_text(
             "from the answer itself; a verdict does not bring an excerpt of its own",
             details=(ErrorDetail(field="response_excerpt", reason="a written answer"),),
         )
+    if request.response_visibility == "withheld":
+        # The verdict row records a judge's narrower request in its visibility, and a
+        # written answer's verdict row is `withheld` already -- it keeps none of the words
+        # (R10) -- so a request to keep none on the result could not be told from no request
+        # once held, and would be applied as `full` at resume. Refused rather than widened.
+        raise LinguaWikiError(
+            "invalid_arguments",
+            f"{named.submission_id} is a written answer, and its result keeps what the "
+            "track's consent keeps of it, or an excerpt if the verdict asks for one; to keep "
+            "none of a learner's writing, withdraw transcript retention consent on the track",
+            details=(ErrorDetail(field="response_visibility", reason="a written answer"),),
+        )
     if request.applying is None:
         if request.score is None:
             raise LinguaWikiError(
@@ -2077,6 +2089,13 @@ class VerdictPlan:
     verdict_id: str | None = None
     held: bool = False
     warnings: tuple[str, ...] = ()
+    #: What the *verdict row* keeps of the answer, when that differs from what the result
+    #: keeps: `(visibility, excerpt)`. Set for a written answer, whose verdict keeps none of
+    #: its words (ruling R10) -- the row is insert-only and no consent withdrawal could
+    #: reach a copy there. `visibility` is `withheld`, or the narrower form the judge asked
+    #: the result to keep (`excerpt`), and the excerpt is always `None`. `None` means the
+    #: verdict keeps what the result keeps, as for every other verdict.
+    verdict_response: tuple[str, str | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2555,7 +2574,33 @@ def plan_verdict(
             if submission_id is not None
             else (None if named is None else named.submission_id),
         )
-    if held_row is not None:
+    verdict_response: tuple[str, str | None] | None = None
+    if written is not None:
+        # R10: a written answer's verdict keeps none of its words -- it names the submission,
+        # and its hash is the submission's digest. What it does keep is how much the judge
+        # asked the result to keep, when that is less than the whole.
+        if held_row is not None:
+            ceiling = "excerpt" if str(held_row[3]) == "excerpt" else "full"
+        else:
+            ceiling = request.response_visibility or "full"
+        verdict_response = ("excerpt" if ceiling == "excerpt" else "withheld", None)
+        # The result's text is the submission's *current* text, retained against the
+        # consent in force now -- which `_judged_text` has just found still keeps it whole --
+        # so a result written at resume can only narrow to what a verdict arriving now
+        # would keep.
+        visibility, excerpt, response_hash = evidence_service.retain_response(
+            written.text, requested=ceiling, preferences=record_track.preferences
+        )
+        rubric_json = json.dumps(
+            retain_rubric(
+                request.rubric if held_row is None else _stored_rubric(held_row[2]),
+                preferences=record_track.preferences,
+                full=visibility == "full",
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    elif held_row is not None:
         # Retained when it was received, and retained *again* against the consent in force
         # now: the result this writes is a new copy, and a learner who withdrew transcript
         # consent while the run was paused must not find their words copied into it. Only
@@ -2588,22 +2633,13 @@ def plan_verdict(
             sort_keys=True,
         )
     else:
-        if written is not None:
-            # The answer judged is the one the learner handed in, read from the submission
-            # -- through the same retention rule as every other copy, against the consent
-            # in force now, which `_judged_text` has just found still keeps it whole. A
-            # judge may ask to keep less of it on the result; never more.
-            response = written.text
-            requested: str | None = request.response_visibility or "full"
-        else:
-            requested = request.response_visibility
         # The response goes through retention either way. Scoring in the background and
         # discarding the result would make the stored score unexplainable, and a
         # caller-supplied excerpt reaches the column by the same route so that the consent
         # rule covers both and not only the one this stage added.
         visibility, excerpt, digest = evidence_service.retain_response(
             response if response is not None else request.response_excerpt,
-            requested=requested,
+            requested=request.response_visibility,
             preferences=record_track.preferences,
         )
         # `response_hash` promises the hash of the *response*, so that a withheld answer
@@ -2674,7 +2710,9 @@ def plan_verdict(
                 ),
                 score=resolved_score,
                 response_hash=response_hash,
-                visibility=visibility,
+                # Verdict against verdict: what this one's row would keep, which for a
+                # written answer is not what its result keeps.
+                visibility=visibility if verdict_response is None else verdict_response[0],
                 audio_artifact=audio_artifact,
                 code=conflict_code,
             )
@@ -2721,6 +2759,7 @@ def plan_verdict(
         verdict_id=standing_id,
         held=standing_held,
         warnings=tuple(warnings),
+        verdict_response=verdict_response,
     )
 
 
@@ -2775,8 +2814,12 @@ def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
                 plan.request.assessor_kind,
                 plan.request.assessor,
                 plan.request.confidence,
-                plan.response_visibility,
-                plan.response_excerpt,
+                plan.response_visibility
+                if plan.verdict_response is None
+                else plan.verdict_response[0],
+                plan.response_excerpt
+                if plan.verdict_response is None
+                else plan.verdict_response[1],
                 plan.response_hash,
                 now,
             ],

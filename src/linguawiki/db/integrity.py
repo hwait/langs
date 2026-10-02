@@ -1545,8 +1545,8 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
     # submission, and finalizing either refuses or withdraws them. One left pending on a
     # closed run can never be judged -- every judging command refuses a closed run -- and
     # nothing would ever say what became of it. A run closed before C6 could leave one.
-    stranded_pending = [
-        f"{submission_id} ({kind} on run {run_id}, which is {status})"
+    stranded_rows = [
+        (str(submission_id), str(kind), str(run_id), str(status))
         for submission_id, kind, run_id, status in database.query(
             "SELECT submission.submission_id, submission.kind, submission.run_id, "
             "coalesce(run.status, 'missing') FROM assessment_submissions submission "
@@ -1556,13 +1556,32 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "ORDER BY 1"
         )
     ]
+    stranded_pending = [
+        f"{submission_id} ({kind} on run {run_id}, which is {status})"
+        for submission_id, kind, run_id, status in stranded_rows
+    ]
+    # A remedy per kind, and only for the kinds present: `artifact purge` reaches a
+    # recording and nothing else, and naming it for a written answer would send an operator
+    # to a command that cannot help. A written answer is withdrawn -- its text cleared --
+    # by withdrawing transcript retention consent on its track, which settles every
+    # pending written answer the track has, whatever its run's state.
+    stranded_kinds = {kind for _, kind, _, _ in stranded_rows}
+    remedies = []
+    if "recording" in stranded_kinds:
+        remedies.append("`artifact purge` of its recording withdraws a recorded one")
+    if "text" in stranded_kinds:
+        remedies.append(
+            "setting transcript_retention_consent to false on its track (`track update "
+            "--input`) withdraws a written one and clears its text"
+        )
     checks.append(
         _named(
             "no_pending_submission_on_a_closed_run",
             stranded_pending,
             failed="a submission still waits for a judge on a run that is closed, so no "
-            "verdict can ever land on it; `artifact purge` of its recording withdraws a "
-            "recorded one, with its reason on the row",
+            "verdict can ever land on it; "
+            + ("; ".join(remedies) or "nothing in this release withdraws it")
+            + ", with its reason on the row",
             ok="no submission waits for a judge on a closed run",
             field="submissions",
         )

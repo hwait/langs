@@ -960,3 +960,34 @@ def test_a_written_answer_is_handed_in_over_http_and_waits_for_a_judge(
     (task,) = screen.payload["data"]["outstanding"]
     assert task["state"] == "awaiting-judge" and task["submission"]["kind"] == "text"
     assert answer[:20] not in json.dumps(screen.payload)
+
+
+def test_an_over_long_written_answer_gets_the_services_code_over_http(
+    running: RunningServer,
+) -> None:
+    """One input, one code: the route publishes no length bound, so the service's named
+    refusal is what a page sees -- as the CLI does -- rather than `invalid_contract`."""
+
+    from linguawiki.services import written_answers
+
+    opened = running.request(
+        "POST", "/runs", body={"dimensions": ["writing"], "scoring": "machine+judged"}
+    )
+    run_id = opened.payload["data"]["run_id"]
+    served = running.request("POST", f"/runs/{run_id}/tasks", body={})
+    path = f"/runs/{run_id}/tasks/{served.payload['data']['content_id']}/submission"
+
+    too_long = running.request(
+        "POST",
+        path,
+        body={
+            "submission_key": "page-long",
+            "response": "a" * (written_answers.MAXIMUM_WRITTEN_ANSWER_CHARACTERS + 1),
+        },
+    )
+    blank = running.request("POST", path, body={"submission_key": "page-blank", "response": ""})
+
+    assert too_long.status == 422
+    assert too_long.payload["error"]["code"] == "assessment_response_too_long"
+    assert blank.status == 400
+    assert blank.payload["error"]["code"] == "invalid_arguments"

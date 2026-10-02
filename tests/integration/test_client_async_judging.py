@@ -1869,6 +1869,12 @@ def test_a_written_answer_is_handed_in_claimed_with_its_text_and_judged(
         [submission_id, run_id],
     )
     assert result == [("full", ANSWER, digest(ANSWER), None, True)]
+    assert rows(
+        writing,
+        "SELECT response_visibility, response_excerpt, response_hash FROM assessment_verdicts "
+        "WHERE submission_id = ?",
+        [submission_id],
+    ) == [("withheld", None, digest(ANSWER))]
     assert submission_state(writing, submission_id) == ("judged", None)
     assert_clean(writing)
 
@@ -2086,12 +2092,13 @@ def test_a_held_verdict_on_a_written_answer_is_retained_again_when_the_run_resum
 
     held = verdict(writing, run_id, content_id, submission_id, score=0.4)
     assert held.held and held.verdict_status == "held"
+    # R10: the verdict keeps none of the words; the result takes them from the submission.
     assert rows(
         writing,
-        "SELECT response_visibility, response_hash FROM assessment_verdicts "
+        "SELECT response_visibility, response_excerpt, response_hash FROM assessment_verdicts "
         "WHERE submission_id = ?",
         [submission_id],
-    ) == [("full", digest(ANSWER))]
+    ) == [("withheld", None, digest(ANSWER))]
 
     resumed = resume(writing, run_id)
 
@@ -2236,3 +2243,160 @@ def test_the_cli_hands_in_a_written_answer_from_a_file(
     code, waiting = _cli(writing, capsys, "assessment", "pending", "--run", run_id)
     assert code == 0
     assert waiting["data"]["pending"][0]["response_text"] == ANSWER
+
+
+# --- fix round 1: R10 and minors ---------------------------------------------------------------
+
+
+def test_a_verdict_on_a_written_answer_keeps_none_of_its_words_after_consent_goes(
+    writing: PolishWorkspace,
+) -> None:
+    """R10: the applied verdict names the submission and its digest; withdrawing transcript
+    consent afterwards leaves no copy of the answer in a verdict row. The result's copy is
+    the deferred C1 gap, and is not asserted on here."""
+
+    run_id, content_id, submission_id = written(writing)
+    verdict(writing, run_id, content_id, submission_id, key="judged-1")
+    keep_writing(writing, False)
+
+    assert "assessment_verdicts" not in text_anywhere(writing, ANSWER)
+    assert rows(
+        writing,
+        "SELECT response_hash FROM assessment_verdicts WHERE submission_id = ?",
+        [submission_id],
+    ) == [(digest(ANSWER),)]
+    assert_clean(writing)
+
+
+def test_a_held_verdict_whose_consent_went_while_paused_leaves_no_text_and_is_voided(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+    pause(writing, run_id)
+    held = verdict(writing, run_id, content_id, submission_id, score=0.4)
+    assert held.held and "assessment_verdicts" not in text_anywhere(writing, ANSWER)
+
+    keep_writing(writing, False)
+    resumed = resume(writing, run_id)
+
+    # Task 4: the consent change withdrew the answer and voided what was held for it, so
+    # the resume has nothing to apply.
+    assert resumed.applied_verdicts == ()
+    assert outcome_of(writing, held.verdict_id) == ("void", withdrawal.NOT_RETAINED_CODE)
+    assert submission_state(writing, submission_id) == (
+        "withdrawn",
+        withdrawal.NOT_RETAINED_CODE,
+    )
+    assert text_anywhere(writing, ANSWER) == []
+    assert results(writing, run_id) == 0
+    assert_clean(writing)
+
+
+@pytest.mark.parametrize("paused", [False, True], ids=["applied", "held"])
+def test_a_judge_asking_for_an_excerpt_has_the_request_recorded_and_not_the_text(
+    writing: PolishWorkspace, paused: bool
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+    if paused:
+        pause(writing, run_id)
+
+    assessment_service.record(
+        writing.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=submission_id,
+        response_visibility="excerpt",
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=writing.clock,
+    )
+    if paused:
+        resume(writing, run_id)
+
+    assert rows(
+        writing,
+        "SELECT response_visibility, response_excerpt FROM assessment_verdicts "
+        "WHERE submission_id = ?",
+        [submission_id],
+    ) == [("excerpt", None)]
+    assert rows(
+        writing,
+        "SELECT response_visibility, response_excerpt FROM assessment_results WHERE run_id = ?",
+        [run_id],
+    ) == [("excerpt", ANSWER[:240])]
+    assert_clean(writing)
+
+
+def test_a_verdict_may_not_ask_a_written_answers_result_to_keep_nothing(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+
+    refused = refusal(
+        assessment_service.record,
+        writing.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=submission_id,
+        response_visibility="withheld",
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=writing.clock,
+    )
+
+    assert refused.payload.code == "invalid_arguments"
+    assert "transcript retention consent" in refused.payload.message
+    assert rows(writing, "SELECT count(*) FROM assessment_verdicts") == [(0,)]
+
+
+def test_an_over_long_answer_or_key_is_refused_by_name_before_anything_is_written(
+    writing: PolishWorkspace,
+) -> None:
+    from linguawiki.services import written_answers
+
+    run_id = start_written(writing).run_id
+    task = serve(writing, run_id)
+    limit = written_answers.MAXIMUM_WRITTEN_ANSWER_CHARACTERS
+    key_limit = written_answers.MAXIMUM_SUBMISSION_KEY_CHARACTERS
+
+    too_long = refusal(hand_in, writing, run_id, task.content_id, response="a" * (limit + 1))
+    long_key = refusal(hand_in, writing, run_id, task.content_id, key="k" * (key_limit + 1))
+
+    assert too_long.payload.code == "assessment_response_too_long"
+    assert long_key.payload.code == "invalid_arguments"
+    assert long_key.payload.details[0].field == "submission_key"
+    assert rows(writing, "SELECT count(*) FROM assessment_submissions") == [(0,)]
+    at_the_limit = hand_in(
+        writing, run_id, task.content_id, key="k" * key_limit, response="a" * limit
+    )
+    assert at_the_limit.submission.status == "pending"
+
+
+def test_a_written_answer_stranded_on_a_closed_run_is_given_a_remedy_that_works(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, _, submission_id = written(writing)
+    with (
+        open_writer(writing.paths, command="test.tamper") as database,
+        database.transaction() as transaction,
+    ):
+        # A run closed without settling what it owed, as a pre-C6 close or a hand repair
+        # leaves it.
+        transaction.execute(
+            "UPDATE assessment_runs SET status = 'abandoned' WHERE run_id = ?", [run_id]
+        )
+
+    check = failed_checks(writing)["no_pending_submission_on_a_closed_run"]
+    assert submission_id in check.context["submissions"]
+    assert "artifact purge" not in check.message
+    assert "transcript_retention_consent" in check.message
+
+    keep_writing(writing, False)
+
+    assert submission_state(writing, submission_id) == (
+        "withdrawn",
+        withdrawal.NOT_RETAINED_CODE,
+    )
+    assert "no_pending_submission_on_a_closed_run" not in failed_checks(writing)

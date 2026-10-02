@@ -415,10 +415,12 @@ ROUTES: tuple[Route, ...] = (
         summary="Hand in the learner's written answer to an outstanding written task, for a judge",
         request_schema=_body(
             {
+                # No length bounds on either field: the service refuses a blank or over-long
+                # key or answer by its own name, and one input gets one code on every surface
+                # -- the schema refusing the same input first would answer `invalid_contract`
+                # here and the named code from the CLI. The body cap still bounds what is read.
                 "submission_key": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": written_service.MAXIMUM_SUBMISSION_KEY_CHARACTERS,
                     "description": (
                         "The page's own identifier for this answer, and the operation's "
                         "idempotency key: the same key with the same answer replays the "
@@ -426,11 +428,7 @@ ROUTES: tuple[Route, ...] = (
                         "it is refused with idempotency_conflict naming the recorded digest."
                     ),
                 },
-                "response": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": written_service.MAXIMUM_WRITTEN_ANSWER_CHARACTERS,
-                },
+                "response": {"type": "string"},
             },
             required=["submission_key", "response"],
         ),
