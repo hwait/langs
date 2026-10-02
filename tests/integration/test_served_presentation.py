@@ -201,6 +201,8 @@ def test_serving_a_task_snapshots_the_presentation_as_shown(
             content_id=served.content_id,
             score=0.5,
             assessor_kind="ai",
+            # A judged pronunciation or spoken score names its judge (`evidence.py`).
+            assessor="synthetic-judge",
             clock=polish_workspace.clock,
         )
 
@@ -244,6 +246,8 @@ def _serve_until(workspace: PolishWorkspace, run_id: str, stable_key: str) -> st
             content_id=served.content_id,
             score=0.5,
             assessor_kind="ai",
+            # A judged pronunciation or spoken score names its judge (`evidence.py`).
+            assessor="synthetic-judge",
             clock=workspace.clock,
         )
 

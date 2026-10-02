@@ -1119,6 +1119,8 @@ def listing(
 class PurgeOutcome:
     """What one purge settled, written inside the caller's transaction."""
 
+    #: The moment the tombstone records, so a report states the same time the row does.
+    purged_at: str
     invalidated_observations: tuple[str, ...] = ()
     invalidated_results: tuple[str, ...] = ()
     withdrawn_submissions: tuple[str, ...] = ()
@@ -1210,6 +1212,7 @@ def write_purge(
     # that is true.
     _remove_file(absolute, artifact_id=artifact_id, reason=f"purged ({reason})")
     return PurgeOutcome(
+        purged_at=aware_utc(now).isoformat(),
         invalidated_observations=tuple(entry[0] for entry in dependent),
         invalidated_results=withdrawn.invalidated_results,
         withdrawn_submissions=withdrawn.withdrawn_submissions,
@@ -1342,7 +1345,7 @@ def purge(
         invalidated_results=outcome.invalidated_results,
         withdrawn_submissions=outcome.withdrawn_submissions,
         surviving_language_evidence=surviving,
-        purged_at=now.isoformat(),
+        purged_at=outcome.purged_at,
         warnings=tuple(warnings),
     )
 

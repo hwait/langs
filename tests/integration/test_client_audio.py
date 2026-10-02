@@ -998,9 +998,11 @@ def test_serving_waits_for_a_held_writer_and_then_refuses_to_start(
 ) -> None:
     from linguawiki.client import server as server_module
 
-    with open_writer(speaking.paths, command="test.hold"):
-        with pytest.raises(LinguaWikiError) as failure:
-            server_module.build_server(speaking.paths, clock=speaking.clock, recovery_wait=0.3)
+    with (
+        open_writer(speaking.paths, command="test.hold"),
+        pytest.raises(LinguaWikiError) as failure,
+    ):
+        server_module.build_server(speaking.paths, clock=speaking.clock, recovery_wait=0.3)
 
     assert failure.value.payload.code == "writer_locked"
     assert "recover" in failure.value.payload.message

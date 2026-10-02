@@ -214,7 +214,7 @@ def test_the_committed_top_level_matches_the_git_safe_allowlist(
 ) -> None:
     """Everything a fresh workspace commits at the top level is explicitly allowed."""
 
-    private = {"data", "artifacts", "imports", "drafts", "exports"}
+    private = {"data", "artifacts", "imports", "drafts", "exports", "staging"}
     top_level = {path.name for path in synthetic_workspace.root.iterdir()} - private
 
     assert top_level <= set(GIT_SAFE_TOP_LEVEL)
