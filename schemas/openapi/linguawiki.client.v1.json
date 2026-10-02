@@ -80,6 +80,11 @@
             "title": "Run Type",
             "type": "string"
           },
+          "scoring": {
+            "default": "any",
+            "title": "Scoring",
+            "type": "string"
+          },
           "started_at": {
             "anyOf": [
               {
@@ -490,9 +495,19 @@
             "title": "Level Code",
             "type": "string"
           },
+          "missing_recording": {
+            "default": false,
+            "title": "Missing Recording",
+            "type": "boolean"
+          },
           "modality": {
             "title": "Modality",
             "type": "string"
+          },
+          "needs_judge": {
+            "default": false,
+            "title": "Needs Judge",
+            "type": "boolean"
           },
           "permitted_help": {
             "anyOf": [
@@ -510,6 +525,23 @@
             "default": false,
             "title": "Plays Audio",
             "type": "boolean"
+          },
+          "plays_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Plays Remaining"
+          },
+          "plays_used": {
+            "default": 0,
+            "title": "Plays Used",
+            "type": "integer"
           },
           "presentation": {
             "anyOf": [
@@ -566,6 +598,55 @@
         "title": "OutstandingTask",
         "type": "object"
       },
+      "PlayReport": {
+        "additionalProperties": false,
+        "description": "One play of a task's recording, recorded before it was heard.",
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "plays_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Plays Remaining"
+          },
+          "plays_used": {
+            "title": "Plays Used",
+            "type": "integer"
+          },
+          "replay_allowance": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Replay Allowance"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "content_id",
+          "plays_used"
+        ],
+        "title": "PlayReport",
+        "type": "object"
+      },
       "PresentationChoice": {
         "additionalProperties": false,
         "description": "One button. `value` is submitted and scored; `display` is only drawn.",
@@ -593,6 +674,34 @@
           "value"
         ],
         "title": "PresentationChoice",
+        "type": "object"
+      },
+      "RunListReport": {
+        "additionalProperties": false,
+        "description": "The runs a fresh page could resume, newest first, for one track.",
+        "properties": {
+          "omitted": {
+            "default": 0,
+            "title": "Omitted",
+            "type": "integer"
+          },
+          "runs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AssessmentRunReport"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track_id"
+        ],
+        "title": "RunListReport",
         "type": "object"
       },
       "RunScreen": {
@@ -653,6 +762,11 @@
           },
           "run_type": {
             "title": "Run Type",
+            "type": "string"
+          },
+          "scoring": {
+            "default": "any",
+            "title": "Scoring",
             "type": "string"
           },
           "screen_version": {
@@ -1001,6 +1115,93 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/": {
+      "get": {
+        "operationId": "shell_index",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
+      }
+    },
+    "/app.css": {
+      "get": {
+        "operationId": "shell_app_css",
+        "responses": {
+          "200": {
+            "content": {
+              "text/css": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
+      }
+    },
+    "/app.js": {
+      "get": {
+        "operationId": "shell_app_js",
+        "responses": {
+          "200": {
+            "content": {
+              "text/javascript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
+      }
+    },
     "/health": {
       "get": {
         "operationId": "health",
@@ -1040,6 +1241,141 @@
       }
     },
     "/runs": {
+      "get": {
+        "operationId": "assessment_discover",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "track",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "description": "Comma-separated; resumable statuses only.",
+              "pattern": "^(in-progress|paused)(,(in-progress|paused))*$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/RunListReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The runs a page holding only its launch token can resume, newest first"
+      },
       "post": {
         "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
         "operationId": "assessment_start",
@@ -1084,6 +1420,12 @@
                     "enum": [
                       "pilot-calibration",
                       "placement"
+                    ]
+                  },
+                  "scoring": {
+                    "enum": [
+                      "any",
+                      "machine"
                     ]
                   },
                   "track": {
@@ -2207,6 +2549,316 @@
           }
         },
         "summary": "Serve the next task, or hand back the one already outstanding"
+      }
+    },
+    "/runs/{run_id}/tasks/{content_id}/audio": {
+      "get": {
+        "operationId": "assessment_recording",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A task this run served, by its content identifier.",
+            "in": "path",
+            "name": "content_id",
+            "required": true,
+            "schema": {
+              "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "audio/*": {
+                "schema": {
+                  "contentMediaType": "audio/*",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The exact bytes the snapshot names. A refusal is the JSON error envelope, never a partial body."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The recording an outstanding task was served with, as those exact bytes"
+      }
+    },
+    "/runs/{run_id}/tasks/{content_id}/plays": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_play",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A task this run served, by its content identifier.",
+            "in": "path",
+            "name": "content_id",
+            "required": true,
+            "schema": {
+              "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "idempotency_key"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/PlayReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Record one play of an outstanding task's recording, before it is heard"
       }
     }
   },

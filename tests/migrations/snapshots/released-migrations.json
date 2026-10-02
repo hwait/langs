@@ -30,5 +30,6 @@
   "0029_selected_clips": "3b17c2b04fe60b6c277bfc7b0559fb60289fceee1f7ce865dabf8b69ab973137",
   "0030_served_answer_key": "8e06a6d1e4d4cdae1ffdfc5e8b3605215afacce5b0ca0174a367938229ef43e5",
   "0031_task_presentation": "64face577fd80a2386209711ce1b4d33bdb61eb32651b1a45823275c7656069e",
-  "0032_served_help_allowance": "1ed377cf769a74f89ee2382854fccdf2a624dd29b8b7504b200ff8c26fe2305a"
+  "0032_served_help_allowance": "1ed377cf769a74f89ee2382854fccdf2a624dd29b8b7504b200ff8c26fe2305a",
+  "0033_task_plays": "67728c70b496768adf1794bdd1b42589455c93b231b9e770cbae4691fc2236ef"
 }

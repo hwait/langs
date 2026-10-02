@@ -1,4 +1,4 @@
-"""The route table: eight operations, each one service call wide.
+"""The route table: ten operations, each one service call wide.
 
 A handler resolves its arguments, calls one service function, and returns the report. There
 is no business logic here and there must not be -- selection, scoring, the stop rule, the
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel
@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from linguawiki.clock import Clock
 from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.paths import WorkspacePaths
+from linguawiki.placement import DEFAULT_SCORING, SCORING_CONDITIONS
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import assessment_view as view_service
 
@@ -56,6 +57,8 @@ def _body(properties: Mapping[str, Any], *, required: Sequence[str] = ()) -> dic
 #: A run identifier in a path. Matched narrowly so a path that is not one is a routing miss
 #: rather than a service-layer refusal about an identifier nobody could have meant.
 RUN_ID = r"(?P<run_id>asm_[0-9A-HJKMNP-TV-Z]{26})"
+#: A served task's content identifier in a path, matched as narrowly as a run's.
+CONTENT_ID = r"(?P<content_id>cnt_[0-9A-HJKMNP-TV-Z]{26})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +69,9 @@ class Request:
     body: Mapping[str, Any]
     clock: Clock
     paths: WorkspacePaths
+    #: The query string, one value per name. Only a route that publishes a query schema
+    #: receives one; every other route refuses a query rather than ignoring it.
+    query: Mapping[str, str] = field(default_factory=dict)
 
     def optional(self, name: str, kind: type[Any]) -> Any:
         """A body field of the expected type, or `None` when it is absent.
@@ -129,6 +135,13 @@ class Route:
     #: separate table is a second description of one thing, and the one that goes stale.
     request_schema: Mapping[str, Any] | None = None
     response_models: tuple[type[BaseModel], ...] = ()
+    #: The media type family a route answers with when it answers with bytes rather than
+    #: an envelope. Its handler returns an object carrying `media_type` and `data`; a
+    #: refusal is still the JSON error envelope, so a client reads failures one way.
+    binary: str | None = None
+    #: The query parameters this route reads, as a JSON Schema object over string values.
+    #: Validated like a body: a parameter the document does not publish is refused.
+    query_schema: Mapping[str, Any] | None = None
 
 
 def _start(request: Request) -> Any:
@@ -138,6 +151,7 @@ def _start(request: Request) -> Any:
         run_type=request.optional("run_type", str) or "pilot-calibration",
         dimensions=request.strings("dimensions") or None,
         modalities=request.strings("modalities") or None,
+        scoring=request.optional("scoring", str) or DEFAULT_SCORING,
         idempotency_key=request.optional("idempotency_key", str),
         clock=request.clock,
         command="assessment.start",
@@ -199,6 +213,37 @@ def _finalize(request: Request) -> Any:
     )
 
 
+def _discover(request: Request) -> Any:
+    status = request.query.get("status")
+    return assessment_service.resumable_runs(
+        request.paths,
+        track=request.query.get("track"),
+        statuses=None if status is None else status.split(","),
+        clock=request.clock,
+    )
+
+
+def _recording(request: Request) -> Any:
+    return assessment_service.served_recording(
+        request.paths,
+        run=request.path_values["run_id"],
+        content_id=request.path_values["content_id"],
+        clock=request.clock,
+    )
+
+
+def _play(request: Request) -> Any:
+    return assessment_service.record_play(
+        request.paths,
+        run=request.path_values["run_id"],
+        content_id=request.path_values["content_id"],
+        idempotency_key=request.required("idempotency_key", str),
+        clock=request.clock,
+        command="assessment.play",
+        actor=ACTOR,
+    )
+
+
 def _screen(request: Request) -> Any:
     return view_service.run_screen(
         request.paths, run=request.path_values["run_id"], clock=request.clock
@@ -225,10 +270,30 @@ ROUTES: tuple[Route, ...] = (
                 "run_type": {"enum": ["pilot-calibration", "placement"]},
                 "dimensions": {"type": "array", "items": {"type": "string", "minLength": 1}},
                 "modalities": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "scoring": {"enum": list(SCORING_CONDITIONS)},
                 "idempotency_key": IDEMPOTENCY_KEY,
             }
         ),
         response_models=(assessment_service.AssessmentRunReport,),
+    ),
+    Route(
+        "GET",
+        re.compile(r"^/runs$"),
+        "assessment.discover",
+        _discover,
+        mutates=False,
+        summary="The runs a page holding only its launch token can resume, newest first",
+        query_schema=_body(
+            {
+                "track": {"type": "string", "minLength": 1},
+                "status": {
+                    "type": "string",
+                    "pattern": "^(in-progress|paused)(,(in-progress|paused))*$",
+                    "description": "Comma-separated; resumable statuses only.",
+                },
+            }
+        ),
+        response_models=(assessment_service.RunListReport,),
     ),
     Route(
         "GET",
@@ -263,6 +328,25 @@ ROUTES: tuple[Route, ...] = (
             assessment_service.NextTaskReport,
             assessment_service.AssessmentRunReport,
         ),
+    ),
+    Route(
+        "GET",
+        re.compile(rf"^/runs/{RUN_ID}/tasks/{CONTENT_ID}/audio$"),
+        "assessment.recording",
+        _recording,
+        mutates=False,
+        summary="The recording an outstanding task was served with, as those exact bytes",
+        binary="audio/*",
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/runs/{RUN_ID}/tasks/{CONTENT_ID}/plays$"),
+        "assessment.play",
+        _play,
+        mutates=True,
+        summary="Record one play of an outstanding task's recording, before it is heard",
+        request_schema=_body({"idempotency_key": IDEMPOTENCY_KEY}, required=["idempotency_key"]),
+        response_models=(assessment_service.PlayReport,),
     ),
     Route(
         "POST",

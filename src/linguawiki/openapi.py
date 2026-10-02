@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from linguawiki import __version__
 from linguawiki.client import responses as client_responses
 from linguawiki.client import routes as client_routes
+from linguawiki.client import shell as client_shell
 from linguawiki.client.security import TOKEN_HEADER
 
 #: Where the generated document is committed. A subdirectory of `schemas/`, not beside the
@@ -178,7 +179,9 @@ def _path_template(pattern: str) -> str:
     """
 
     template = pattern.removeprefix("^").removesuffix("$")
-    return template.replace(client_routes.RUN_ID, "{run_id}")
+    return template.replace(client_routes.RUN_ID, "{run_id}").replace(
+        client_routes.CONTENT_ID, "{content_id}"
+    )
 
 
 #: Declared on every mutating operation, because every one of them refuses its absence. In
@@ -203,6 +206,25 @@ RUN_ID_PARAMETER: dict[str, Any] = {
     "description": "The run this operation acts on.",
     "schema": {"type": "string", "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$"},
 }
+
+
+CONTENT_ID_PARAMETER: dict[str, Any] = {
+    "name": "content_id",
+    "in": "path",
+    "required": True,
+    "description": "A task this run served, by its content identifier.",
+    "schema": {"type": "string", "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$"},
+}
+
+
+def _binary_response(media: str) -> dict[str, Any]:
+    return {
+        "description": (
+            "The exact bytes the snapshot names. A refusal is the JSON error envelope, "
+            "never a partial body."
+        ),
+        "content": {media: {"schema": {"type": "string", "contentMediaType": media}}},
+    }
 
 
 def document(schema_directory: Path) -> dict[str, Any]:
@@ -238,19 +260,48 @@ def document(schema_directory: Path) -> dict[str, Any]:
             }
         }
     }
+    for target, (_name, media) in client_shell.SHELL_FILES.items():
+        # The only operations with no security requirement, and declared as such: the first
+        # navigation cannot carry the token, which arrives in a fragment the browser never
+        # sends. `Host` is still enforced on them.
+        paths[target] = {
+            "get": {
+                "operationId": "shell_" + (target.strip("/").replace(".", "_") or "index"),
+                "summary": "The page shell, served from the installed package",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "A static file of the page shell.",
+                        "content": {media.split(";")[0]: {"schema": {"type": "string"}}},
+                    },
+                    "403": COMMON_RESPONSES["403"],
+                },
+            }
+        }
     for route in client_routes.ROUTES:
         template = _path_template(route.pattern.pattern)
         operation: dict[str, Any] = {
             "operationId": route.command.replace(".", "_"),
             "summary": route.summary,
             "responses": {
-                "200": _success_response(route.response_models),
+                "200": (
+                    _binary_response(route.binary)
+                    if route.binary is not None
+                    else _success_response(route.response_models)
+                ),
                 **COMMON_RESPONSES,
             },
         }
         parameters: list[dict[str, Any]] = []
         if "{run_id}" in template:
             parameters.append(RUN_ID_PARAMETER)
+        if "{content_id}" in template:
+            parameters.append(CONTENT_ID_PARAMETER)
+        if route.query_schema is not None:
+            parameters.extend(
+                {"name": name, "in": "query", "required": False, "schema": dict(schema)}
+                for name, schema in route.query_schema["properties"].items()
+            )
         if route.mutates:
             parameters.append(ORIGIN_PARAMETER)
         if parameters:

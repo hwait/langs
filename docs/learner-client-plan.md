@@ -28,12 +28,12 @@ write, and a definition of done. Take them in dependency order.
 | C2a | [Presentation contract and pack authoring](client/C2a-presentation-contract.md) ✅ shipped | — |
 | C2b | [Presentation persistence and the served snapshot](client/C2b-served-presentation-snapshot.md) ✅ shipped | C1, C2a |
 | C3 | [Server and generated contract](client/C3-server-and-contract.md) ✅ shipped | C1, C2a, C2b |
-| C4 | [Assessment screen](client/C4-assessment-screen.md) | C3 |
+| C4 | [Assessment screen](client/C4-assessment-screen.md) ✅ shipped | C3 |
 | C5 | [Audio, and the claims that rest on it](client/C5-audio-and-evidence.md) | C4 |
 | C6 | [Submission lifecycle and batching](client/C6-async-judging-and-batching.md) | C4, C5 |
 | C7 | [Session management](client/C7-session-management.md) | C4 |
 
-**C1, C2a, C2b and C3 are shipped. C4 is next and is unblocked.**
+**C1 through C4 are shipped. C5 and C7 are unblocked.**
 
 ## Stage numbering
 

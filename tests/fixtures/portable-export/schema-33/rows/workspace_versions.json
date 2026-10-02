@@ -1,0 +1,29 @@
+[
+  {
+    "applied_at": "2026-10-02T08:05:09.248840Z",
+    "audit_event_id": "evt_01M3XTAJZZKQVPEXY8WM32GZQT",
+    "component": "core",
+    "component_key": "core",
+    "sha256": "72b2750f8649d6f293ae6a5330d30c4efa4af86c9b0619039c70cb2b70778064",
+    "version": "0.1.0",
+    "workspace_id": "wsp_01M3XTAJTXKXE4D6NB0DV9GJE2"
+  },
+  {
+    "applied_at": "2026-10-02T08:05:09.248840Z",
+    "audit_event_id": "evt_01M3XTAJZZKQVPEXY8WM32GZQT",
+    "component": "database_schema",
+    "component_key": "database_schema",
+    "sha256": "68625aed90792a646c42795003556eac1dca9a7c92ad8579acb4a6c701a01332",
+    "version": "33",
+    "workspace_id": "wsp_01M3XTAJTXKXE4D6NB0DV9GJE2"
+  },
+  {
+    "applied_at": "2026-10-02T08:05:09.248840Z",
+    "audit_event_id": "evt_01M3XTAJZZKQVPEXY8WM32GZQT",
+    "component": "skill_bundle",
+    "component_key": "skill_bundle",
+    "sha256": "0a1a13e97b40e4da1a2b43cce93e6d587b871d873127eb3afb28851fd5d64e40",
+    "version": "0.1.0",
+    "workspace_id": "wsp_01M3XTAJTXKXE4D6NB0DV9GJE2"
+  }
+]

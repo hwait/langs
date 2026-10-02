@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from linguawiki import __version__, error_model
 from linguawiki import evidence as evidence_module
+from linguawiki import placement as placement_module
 from linguawiki import session as session_policy
 from linguawiki import sources as source_policy
 from linguawiki import transcripts as transcript_policy
@@ -526,6 +527,10 @@ def _client_parser(subcommands: Any) -> None:
         action="store_true",
         help="print the launch URL instead of opening a browser",
     )
+    serve.add_argument(
+        "--run",
+        help="open this run in the page; without it the page offers the newest resumable run",
+    )
     _add_workspace(serve)
 
 
@@ -539,6 +544,12 @@ def _assessment_parser(subcommands: Any) -> None:
     )
     start.add_argument("--dimension", action="append", default=[])
     start.add_argument("--modality", action="append", default=[])
+    start.add_argument(
+        "--scoring",
+        choices=placement_module.SCORING_CONDITIONS,
+        default=placement_module.DEFAULT_SCORING,
+        help="machine: serve only tasks the server can score without a judge",
+    )
     start.add_argument("--idempotency-key")
     _add_workspace(start)
     nxt = actions.add_parser("next", help="serve the next task")
@@ -2331,6 +2342,7 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             run_type=args.run_type,
             dimensions=args.dimension or None,
             modalities=args.modality or None,
+            scoring=args.scoring,
             idempotency_key=args.idempotency_key,
             clock=clock,
             command=command,
@@ -2398,7 +2410,7 @@ def _run_client(args: argparse.Namespace, clock: Clock, command: str) -> int:
     from linguawiki.client import server as client_server
 
     paths = _pack_workspace(args)
-    client = client_server.build_server(paths, port=args.port, clock=clock)
+    client = client_server.build_server(paths, port=args.port, clock=clock, run=args.run)
     # On stderr, so `--format json` output on stdout stays a single parseable document.
     print(f"LinguaWiki client listening on {client.origin}", file=sys.stderr)
     print(f"open {client.launch_url}", file=sys.stderr)

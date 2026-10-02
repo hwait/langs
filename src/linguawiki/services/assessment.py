@@ -17,6 +17,7 @@ Two refusals are the point of this module rather than incidental to it:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from collections.abc import Mapping, Sequence
@@ -56,11 +57,13 @@ from linguawiki.packs.format import (
 from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import (
     ALGORITHM_VERSION,
+    DEFAULT_SCORING,
     REUSE_WINDOW_MONTHS,
     SCORING_POLICY_VERSION,
     Candidate,
     DimensionState,
     assert_machine_scorable,
+    assert_scoring_condition,
     budget_for,
     close_dimension,
     confidence_label,
@@ -72,6 +75,8 @@ from linguawiki.placement import (
     record_score,
     score_response,
     select_task,
+    servable_candidate,
+    servable_under,
     unavailable_reason,
 )
 from linguawiki.provenance import PROMOTED_LIFECYCLES
@@ -159,6 +164,9 @@ class AssessmentRunReport(ContractModel):
     declared_level: str | None
     available_modalities: tuple[str, ...]
     dimensions: tuple[DimensionReport, ...]
+    #: `any` or `machine`: which tasks this run may serve, as it was opened. A client reads
+    #: it to know whether a task it is handed can need a judge.
+    scoring: str = DEFAULT_SCORING
     tasks_served: int = 0
     tasks_recorded: int = 0
     stop_reason: str | None = None
@@ -336,6 +344,37 @@ def _candidates(database: Database, pack_id: str) -> tuple[Candidate, ...]:
     )
 
 
+def _recorded_task_ids(database: Database, pack_id: str) -> frozenset[str]:
+    """The bank tasks whose presentation declares a recording to play.
+
+    Read through the one presentation parser, and a record it refuses counts as *not*
+    recorded rather than raising: this answers "may a machine run serve it", and a task
+    whose presentation cannot be read cannot be served either -- the serve path refuses it
+    by name, which is the better place for the message.
+    """
+
+    recorded: set[str] = set()
+    for content_id, raw in database.query(
+        "SELECT task.content_id, task.presentation_json FROM assessment_tasks task "
+        "JOIN content_records record ON record.content_id = task.content_id "
+        "WHERE record.pack_id = ? AND task.presentation_json IS NOT NULL",
+        [pack_id],
+    ):
+        try:
+            shown = parse_task_presentation(str(raw))
+        except LinguaWikiError:
+            continue
+        if shown is not None and shown.audio is not None:
+            recorded.add(str(content_id))
+    return frozenset(recorded)
+
+
+def _run_scoring(conditions: Mapping[str, Any]) -> str:
+    """The scoring condition a run was opened under. A run older than it is `any`."""
+
+    return str(conditions.get("scoring") or DEFAULT_SCORING)
+
+
 def _excluded_task_ids(
     database: Database, *, track_id: str, run_id: str, clock: Clock
 ) -> tuple[str, ...]:
@@ -417,6 +456,7 @@ def _outstanding_dimensions(database: Database, run_id: str) -> Mapping[str, str
 STARTED_EVENT = "assessment.started"
 SERVED_EVENT = "assessment.served"
 RECORDED_EVENT = "assessment.recorded"
+PLAYED_EVENT = "assessment.played"
 FINALIZED_EVENT = "assessment.finalized"
 
 
@@ -426,6 +466,12 @@ FINALIZED_EVENT = "assessment.finalized"
 #: here instead. `cli` is the default because the CLI is the entry point that existed first
 #: and a caller that forgets to say is, in practice, the CLI.
 DEFAULT_ACTOR = "cli"
+
+#: The surfaces that record every play of a recording before it is heard. Only they can
+#: claim *zero* -- that the learner answered without listening -- so a result with no play
+#: rows gets a count from them and `NULL` from any other surface, which is the truth about
+#: a CLI or skill that never saw the plays. Recorded plays count whoever records the result.
+PLAY_TRACKING_ACTORS: frozenset[str] = frozenset({"client"})
 
 
 #: Why a report names the task it names. `informativeness` is selection having run;
@@ -675,6 +721,7 @@ def start(
     run_type: str = "pilot-calibration",
     dimensions: Sequence[str] | None = None,
     modalities: Sequence[str] | None = None,
+    scoring: str = DEFAULT_SCORING,
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.start",
@@ -687,6 +734,7 @@ def start(
         raise LinguaWikiError(
             "invalid_arguments", "run_type must be pilot-calibration or placement"
         )
+    assert_scoring_condition(scoring)
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = learner_service.resolve_track(database, track)
         record = learner_service.track_context(database, track_id)
@@ -703,6 +751,9 @@ def start(
             run_type=run_type,
             dimensions=sorted(dimensions) if dimensions else None,
             modalities=sorted(modalities) if modalities else None,
+            # Only when it is not the default, so a keyed start made before the condition
+            # existed still hashes to what it hashed to then and its retry stays a retry.
+            **({} if scoring == DEFAULT_SCORING else {"scoring": scoring}),
         )
         replayed = idempotency.resolve(
             database,
@@ -748,6 +799,7 @@ def start(
             )
         available = tuple(modalities) if modalities else _available_modalities(record.preferences)
         candidates = _candidates(database, pack_row["pack_id"])
+        recorded = _recorded_task_ids(database, pack_row["pack_id"])
         levels = record.framework_levels
         declared_index = (
             float(levels.index(record.declared_level)) if record.declared_level in levels else None
@@ -780,6 +832,8 @@ def start(
             servable = [candidate for candidate in bank if candidate.modality in available]
             if reason is None and not servable:
                 reason = "the pack's tasks for this dimension need an unavailable modality"
+            if reason is None:
+                reason = servable_under(servable, scoring=scoring, recorded=recorded)[1]
             if reason is not None:
                 state = close_dimension(state, reason=reason)
                 warnings.append(f"{dimension} is not tested: {reason}")
@@ -812,6 +866,7 @@ def start(
                             # later renames the same distribution to a different band.
                             "framework_levels": list(levels),
                             "available_modalities": list(available),
+                            "scoring": scoring,
                             "declared_level": record.declared_level,
                             "dimension_kinds": {
                                 dimension: kinds[dimension] for dimension in requested
@@ -1006,7 +1061,19 @@ def next_task(
         open_states = [state for state in states if state.status == "open"]
         if not open_states:
             return run_report(database, run_id)
-        candidates = _candidates(database, pack_row["pack_id"])
+        # The run's own condition, never the caller's: a run opened for machine scoring
+        # never serves a task that needs a judge, whatever the bank has come to hold.
+        scoring = _run_scoring(conditions)
+        recorded = (
+            frozenset()
+            if scoring == DEFAULT_SCORING
+            else _recorded_task_ids(database, pack_row["pack_id"])
+        )
+        candidates = tuple(
+            candidate
+            for candidate in _candidates(database, pack_row["pack_id"])
+            if servable_candidate(candidate, scoring=scoring, recorded=recorded)
+        )
         excluded = _excluded_task_ids(
             database, track_id=str(row[1]), run_id=run_id, clock=active_clock
         )
@@ -1523,7 +1590,7 @@ def record(
         served = database.one(
             "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
             "content_family, modality, is_anchor, content_hash, expected_json, "
-            "prompt_snapshot, rubric_json FROM assessment_run_tasks "
+            "prompt_snapshot, rubric_json, asset_identity_json FROM assessment_run_tasks "
             "WHERE run_id = ? AND content_id = ?",
             [run_id, content_id],
         )
@@ -1622,14 +1689,25 @@ def record(
         prior_snapshot = list(state.posterior)
         updated = record_score(state, candidate, score=resolved_score, level_count=len(levels))
         result_id = AssessmentId.new()
+        # Derived from the play rows, never accepted: a caller-supplied count would be one
+        # more place a caller could talk its way into a different claim. Only for a task
+        # that played a recording, and only from a surface that records plays.
+        #
+        # Recorded plays are a fact whoever records the result: a page plays, the learner
+        # pauses, and the CLI scores the answer. Only "no plays" depends on the surface --
+        # zero from one that records plays, unknown (`NULL`) from one that cannot know.
+        plays = _plays_used(database, run_id, content_id) if served[13] is not None else 0
+        play_count = (
+            plays if served[13] is not None and (plays or actor in PLAY_TRACKING_ACTORS) else None
+        )
         with database.transaction() as transaction:
             now = transaction.now()
             transaction.execute(
                 "INSERT INTO assessment_results (result_id, run_id, content_id, dimension, "
                 "raw_score, rubric_json, response_excerpt, assessor_kind, assessor, confidence, "
                 "prior_json, posterior_json, difficulty, recorded_at, scoring_policy_version, "
-                "score_source, response_visibility, response_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "score_source, response_visibility, response_hash, play_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     str(result_id),
                     run_id,
@@ -1649,6 +1727,7 @@ def record(
                     score_source,
                     visibility,
                     response_hash,
+                    play_count,
                 ],
             )
             transaction.execute(
@@ -1697,6 +1776,155 @@ def record(
                     idempotency_key=idempotency_key,
                 )
         return _reported(run_report(database, run_id), warnings)
+
+
+class PlayReport(ContractModel):
+    """One play of a task's recording, recorded before it was heard."""
+
+    run_id: str
+    content_id: str
+    #: Plays recorded for this task, this one included.
+    plays_used: int
+    #: The snapshotted allowance, counted in plays: the first hearing is a play. `None` is
+    #: unlimited.
+    replay_allowance: int | None = None
+    #: `None` when the allowance is unlimited, so "none left" and "no limit" cannot be
+    #: confused by a client drawing the count.
+    plays_remaining: int | None = None
+
+
+def _plays_used(database: Database, run_id: str, content_id: str) -> int:
+    return int(
+        database.scalar(
+            "SELECT count(*) FROM assessment_task_plays WHERE run_id = ? AND content_id = ?",
+            [run_id, content_id],
+        )
+    )
+
+
+def plays_remaining(allowance: int | None, used: int) -> int | None:
+    """What a finite allowance has left. One answer, for the play path and the screen."""
+
+    return None if allowance is None else max(allowance - used, 0)
+
+
+def record_play(
+    paths: WorkspacePaths,
+    *,
+    content_id: str,
+    idempotency_key: str,
+    run: str | None = None,
+    track: str | None = None,
+    clock: Clock | None = None,
+    command: str = "assessment.play",
+    actor: str = DEFAULT_ACTOR,
+) -> PlayReport:
+    """Record that the learner is about to play a served task's recording.
+
+    Called *before* playback, and playback starts only when it succeeds: a play recorded
+    after the fact can be lost with the response, and a play past the allowance has to be
+    refused while it is still unheard.
+
+    The key is required. Plays accumulate, so a keyless retry would be a second play --
+    there is no state a retry could converge on, which is why `/status` may go keyless
+    and this may not.
+    """
+
+    active_clock = clock or SystemClock()
+    if not idempotency_key or not idempotency_key.strip():
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "a play needs an idempotency key, because plays accumulate and a retry without "
+            "one would count a second hearing",
+            details=(ErrorDetail(field="idempotency_key", reason="absent"),),
+        )
+    with open_writer(paths, command=command, clock=active_clock) as database:
+        track_id = None if track is None else learner_service.resolve_track(database, track)
+        run_id = resolve_run(database, run, track_id=track_id)
+        row = _run_row(database, run_id)
+        fingerprint = idempotency.request_hash(
+            operation=PLAYED_EVENT, run_id=run_id, content_id=content_id
+        )
+        # Before every guard: a retry of a play that landed is answered with that play,
+        # whatever the run or the task has become since.
+        replay = idempotency.resolve(
+            database, key=idempotency_key, event_type=PLAYED_EVENT, request_hash=fingerprint
+        )
+        if replay is not None:
+            allowance = replay.get("replay_allowance")
+            used = int(replay["plays_used"])
+            return PlayReport(
+                run_id=run_id,
+                content_id=content_id,
+                plays_used=used,
+                replay_allowance=None if allowance is None else int(allowance),
+                plays_remaining=plays_remaining(
+                    None if allowance is None else int(allowance), used
+                ),
+            )
+        _assert_running(run_id, status=str(row[4]), action="play a recording")
+        # Read from the record of the serving, which also proves the recording is still the
+        # one the task was served with: a replaced recording is a different question, and
+        # playing it would credit the learner's answer to the wrong one.
+        shown = served_task_report(database, run_id, content_id=content_id)
+        if shown.status != "served":
+            raise LinguaWikiError(
+                "assessment_task_settled",
+                f"{content_id} is {shown.status}, so its recording is no longer part of an "
+                "open question",
+                details=(ErrorDetail(field="content_id", reason=f"task is {shown.status}"),),
+            )
+        if shown.presentation is None or shown.presentation.audio is None or shown.asset is None:
+            raise LinguaWikiError(
+                "assessment_task_plays_nothing",
+                f"{content_id} was served with no recording, so there is nothing to play",
+                details=(ErrorDetail(field="content_id", reason="no recording"),),
+            )
+        allowance = shown.presentation.audio.replay_allowance
+        used = _plays_used(database, run_id, content_id)
+        if allowance is not None and used >= allowance:
+            raise LinguaWikiError(
+                "assessment_replays_exhausted",
+                f"{content_id} may be played {allowance} time(s), and has been",
+                details=(ErrorDetail(field="content_id", reason=f"allowance {allowance}"),),
+            )
+        with database.transaction() as transaction:
+            now = transaction.now()
+            transaction.execute(
+                "INSERT INTO assessment_task_plays (play_id, run_id, content_id, "
+                "idempotency_key, played_at) VALUES (?, ?, ?, ?, ?)",
+                [str(AssessmentId.new()), run_id, content_id, idempotency_key, now],
+            )
+            migration_module.record_audit_entry(
+                transaction,
+                command=command,
+                correlation_id=EventId.new(),
+                outcome="succeeded",
+                actor=actor,
+                affected_records_json=json.dumps([run_id, content_id], sort_keys=True),
+                after_summary=f"played {content_id} ({used + 1} of {allowance or 'unlimited'})",
+            )
+            migration_module.record_domain_event(
+                transaction,
+                event_type=PLAYED_EVENT,
+                aggregate_type="assessment_run",
+                aggregate_id=run_id,
+                correlation_id=EventId.new(),
+                payload_json=idempotency.payload(
+                    fingerprint,
+                    content_id=content_id,
+                    plays_used=used + 1,
+                    replay_allowance=allowance,
+                ),
+                idempotency_key=idempotency_key,
+            )
+        return PlayReport(
+            run_id=run_id,
+            content_id=content_id,
+            plays_used=used + 1,
+            replay_allowance=allowance,
+            plays_remaining=plays_remaining(allowance, used + 1),
+        )
 
 
 def set_status(
@@ -2097,6 +2325,104 @@ def _resolve_served_asset(
     return identity
 
 
+#: The most a recording served to the page may be. A listening task plays seconds of
+#: audio; anything near this is not a placement recording, and the single-threaded server
+#: would serve nothing else while it streamed.
+MAXIMUM_RECORDING_BYTES = 32 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class ServedRecording:
+    """The bytes of the recording a served task plays, already proven to be those bytes."""
+
+    content_id: str
+    media_type: str
+    data: bytes
+
+
+def _asset_unavailable(content_id: str, reason: str) -> LinguaWikiError:
+    return LinguaWikiError(
+        "assessment_asset_unavailable",
+        f"the recording {content_id} this task plays cannot be read: {reason}",
+        details=(ErrorDetail(field="asset", reason=reason),),
+    )
+
+
+def served_recording(
+    paths: WorkspacePaths,
+    *,
+    content_id: str,
+    run: str | None = None,
+    clock: Clock | None = None,
+) -> ServedRecording:
+    """The recording an outstanding task was served with, or a refusal naming why not.
+
+    Resolved through the run's own record of the serving, never by re-reading the pack, and
+    hashed as it is read: the bytes handed back are compared with the digest the snapshot
+    holds, so a learner hears the recording the task was served with or none. A file
+    replaced between the pack load and this read is caught by that hash, not trusted
+    because the load was clean.
+
+    Only while the task is outstanding. A settled task's recording is no longer part of an
+    open question, and serving it would let a finished answer be revisited.
+    """
+
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        run_id = resolve_run(database, run)
+        shown = served_task_report(database, run_id, content_id=content_id)
+        if shown.status != "served":
+            raise LinguaWikiError(
+                "assessment_task_settled",
+                f"{content_id} is {shown.status}, so its recording is no longer part of an "
+                "open question",
+                details=(ErrorDetail(field="content_id", reason=f"task is {shown.status}"),),
+            )
+        identity = shown.asset
+        if identity is None:
+            raise LinguaWikiError(
+                "assessment_task_plays_nothing",
+                f"{content_id} was served with no recording, so there is nothing to play",
+                details=(ErrorDetail(field="content_id", reason="no recording"),),
+            )
+        pack = _pack_on_disk(database, _run_pack_key(database, run_id))
+    resolved = (
+        None
+        if pack is None
+        else next(
+            (asset for asset in pack.assets if str(asset.content_id) == identity.content_id),
+            None,
+        )
+    )
+    if pack is None or resolved is None:
+        raise _asset_unavailable(identity.content_id, "the pack no longer holds it")
+    try:
+        root = pack.root.resolve(strict=True)
+        path = (pack.root / resolved.asset.path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        # `RuntimeError` is a symlink loop under Python 3.12, which no handler above this
+        # one would catch.
+        raise _asset_unavailable(identity.content_id, "its path cannot be resolved") from None
+    if not path.is_relative_to(root) or not path.is_file():
+        raise _asset_unavailable(identity.content_id, "its path leaves the pack directory")
+    try:
+        size = path.stat().st_size
+        if size > MAXIMUM_RECORDING_BYTES:
+            raise _asset_unavailable(identity.content_id, f"it is {size} bytes, over the cap")
+        data = path.read_bytes()
+    except OSError:
+        raise _asset_unavailable(identity.content_id, "it cannot be read") from None
+    if hashlib.sha256(data).hexdigest() != identity.sha256:
+        raise LinguaWikiError(
+            "assessment_asset_changed",
+            f"the recording {identity.content_id} has been replaced since it was served; "
+            "a different recording is a different question",
+            details=(ErrorDetail(field="asset", reason=f"served {identity.sha256}"),),
+        )
+    return ServedRecording(
+        content_id=identity.content_id, media_type=resolved.asset.media_type, data=data
+    )
+
+
 def served_task(
     paths: WorkspacePaths,
     *,
@@ -2206,6 +2532,65 @@ def _assert_no_presentation_was_lost(
     )
 
 
+#: The statuses a run can be resumed from. Discovery lists nothing else, because a page
+#: offering a finalized or abandoned run would be offering work that cannot be done.
+RESUMABLE_STATUSES: tuple[str, ...] = ("in-progress", "paused")
+#: How many runs one discovery answer carries. A learner has a handful of open runs; the
+#: bound exists so the answer has one, and what it leaves out is counted in `omitted`.
+DISCOVERY_LIMIT = 20
+
+
+class RunListReport(ContractModel):
+    """The runs a fresh page could resume, newest first, for one track."""
+
+    track_id: str
+    runs: tuple[AssessmentRunReport, ...] = ()
+    #: Resumable runs beyond the bound. Half a list looks exactly like a short one, so the
+    #: count of what was left out travels with what was kept.
+    omitted: int = 0
+
+
+def resumable_runs(
+    paths: WorkspacePaths,
+    *,
+    track: str | None = None,
+    statuses: Sequence[str] | None = None,
+    clock: Clock | None = None,
+) -> RunListReport:
+    """The runs a page that holds only a launch token can find and offer to resume.
+
+    Every read route needs a run identifier and the launch URL carries only the token, so
+    without this a fresh page cannot find the run it should resume. The track resolves
+    exactly as it does for every other command -- the workspace's only active track when
+    none is named -- so a run is never offered to the wrong learner's page.
+    """
+
+    wanted = tuple(statuses) if statuses else RESUMABLE_STATUSES
+    unknown = sorted(set(wanted) - set(RESUMABLE_STATUSES))
+    if unknown:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            f"only resumable runs can be discovered; {unknown} is not one of "
+            f"{list(RESUMABLE_STATUSES)}",
+            details=(ErrorDetail(field="status", reason="not resumable"),),
+        )
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        track_id = learner_service.resolve_track(database, track)
+        placeholders = ", ".join("?" for _ in wanted)
+        rows = database.query(
+            "SELECT run_id FROM assessment_runs "
+            f"WHERE track_id = ? AND status IN ({placeholders}) "
+            "ORDER BY started_at DESC, run_id DESC",
+            [track_id, *wanted],
+        )
+        kept = rows[:DISCOVERY_LIMIT]
+        return RunListReport(
+            track_id=track_id,
+            runs=tuple(run_report(database, str(row[0])) for row in kept),
+            omitted=len(rows) - len(kept),
+        )
+
+
 def report(
     paths: WorkspacePaths,
     *,
@@ -2286,6 +2671,7 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
         declared_level=conditions.get("declared_level"),
         available_modalities=tuple(str(value) for value in conditions["available_modalities"]),
         dimensions=tuple(reports),
+        scoring=_run_scoring(conditions),
         tasks_served=served,
         tasks_recorded=recorded,
         stop_reason=None if row[7] is None else str(row[7]),
@@ -2301,11 +2687,17 @@ __all__ = [
     "AssessmentRunReport",
     "DimensionReport",
     "NextTaskReport",
+    "PlayReport",
+    "RunListReport",
     "finalize",
     "next_task",
+    "plays_remaining",
     "record",
+    "record_play",
     "report",
+    "resumable_runs",
     "seed_declared_estimates",
+    "served_recording",
     "set_status",
     "start",
 ]

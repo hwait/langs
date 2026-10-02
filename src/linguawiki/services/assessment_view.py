@@ -21,6 +21,7 @@ from linguawiki.contracts import ServedAsset, TaskPresentation
 from linguawiki.db.connection import Database, open_reader
 from linguawiki.models import ContractModel
 from linguawiki.paths import WorkspacePaths
+from linguawiki.placement import DEFAULT_SCORING, MACHINE_SCORABLE_TASK_TYPES, PLAYED_MODALITY
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import learners as learner_service
 
@@ -59,6 +60,21 @@ class OutstandingTask(ContractModel):
     #: Whether the learner has a recording to play. A client needs this before it reads the
     #: presentation, because it decides whether the screen has a player on it at all.
     plays_audio: bool = False
+    #: Whether only a judge can score this task. A run opened under `any` can be holding
+    #: one, and a client with no judge must say so rather than offer an answer the server
+    #: will refuse to compute. Derived from the served task type through the scoring
+    #: policy, never re-decided by the client.
+    needs_judge: bool = False
+    #: Whether this task is heard and was served with nothing to play. A run opened under
+    #: `any` can hold one: it is machine-scorable, so `needs_judge` is false, and drawing
+    #: its prompt instead would turn a listening task into a reading one. A client must not
+    #: offer it.
+    missing_recording: bool = False
+    #: Plays recorded so far, and what a finite allowance has left (`None`: unlimited).
+    #: Read from the play rows, so a reloaded page, a resumed run, and a later sitting all
+    #: show the same number -- nothing about plays lives only in a page.
+    plays_used: int = 0
+    plays_remaining: int | None = None
 
 
 class RunScreen(ContractModel):
@@ -75,6 +91,9 @@ class RunScreen(ContractModel):
     framework_id: str
     framework_levels: tuple[str, ...] = ()
     available_modalities: tuple[str, ...] = ()
+    #: `any` or `machine`, as the run was opened. Under `any` an outstanding task can need a
+    #: judge, which a client without one must not offer to answer.
+    scoring: str = DEFAULT_SCORING
     dimensions: tuple[assessment_service.DimensionReport, ...] = ()
     #: At most one per *open* dimension, after the serve-time guard, and possibly one more
     #: per dimension that closed while holding a task -- which `record` still accepts, so a
@@ -96,6 +115,18 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
     outstanding = []
     for content_id in assessment_service.outstanding_task_ids(database, run_id):
         shown = assessment_service.served_task_report(database, run_id, content_id=content_id)
+        audio = None if shown.presentation is None else shown.presentation.audio
+        used = (
+            0
+            if audio is None
+            else int(
+                database.scalar(
+                    "SELECT count(*) FROM assessment_task_plays "
+                    "WHERE run_id = ? AND content_id = ?",
+                    [run_id, content_id],
+                )
+            )
+        )
         outstanding.append(
             OutstandingTask(
                 content_id=content_id,
@@ -113,7 +144,15 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
                 rubric_version=shown.rubric_version,
                 permitted_help=shown.permitted_help,
                 answer_with=_answer_mode(shown.presentation),
-                plays_audio=shown.presentation is not None and shown.presentation.audio is not None,
+                plays_audio=audio is not None,
+                plays_used=used,
+                plays_remaining=(
+                    None
+                    if audio is None
+                    else assessment_service.plays_remaining(audio.replay_allowance, used)
+                ),
+                needs_judge=shown.task_type not in MACHINE_SCORABLE_TASK_TYPES,
+                missing_recording=shown.modality == PLAYED_MODALITY and audio is None,
             )
         )
     # No bound and no `omissions`, and this is the place to say why: the guard in the serve
@@ -132,6 +171,7 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
         framework_id=run.framework_id,
         framework_levels=run.framework_levels,
         available_modalities=run.available_modalities,
+        scoring=run.scoring,
         dimensions=run.dimensions,
         outstanding=tuple(outstanding),
         tasks_served=run.tasks_served,

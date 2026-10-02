@@ -18,15 +18,17 @@ everything else comes from the service layer unchanged.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
+from urllib.parse import parse_qsl
 
 from jsonschema import Draft202012Validator
 
 from linguawiki import __version__
-from linguawiki.client import responses, routes, runtime, security
+from linguawiki.client import responses, routes, runtime, security, shell
 from linguawiki.client.security import TOKEN_HEADER
 from linguawiki.clock import Clock, SystemClock
 from linguawiki.db import migrations as migration_module
@@ -49,6 +51,8 @@ MAXIMUM_BODY_BYTES = 256 * 1024
 #: What the launch command opens. The token rides in the **fragment**: a fragment is never
 #: sent to a server, so it reaches no access log, no `Referer`, and no proxy.
 LAUNCH_FRAGMENT = "token="
+#: The optional launch-time run reference, after the token in the same fragment.
+LAUNCH_RUN = "run="
 
 
 def _health() -> dict[str, object]:
@@ -75,6 +79,10 @@ class ClientServer:
     server: HTTPServer
     paths: WorkspacePaths
     token: str
+    #: A run the launch command asked the page to open, carried in the fragment beside the
+    #: token. Without it a fresh page uses discovery; with it, the page opens this run or
+    #: says by name why it cannot.
+    run: str | None = None
     serving: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -87,7 +95,8 @@ class ClientServer:
 
     @property
     def launch_url(self) -> str:
-        return f"{self.origin}/#{LAUNCH_FRAGMENT}{self.token}"
+        reference = "" if self.run is None else f"&{LAUNCH_RUN}{self.run}"
+        return f"{self.origin}/#{LAUNCH_FRAGMENT}{self.token}{reference}"
 
     def serve_forever(self) -> None:
         """Serve until `close`, recording that `shutdown` is now safe to call."""
@@ -150,12 +159,23 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 headers, repeated = _headers(self)
                 security.assert_single_valued(repeated)
                 security.assert_host(headers, port=int(client["port"]))
+                # The shell, and only the shell, before the token: the first navigation
+                # cannot carry a header, and the token arrives in a fragment the browser
+                # never sends. Matched on the raw target, so no other spelling is the shell.
+                public = shell.shell_file(self.path) if method == "GET" else None
+                if public is not None:
+                    command = "client.shell"
+                    self._respond(
+                        200, public[0], content_type=public[1], extra_headers=shell.HEADERS
+                    )
+                    return
                 security.assert_token(headers, expected=str(client["token"]))
-                if self.path == "/health" and method == "GET":
+                path, query = _split_target(self.path)
+                if path == "/health" and method == "GET":
                     command = "client.health"
                     self._respond(200, responses.success(command, _health(), clock))
                     return
-                found = routes.match(method, self.path)
+                found = routes.match(method, path)
                 if found is None:
                     self._route_miss(method)
                     return
@@ -165,7 +185,10 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                     security.assert_origin(headers, origin=str(client["origin"]))
                 body = self._read_body()
                 _assert_declared_shape(body, route)
-                request = routes.Request(path_values=values, body=body, clock=clock, paths=paths)
+                _assert_declared_query(query, route)
+                request = routes.Request(
+                    path_values=values, body=body, clock=clock, paths=paths, query=query
+                )
                 # One reader per read, one writer per mutation, neither held across
                 # requests: the service call opens and closes its own connection inside
                 # this block, and the response is written after it has closed.
@@ -188,6 +211,9 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                     else 1
                 )
                 report = with_retry(lambda: route.handler(request), attempts=attempts)
+                if route.binary is not None:
+                    self._respond(200, report.data, content_type=report.media_type)
+                    return
                 warnings = tuple(getattr(report, "warnings", ()) or ())
                 self._respond(
                     200,
@@ -209,7 +235,7 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 )
 
         def _route_miss(self, method: str) -> None:
-            allowed = routes.methods_for(self.path)
+            allowed = routes.methods_for(_split_target(self.path)[0])
             if allowed:
                 # "Wrong verb" and "no such thing" send a caller to different places.
                 self._refuse(
@@ -296,7 +322,12 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
             )
 
         def _respond(
-            self, status: int, body: bytes, *, extra_headers: dict[str, str] | None = None
+            self,
+            status: int,
+            body: bytes,
+            *,
+            extra_headers: dict[str, str] | None = None,
+            content_type: str = "application/json; charset=utf-8",
         ) -> None:
             # One request per connection. HTTP/1.1 keeps a connection alive by default, and
             # this server handles one at a time: the first client's idle socket then sat in
@@ -308,7 +339,7 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
             self.close_connection = True
             self.send_response(status)
             self.send_header("Connection", "close")
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             # A local page, and nothing else, may read these answers. `Access-Control-*` is
             # deliberately absent: granting a cross-origin read would undo the origin check.
@@ -373,6 +404,54 @@ def _assert_declared_shape(body: dict[str, Any], route: routes.Route) -> None:
     )
 
 
+def _split_target(target: str) -> tuple[str, dict[str, str]]:
+    """The path a request names, and its query as one value per name.
+
+    Routing reads the path alone, so a query never hides a route. A name sent twice is
+    refused rather than resolved, for the reason a repeated header is: two readers would
+    pick different values.
+    """
+
+    path, _, raw = target.partition("?")
+    pairs = parse_qsl(raw, keep_blank_values=True)
+    names = [name for name, _ in pairs]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise LinguaWikiError(
+            "invalid_contract",
+            f"query parameter {', '.join(repeated)} was sent more than once",
+            details=(ErrorDetail(field="query", reason="repeated"),),
+        )
+    return path, dict(pairs)
+
+
+def _assert_declared_query(query: dict[str, str], route: routes.Route) -> None:
+    """A query is validated like a body, and a route that publishes none refuses one."""
+
+    if route.query_schema is None:
+        if query:
+            raise LinguaWikiError(
+                "invalid_contract",
+                f"{route.command} takes no query parameters, and {sorted(query)} were sent",
+                details=(ErrorDetail(field="query", reason="not published"),),
+            )
+        return
+    failures = list(Draft202012Validator(dict(route.query_schema)).iter_errors(query))
+    if failures:
+        raise LinguaWikiError(
+            "invalid_contract",
+            f"the query does not match the published schema for {route.command}: "
+            f"{failures[0].message}",
+            details=tuple(
+                ErrorDetail(
+                    field=".".join(str(part) for part in failure.path) or "query",
+                    reason=failure.message,
+                )
+                for failure in failures
+            ),
+        )
+
+
 def _too_large() -> LinguaWikiError:
     return LinguaWikiError(
         "client_body_too_large",
@@ -382,7 +461,11 @@ def _too_large() -> LinguaWikiError:
 
 
 def build_server(
-    paths: WorkspacePaths, *, port: int = 0, clock: Clock | None = None
+    paths: WorkspacePaths,
+    *,
+    port: int = 0,
+    clock: Clock | None = None,
+    run: str | None = None,
 ) -> ClientServer:
     """Bind a server on loopback, mint its token, and record where it is listening.
 
@@ -392,6 +475,14 @@ def build_server(
     """
 
     active_clock = clock or SystemClock()
+    if run is not None and re.fullmatch(routes.RUN_ID, run) is None:
+        # Checked before binding: a reference that could never name a run would open a page
+        # that refuses on its first request, after the learner has been sent to it.
+        raise LinguaWikiError(
+            "invalid_arguments",
+            f"{run} is not a run identifier",
+            details=(ErrorDetail(field="run", reason="not a run identifier"),),
+        )
     token = runtime.mint_token()
     state: dict[str, Any] = {"paths": paths, "clock": active_clock, "token": token}
     # `HTTPServer`, not `ThreadingHTTPServer`. See the module docstring: the threaded form
@@ -403,7 +494,7 @@ def build_server(
     state["port"] = bound
     state["origin"] = f"http://127.0.0.1:{bound}"
     runtime.write(paths, port=bound, clock=active_clock)
-    return ClientServer(server=server, paths=paths, token=token)
+    return ClientServer(server=server, paths=paths, token=token, run=run)
 
 
 def serve(
@@ -412,6 +503,7 @@ def serve(
     port: int = 0,
     clock: Clock | None = None,
     open_browser: bool = True,
+    run: str | None = None,
 ) -> ClientServer:
     """Build a server and run it in the foreground until interrupted.
 
@@ -419,7 +511,7 @@ def serve(
     lifecycle nobody asked for and a second way to leave a stale runtime record behind.
     """
 
-    client = build_server(paths, port=port, clock=clock)
+    client = build_server(paths, port=port, clock=clock, run=run)
     if open_browser:
         import webbrowser
 
@@ -435,6 +527,7 @@ def serve(
 
 __all__ = [
     "LAUNCH_FRAGMENT",
+    "LAUNCH_RUN",
     "MAXIMUM_BODY_BYTES",
     "TOKEN_HEADER",
     "ClientServer",

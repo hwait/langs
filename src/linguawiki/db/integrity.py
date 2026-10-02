@@ -952,6 +952,77 @@ def _served_help_allowance_checks(database: Database) -> list[CheckResult]:
     ]
 
 
+def _task_play_checks(database: Database) -> list[CheckResult]:
+    """Migration 0033: plays name served recordings, and a count agrees with its rows.
+
+    `(run_id, content_id)` on a play cannot be a foreign key -- run tasks are keyed by
+    `(run_id, sequence)` and updated as they are answered -- so the relation is asserted
+    here. Membership is established with `NOT EXISTS`, never an inner join, which would
+    pass every play with no counterpart.
+
+    A NULL count beside play rows is a mismatch rather than a row to skip: it is a result
+    that was scored without the plays it should have been derived from.
+    """
+
+    stray = [
+        f"{run_id}/{content_id}"
+        for run_id, content_id in database.query(
+            "SELECT DISTINCT play.run_id, play.content_id FROM assessment_task_plays play "
+            "WHERE NOT EXISTS (SELECT 1 FROM assessment_run_tasks task "
+            "WHERE task.run_id = play.run_id AND task.content_id = play.content_id "
+            "AND task.asset_identity_json IS NOT NULL) ORDER BY 1, 2"
+        )
+    ]
+    disagreeing = [
+        f"{run_id}/{content_id} records {count}, rows say {plays}"
+        for run_id, content_id, count, plays, played in database.query(
+            "SELECT result.run_id, result.content_id, result.play_count, "
+            "(SELECT count(*) FROM assessment_task_plays play "
+            " WHERE play.run_id = result.run_id AND play.content_id = result.content_id), "
+            "EXISTS (SELECT 1 FROM assessment_run_tasks task "
+            " WHERE task.run_id = result.run_id AND task.content_id = result.content_id "
+            " AND task.asset_identity_json IS NOT NULL) "
+            "FROM assessment_results result ORDER BY 1, 2"
+        )
+        if (count is None and int(plays) > 0)
+        or (count is not None and (int(count) != int(plays) or not played))
+    ]
+    checks: list[CheckResult] = []
+    if stray:
+        checks.append(
+            _failed(
+                "task_plays_name_served_audio",
+                "a play is recorded against a task its run did not serve with a recording, "
+                "so it counts a hearing of nothing",
+                plays="; ".join(stray),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "task_plays_name_served_audio",
+                "every recorded play names a task its run served with a recording",
+            )
+        )
+    if disagreeing:
+        checks.append(
+            _failed(
+                "result_play_counts_agree",
+                "a result's play count disagrees with the plays recorded for its task, so "
+                "how often the learner listened can no longer be established",
+                results="; ".join(disagreeing),
+            )
+        )
+    else:
+        checks.append(
+            _ok(
+                "result_play_counts_agree",
+                "every recorded play count equals the plays it was derived from",
+            )
+        )
+    return checks
+
+
 def _served_answer_key_checks(database: Database) -> list[CheckResult]:
     """Migration 0030's snapshot group, and the provenance of every score that followed.
 
@@ -2757,6 +2828,15 @@ def check_database(
             for name, _ in expected_schema(applied).get("assessment_run_tasks", ())
         ):
             checks.extend(_served_help_allowance_checks(database))
+        if (
+            available["served_answer_key"]
+            and "assessment_task_plays" in expected
+            and any(
+                name == "play_count"
+                for name, _ in expected_schema(applied).get("assessment_results", ())
+            )
+        ):
+            checks.extend(_task_play_checks(database))
         if (
             available["served_answer_key"]
             and "assessment_tasks" in expected

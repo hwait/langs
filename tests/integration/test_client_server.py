@@ -459,7 +459,7 @@ def test_a_repeated_decisive_header_is_refused_rather_than_resolved(
 def test_a_path_that_answers_another_method_says_so(running: RunningServer) -> None:
     """ "Wrong verb" and "no such thing" send a caller to different places."""
 
-    answer = running.request("GET", "/runs")
+    answer = running.request("GET", "/runs/asm_01ARZ3NDEKTSV4RRFFQ69G5FAV/tasks")
 
     assert answer.status == 405
     assert answer.payload["error"]["code"] == "client_method_not_allowed"
