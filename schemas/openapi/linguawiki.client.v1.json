@@ -60,6 +60,11 @@
             "title": "Framework Levels",
             "type": "array"
           },
+          "held": {
+            "default": false,
+            "title": "Held",
+            "type": "boolean"
+          },
           "pack_key": {
             "title": "Pack Key",
             "type": "string"
@@ -139,6 +144,30 @@
             },
             "title": "Untested Dimensions",
             "type": "array"
+          },
+          "verdict_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Verdict Id"
+          },
+          "verdict_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Verdict Status"
           },
           "warnings": {
             "default": [],

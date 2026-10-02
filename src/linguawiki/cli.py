@@ -591,6 +591,11 @@ def _assessment_parser(subcommands: Any) -> None:
     # The recording a judge listened to. A spoken task answered by a recording takes a
     # verdict only from a judge who names the one the learner submitted.
     record.add_argument("--audio-artifact")
+    # The submission a judge was handed, and the claim it was handed under. A verdict
+    # naming a submission is revalidated against it when it lands, and held rather than
+    # refused if the run has been paused since.
+    record.add_argument("--submission")
+    record.add_argument("--claim")
     record.add_argument(
         "--rubric",
         help="JSON file holding the per-criterion rubric scores, or - to read stdin",
@@ -2414,6 +2419,8 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             assessor=args.assessor,
             confidence=args.confidence,
             audio_artifact=args.audio_artifact,
+            submission=args.submission,
+            claim=args.claim,
             idempotency_key=args.idempotency_key,
             clock=clock,
             command=command,

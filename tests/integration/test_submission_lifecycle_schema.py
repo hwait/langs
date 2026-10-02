@@ -429,7 +429,9 @@ def test_a_judged_recording_is_recorded_as_an_applied_verdict_dated_by_its_submi
         [run_id],
     )
 
-    assert stored == [(None, 0.9, "{}", "applied", True, True)]
+    # The verdict carries the rubric as retention kept it (Task 2); only backfilled C5
+    # verdicts hold '{}', and there it means "not copied", not "the judge gave none".
+    assert stored == [(None, 0.9, '{"accuracy": 0.9}', "applied", True, True)]
     with open_writer(speaking.paths, command="test.read", clock=speaking.clock) as database:
         report = check_database(database)
     assert report.ok, [check for check in report.checks if check.status == "failed"]

@@ -28,6 +28,7 @@ from datetime import datetime
 
 from linguawiki.clock import aware_utc
 from linguawiki.db.connection import Database
+from linguawiki.errors import LinguaWikiError
 from linguawiki.placement import estimated_level
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import estimates as estimate_service
@@ -65,13 +66,16 @@ def dependent_results(database: Database, *, artifact_id: str) -> list[str]:
     ]
 
 
-def withdraw_submission(database: Database, *, submission_id: str, code: str, reason: str) -> None:
+def withdraw_submission(database: Database, *, submission_id: str, code: str, reason: str) -> bool:
     """Withdraw a submission no judge can now hear, and settle its task as skipped.
 
     The task is settled rather than left `served`, because a served task holds its
     dimension: the one-outstanding-task guard would otherwise keep that dimension waiting
     for a verdict that can never arrive. The reason is the submission's, by name, so a
     learner can be told why the answer they gave was not marked.
+
+    Returns whether it withdrew anything: a submission no longer pending was settled by
+    whatever moved it, and is left as that left it.
     """
 
     row = database.one(
@@ -80,7 +84,7 @@ def withdraw_submission(database: Database, *, submission_id: str, code: str, re
         [submission_id],
     )
     if row is None:
-        return
+        return False
     now = database.now()
     database.execute(
         "UPDATE assessment_submissions SET status = 'withdrawn', withdrawn_code = ?, "
@@ -91,6 +95,99 @@ def withdraw_submission(database: Database, *, submission_id: str, code: str, re
         "UPDATE assessment_run_tasks SET status = 'skipped' "
         "WHERE run_id = ? AND content_id = ? AND status = 'served'",
         [str(row[0]), str(row[1])],
+    )
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class Settlement:
+    """A submission no verdict can now be applied to, and why -- decided, not yet written.
+
+    `assessment.plan_verdict` returns one instead of writing, because planning only reads:
+    the C5 refusal that withdrew an unjudgeable recording and *then* raised is this value,
+    written by `settle` and raised by whoever planned it. The code and reason are what the
+    submission and any held verdict are settled with, so a learner is told the same thing
+    the judge was. `refusal`, when present, is what the planning caller raises once the
+    settlement has committed; a caller that settles in passing (a resume, a sweep) reports
+    it instead.
+    """
+
+    submission_id: str
+    code: str
+    reason: str
+    refusal: LinguaWikiError | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementOutcome:
+    """What one `settle` wrote: whether the submission was withdrawn, and which held
+    verdicts were voided with it."""
+
+    submission_id: str
+    withdrawn: bool
+    voided_verdicts: tuple[str, ...] = ()
+
+
+def void_held_verdicts(
+    database: Database, *, submission_id: str, code: str, reason: str
+) -> tuple[str, ...]:
+    """Give every held verdict for this submission a `void` outcome, in the caller's
+    transaction, and return their identifiers.
+
+    A held verdict is a verdict with no outcome. Once its submission cannot be judged it
+    can never be applied, and leaving it outcome-less would keep it reading as waiting for
+    a resume that cannot help it. Voided, not deleted: the verdict arrived, and the record
+    says what became of it and why.
+    """
+
+    held = [
+        str(verdict_id)
+        for (verdict_id,) in database.query(
+            "SELECT verdict.verdict_id FROM assessment_verdicts verdict "
+            "WHERE verdict.submission_id = ? AND NOT EXISTS ("
+            "SELECT 1 FROM assessment_verdict_outcomes outcome "
+            "WHERE outcome.verdict_id = verdict.verdict_id) "
+            "ORDER BY verdict.received_at, verdict.verdict_id",
+            [submission_id],
+        )
+    ]
+    if not held:
+        return ()
+    now = database.now()
+    for verdict_id in held:
+        database.execute(
+            "INSERT INTO assessment_verdict_outcomes (verdict_id, outcome, result_id, code, "
+            "reason, decided_at) VALUES (?, 'void', NULL, ?, ?, ?)",
+            [verdict_id, code, reason, now],
+        )
+    return tuple(held)
+
+
+def settle(database: Database, settlement: Settlement) -> SettlementOutcome:
+    """The one writer of settlements, inside the caller's transaction.
+
+    Withdraws the submission (task skipped, dimension unblocked, reason on the row) and
+    voids every verdict held for it. Both halves run whatever the other found: a
+    submission an earlier writer already withdrew can still have a held verdict that
+    nobody voided, and a pending submission with nothing held still has to stop holding
+    its dimension. No commit of its own -- `record` commits it in a transaction of its
+    own before raising, and a resume or a sweep writes it inside theirs.
+    """
+
+    withdrawn = withdraw_submission(
+        database,
+        submission_id=settlement.submission_id,
+        code=settlement.code,
+        reason=settlement.reason,
+    )
+    voided = void_held_verdicts(
+        database,
+        submission_id=settlement.submission_id,
+        code=settlement.code,
+        reason=settlement.reason,
+    )
+    return SettlementOutcome(
+        submission_id=settlement.submission_id, withdrawn=withdrawn, voided_verdicts=voided
     )
 
 
@@ -103,8 +200,11 @@ def write_withdrawal(database: Database, *, artifact_id: str, reason: str) -> Wi
         "WHERE artifact_id = ? AND status = 'pending' ORDER BY submission_id",
         [artifact_id],
     ):
-        withdraw_submission(
-            database, submission_id=str(submission_id), code=PURGED_CODE, reason=reason
+        # Through `settle`, so a verdict held for it on a paused run is voided with the
+        # same code rather than left waiting for a resume that could only refuse it.
+        settle(
+            database,
+            Settlement(submission_id=str(submission_id), code=PURGED_CODE, reason=reason),
         )
         withdrawn_submissions.append(str(submission_id))
     rows = [
@@ -317,8 +417,12 @@ def _dimension_kind(database: Database, dimension: str, *, runs: set[str]) -> st
 
 __all__ = [
     "PURGED_CODE",
+    "Settlement",
+    "SettlementOutcome",
     "WithdrawalOutcome",
     "dependent_results",
+    "settle",
+    "void_held_verdicts",
     "withdraw_submission",
     "write_withdrawal",
 ]

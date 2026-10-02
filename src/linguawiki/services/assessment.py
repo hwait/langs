@@ -86,7 +86,10 @@ from linguawiki.services import learners as learner_service
 from linguawiki.services import packs as pack_service
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from linguawiki.services.recordings import JudgeableAudio
+    from linguawiki.services.withdrawal import Settlement, SettlementOutcome
 
 #: Modalities a workspace can always offer, whatever the learner's equipment.
 BASELINE_MODALITIES = ("text", "writing", "audio")
@@ -180,6 +183,16 @@ class AssessmentRunReport(ContractModel):
     finalized_at: str | None = None
     untested_dimensions: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: True when the verdict this call delivered (or replayed) is *held*: stored against a
+    #: paused run, not yet applied, and revalidated when the run resumes. Nothing about the
+    #: learner has changed, and a caller reading the counts above would otherwise think its
+    #: verdict was lost.
+    held: bool = False
+    #: The verdict this call delivered or replayed, when it was bound to a submission, and
+    #: what became of it: `held`, `applied`, or `void`. A replay reports the state now, so a
+    #: verdict held when it arrived and applied at resume replays as applied.
+    verdict_id: str | None = None
+    verdict_status: str | None = None
 
 
 def _grid_json(state: DimensionState) -> str:
@@ -611,38 +624,6 @@ def _assert_transition(run_id: str, *, current: str, target: str) -> None:
             ),
         ),
     )
-
-
-def _write_applied_verdict(
-    database: Database, *, submission_id: str, result_id: str, now: datetime
-) -> str:
-    """Record a verdict received and applied in one commit, inside the caller's transaction.
-
-    The verdict is read back from the result just written rather than restated, so the two
-    cannot disagree about the score, the judge, or the retained response: the result row is
-    already the retained form. Migration 0035's backfill builds C5 verdicts the same way.
-
-    Except the rubric, which never went through retention (the deferred C1 gap): a second,
-    insert-only copy here is the gap widened, so the verdict's rubric stays empty and its
-    outcome names the result that holds it, until rubrics are retained themselves.
-    """
-
-    verdict_id = str(AssessmentId.new())
-    database.execute(
-        "INSERT INTO assessment_verdicts (verdict_id, submission_id, claim_id, raw_score, "
-        "rubric_json, assessor_kind, assessor, confidence, response_visibility, "
-        "response_excerpt, response_hash, received_at) "
-        "SELECT ?, ?, NULL, raw_score, '{}', assessor_kind, assessor, confidence, "
-        "response_visibility, response_excerpt, response_hash, ? "
-        "FROM assessment_results WHERE result_id = ?",
-        [verdict_id, submission_id, now, result_id],
-    )
-    database.execute(
-        "INSERT INTO assessment_verdict_outcomes (verdict_id, outcome, result_id, code, "
-        "reason, decided_at) VALUES (?, 'applied', ?, NULL, NULL, ?)",
-        [verdict_id, result_id, now],
-    )
-    return verdict_id
 
 
 def _record_exposure(
@@ -1473,6 +1454,7 @@ def _assert_repeat(
     response_hash: str | None,
     visibility: str,
     audio_artifact: str | None = None,
+    code: str = "assessment_result_conflict",
 ) -> None:
     """Accept a retry of a recorded result, and refuse a second, different one.
 
@@ -1499,36 +1481,70 @@ def _assert_repeat(
     )
     if recorded is None:
         return
+    _assert_same_observation(
+        content_id,
+        recorded=(
+            float(recorded[0]),
+            None if recorded[1] is None else str(recorded[1]),
+            None if recorded[2] is None else str(recorded[2]),
+            None if recorded[3] is None else str(recorded[3]),
+        ),
+        score=score,
+        response_hash=response_hash,
+        visibility=visibility,
+        audio_artifact=audio_artifact,
+        code=code,
+    )
+
+
+def _assert_same_observation(
+    content_id: str,
+    *,
+    recorded: tuple[float, str | None, str | None, str | None],
+    score: float,
+    response_hash: str | None,
+    visibility: str,
+    audio_artifact: str | None,
+    code: str,
+) -> None:
+    """Refuse an offered observation that differs from the recorded one, naming both.
+
+    `recorded` is `(score, response hash, visibility, recording)` from whichever account
+    holds it -- a result, or a verdict held for a paused run. `code` is
+    `assessment_result_conflict` for the C1 contract and `assessment_verdict_conflict` for
+    a second keyed verdict on one submission.
+    """
+
+    recorded_score, recorded_hash, recorded_visibility, recorded_audio = recorded
     conflicts: list[ErrorDetail] = []
-    if abs(float(recorded[0]) - score) > 1e-9:
+    if abs(recorded_score - score) > 1e-9:
         conflicts.append(
             ErrorDetail(
                 field="score",
                 reason="a different score is already recorded for this task",
-                context={"recorded": str(float(recorded[0])), "offered": str(score)},
+                context={"recorded": str(recorded_score), "offered": str(score)},
             )
         )
-    if recorded[1] is not None and response_hash is not None and str(recorded[1]) != response_hash:
+    if recorded_hash is not None and response_hash is not None and recorded_hash != response_hash:
         conflicts.append(
             ErrorDetail(
                 field="response",
                 reason="a different answer is already recorded for this task",
-                context={"recorded": str(recorded[1]), "offered": response_hash},
+                context={"recorded": recorded_hash, "offered": response_hash},
             )
         )
-    if recorded[2] is not None and str(recorded[2]) != visibility:
+    if recorded_visibility is not None and recorded_visibility != visibility:
         conflicts.append(
             ErrorDetail(
                 field="response_visibility",
                 reason="the recorded result keeps a different amount of the answer, and a "
                 "retry cannot change what was kept",
-                context={"recorded": str(recorded[2]), "offered": visibility},
+                context={"recorded": recorded_visibility, "offered": visibility},
             )
         )
     # The recording a verdict rests on is part of the observation. A repeat naming another
     # one -- or none, where one was recorded, or one where none was -- is a different
     # request, and accepting it would tell the caller its recording was the one judged.
-    recorded_audio = None if recorded[3] is None else str(recorded[3])
     if recorded_audio != audio_artifact:
         conflicts.append(
             ErrorDetail(
@@ -1539,9 +1555,10 @@ def _assert_repeat(
         )
     if conflicts:
         raise LinguaWikiError(
-            "assessment_result_conflict",
-            f"{content_id} was already answered in this run with a different result; a "
-            "retry repeats an observation, it does not replace one",
+            code,
+            f"{content_id} was already answered in this run with a different result "
+            f"(recorded score {recorded_score}); a retry repeats an observation, it does "
+            "not replace one",
             details=tuple(conflicts),
         )
 
@@ -1595,8 +1612,8 @@ def _assert_not_withdrawn(database: Database, *, run_id: str, content_id: str, s
 
 
 def _judged_recording(
-    paths: WorkspacePaths,
     database: Database,
+    root: Path,
     *,
     run_id: str,
     content_id: str,
@@ -1604,19 +1621,22 @@ def _judged_recording(
     assessor_kind: str,
     answered: bool,
     requires_recording: bool = False,
-) -> JudgeableAudio | None:
+) -> JudgeableAudio | Settlement | None:
     """The submitted recording a verdict rests on, checked now -- or `None` if there is none.
 
     A task with a recording waiting for a judge takes a verdict only from a judge who names
     that recording. The check is `recordings.assert_judgeable`, the same one `assessment
     pending` ran when it handed the recording out, run again inside this writer. When it
     fails because of the recording itself -- purged, not kept, missing, altered, escaping,
-    unreadable -- no judge can hear it any more, so the submission is withdrawn and the task
-    skipped before the refusal is raised: a refusal has to leave a way forward, and a task
-    holding its dimension for a verdict that can never arrive leaves none.
+    unreadable -- no judge can hear it any more, so the answer is a `Settlement`: the
+    submission is to be withdrawn and the task skipped, and the failure raised after that
+    has committed. A refusal has to leave a way forward, and a task holding its dimension
+    for a verdict that can never arrive leaves none. Deciding that is a read; writing it is
+    `withdrawal.settle`, which is why this returns the settlement rather than writing it.
     """
 
     from linguawiki.services import recordings as recording_service
+    from linguawiki.services.withdrawal import Settlement
 
     if answered:
         return None
@@ -1635,7 +1655,7 @@ def _judged_recording(
         raise LinguaWikiError(
             "assessment_audio_artifact_required",
             f"{content_id} is answered by recording {live.artifact_id}; a verdict names the "
-            "recording it was reached from, with --audio-artifact",
+            "recording it was reached from, with --audio-artifact or --submission",
             details=(
                 ErrorDetail(
                     field="audio_artifact", reason="absent", context={"bound": live.artifact_id}
@@ -1652,7 +1672,7 @@ def _judged_recording(
     try:
         return recording_service.assert_judgeable(
             database,
-            paths.root,
+            root,
             artifact_id=audio_artifact,
             run_id=run_id,
             content_id=content_id,
@@ -1664,8 +1684,897 @@ def _judged_recording(
             and live.artifact_id == audio_artifact
             and failure.payload.code in recording_service.RECORDING_FAILURES
         ):
-            recording_service.withdraw_unjudgeable(database, submission=live, failure=failure)
+            return Settlement(
+                submission_id=live.submission_id,
+                code=failure.payload.code,
+                reason=failure.payload.message,
+                refusal=failure,
+            )
         raise
+
+
+# --- verdicts: plan, settle, write ---------------------------------------------------------
+
+
+#: What became of a verdict, as a report names it. `held` is a verdict with no outcome row:
+#: received on a paused run and waiting for the resume to apply it, or to void it.
+VERDICT_HELD = "held"
+VERDICT_APPLIED = "applied"
+VERDICT_VOID = "void"
+
+#: What `plan_verdict` decided to do with a verdict.
+APPLY = "apply"
+HOLD = "hold"
+REPEAT = "repeat"
+
+#: The rubric keys whose string values are the payload's structure rather than prose: the
+#: criterion a score is for, and the payload's own version. Everything else a judge writes
+#: in a rubric is free text -- a `note`, a `rationale`, an `anchors` description, a quoted
+#: phrase -- and the rubric schema (`lingua.pack.assessment.v1`, `additionalProperties:
+#: true`) promises nothing narrower, so a key not named here is free text by default. That
+#: is the direction a privacy rule has to fail in: a new prose field a judge invents is
+#: retained like the learner's words, never kept whole because nobody listed it.
+RUBRIC_STRUCTURAL_KEYS: frozenset[str] = frozenset({"name", "criterion", "dimension", "version"})
+
+#: A structural value longer than this is not a criterion name, whatever its key says.
+RUBRIC_STRUCTURAL_LIMIT = 64
+
+
+def retain_rubric(
+    rubric: Mapping[str, object] | None,
+    *,
+    preferences: Mapping[str, object],
+    full: bool = False,
+) -> dict[str, object]:
+    """A verdict's rubric as the track's consent allows it to be kept.
+
+    The rule, applied to every string anywhere in the payload: a value under one of
+    `RUBRIC_STRUCTURAL_KEYS`, no longer than `RUBRIC_STRUCTURAL_LIMIT`, is structure and
+    kept as it is; every other string is free text and goes through
+    `evidence.retain_response`, the rule the learner's answer goes through -- a bounded
+    excerpt by default, nothing (`null`) where the track declined transcript retention, and
+    the whole text only where the answer itself was kept `full`, which consent already
+    allowed. Numbers, booleans, nulls, and the shape (keys, lists, nesting) are kept: they
+    are the scores the verdict is about, and they carry no words.
+
+    Keys are kept as they are. A rubric is a mapping of criteria, and its keys are named by
+    the skill that writes it; a judge putting the learner's words into a *key* would be a
+    misuse this cannot see, and is named here so it is not mistaken for a guarantee.
+
+    Applying it twice changes nothing, so a held verdict's stored rubric can be planned
+    again on resume.
+    """
+
+    requested = "full" if full else None
+
+    def retained(value: object, key: str | None) -> object:
+        if isinstance(value, str):
+            if key in RUBRIC_STRUCTURAL_KEYS and len(value) <= RUBRIC_STRUCTURAL_LIMIT:
+                return value
+            _visibility, kept, _digest = evidence_service.retain_response(
+                value, requested=requested, preferences=preferences
+            )
+            return kept
+        if isinstance(value, Mapping):
+            return {str(name): retained(item, str(name)) for name, item in value.items()}
+        if isinstance(value, list | tuple):
+            return [retained(item, None) for item in value]
+        return value
+
+    return {str(name): retained(item, str(name)) for name, item in (rubric or {}).items()}
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictRequest:
+    """One verdict as its caller stated it, with the run already resolved.
+
+    `submission_id` binds it to a submission; a verdict naming only `audio_artifact` is
+    bound to the run's live submission for the task, so a recorded-task verdict is always
+    submission-bound. `keyed` says whether an idempotency key came with it, which decides
+    the code a different verdict for the same submission is refused with.
+
+    `applying` names a held verdict being applied (the resume path): the stored verdict
+    supplies the score and the retained response and rubric, and no second verdict row is
+    written. Build one with `held_verdict_request`.
+    """
+
+    run_id: str
+    content_id: str
+    score: float | None = None
+    response: str | None = None
+    response_visibility: str | None = None
+    response_excerpt: str | None = None
+    rubric: Mapping[str, object] | None = None
+    assessor_kind: str = "deterministic"
+    assessor: str | None = None
+    confidence: str = "medium"
+    audio_artifact: str | None = None
+    submission_id: str | None = None
+    claim_id: str | None = None
+    track_id: str | None = None
+    actor: str = DEFAULT_ACTOR
+    keyed: bool = False
+    applying: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictPlan:
+    """What `write_verdict` is to do, decided by `plan_verdict` and resting on nothing it
+    has not checked.
+
+    `action` is `apply` (write the result and fold the posterior), `hold` (store the
+    verdict with no outcome: the run is paused), or `repeat` (the verdict is already
+    recorded; nothing is written). For a repeat, `verdict_id` and `held` describe the
+    verdict already standing.
+    """
+
+    request: VerdictRequest
+    action: str
+    run_id: str
+    track_id: str
+    purpose: str
+    dimension: str
+    sequence: int
+    candidate: Candidate
+    kinds: Mapping[str, str]
+    levels: tuple[str, ...]
+    score: float
+    score_source: str
+    policy_version: str | None
+    judgement_version: str | None
+    rubric_json: str
+    response_visibility: str
+    response_excerpt: str | None
+    response_hash: str | None
+    play_count: int | None
+    submission_id: str | None = None
+    artifact_id: str | None = None
+    claim_id: str | None = None
+    verdict_id: str | None = None
+    held: bool = False
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class VerdictWrite:
+    """What one `write_verdict` wrote."""
+
+    verdict_id: str | None
+    result_id: str | None
+    held: bool
+    dimension: str
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
+class _NamedSubmission:
+    submission_id: str
+    artifact_id: str | None
+
+
+def _named_submission(
+    database: Database,
+    submission_id: str,
+    *,
+    run_id: str,
+    content_id: str,
+    track_id: str | None,
+) -> _NamedSubmission:
+    """The submission a verdict names, refused unless it is the live answer to this task.
+
+    Superseded and withdrawn are refused by their own codes, each naming what a judge can
+    do about it: the successor to judge instead, or the reason nothing will be judged.
+    """
+
+    from linguawiki.services import recordings as recording_service
+
+    row = database.one(
+        "SELECT submission.run_id, submission.content_id, submission.kind, submission.status, "
+        "submission.superseded_by, submission.withdrawn_code, submission.withdrawn_reason, "
+        "submission.artifact_id, run.track_id FROM assessment_submissions submission "
+        "JOIN assessment_runs run ON run.run_id = submission.run_id "
+        "WHERE submission.submission_id = ?",
+        [submission_id],
+    )
+    if row is None:
+        raise LinguaWikiError(
+            "assessment_submission_not_found",
+            f"no submission {submission_id} in this workspace",
+            details=(ErrorDetail(field="submission", reason="unknown submission"),),
+        )
+    if track_id is not None and str(row[8]) != track_id:
+        # Resolved through the run, never the submission's own say: a submission belongs to
+        # whoever's run it was made in.
+        raise LinguaWikiError(
+            "assessment_submission_out_of_scope",
+            f"{submission_id} was made in another learner's run, not on track {track_id}",
+            details=(ErrorDetail(field="submission", reason="another track's run"),),
+        )
+    if str(row[0]) != run_id or str(row[1]) != content_id:
+        raise LinguaWikiError(
+            "assessment_submission_mismatch",
+            f"{submission_id} answers {row[1]} in run {row[0]}, not {content_id} in run "
+            f"{run_id}; a verdict names the submission it was reached from",
+            details=(
+                ErrorDetail(
+                    field="submission",
+                    reason="answers another task",
+                    context={"run": str(row[0]), "content_id": str(row[1])},
+                ),
+            ),
+        )
+    if str(row[2]) != "recording":
+        # Text submissions arrive with their own revalidation (eligibility, §2a); until that
+        # exists, a verdict on one is refused rather than applied unchecked.
+        raise LinguaWikiError(
+            "assessment_submission_kind_unsupported",
+            f"{submission_id} is a {row[2]} submission, and this release judges recordings only",
+            details=(ErrorDetail(field="submission", reason=str(row[2])),),
+        )
+    status = str(row[3])
+    live = recording_service.live_submission(database, run_id, content_id)
+    if status == "withdrawn":
+        raise LinguaWikiError(
+            "assessment_submission_withdrawn",
+            f"{submission_id} was withdrawn ({row[5]}): {row[6]}. Nothing judges it now; "
+            "the task was skipped",
+            details=(
+                ErrorDetail(
+                    field="submission",
+                    reason="withdrawn",
+                    context={"code": str(row[5]), "reason": str(row[6])},
+                ),
+            ),
+        )
+    if status == "superseded" or live is None or live.submission_id != submission_id:
+        successor = None if row[4] is None else str(row[4])
+        if successor is None and live is not None:
+            successor = live.submission_id
+        context = {"successor": str(successor)}
+        if live is not None and live.submission_id != successor:
+            context["live"] = live.submission_id
+        raise LinguaWikiError(
+            "assessment_submission_superseded",
+            f"{submission_id} was replaced by {successor}: the learner answered again, and a "
+            f"verdict on the earlier answer judges something no longer submitted; judge "
+            f"{live.submission_id if live is not None else successor} instead",
+            details=(ErrorDetail(field="submission", reason="superseded", context=context),),
+        )
+    return _NamedSubmission(
+        submission_id=submission_id, artifact_id=None if row[7] is None else str(row[7])
+    )
+
+
+def _assert_claim(database: Database, claim_id: str, *, submission_id: str | None) -> None:
+    """A verdict naming a claim names one handed out for the submission it judges."""
+
+    row = database.one("SELECT submission_id FROM judging_claims WHERE claim_id = ?", [claim_id])
+    if row is None:
+        raise LinguaWikiError(
+            "assessment_claim_not_found",
+            f"no judging claim {claim_id} in this workspace",
+            details=(ErrorDetail(field="claim", reason="unknown claim"),),
+        )
+    if submission_id is None or str(row[0]) != submission_id:
+        raise LinguaWikiError(
+            "assessment_claim_mismatch",
+            f"claim {claim_id} was handed out for submission {row[0]}, not for the one this "
+            "verdict judges",
+            details=(
+                ErrorDetail(
+                    field="claim",
+                    reason="claim is for another submission",
+                    context={"claimed": str(row[0]), "judged": str(submission_id)},
+                ),
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _Standing:
+    """A verdict already recorded for a submission, applied or held."""
+
+    verdict_id: str
+    score: float
+    response_hash: str | None
+    response_visibility: str | None
+    held: bool
+
+
+def _standing_verdict(
+    database: Database, submission_id: str, *, excluding: str | None = None
+) -> _Standing | None:
+    """The submission's verdict that still stands -- applied, or held -- if there is one.
+
+    A void verdict stands for nothing and is skipped. `excluding` is the held verdict being
+    applied, which is not a rival to itself.
+    """
+
+    row = database.one(
+        "SELECT verdict.verdict_id, verdict.raw_score, verdict.response_hash, "
+        "verdict.response_visibility, outcome.outcome FROM assessment_verdicts verdict "
+        "LEFT JOIN assessment_verdict_outcomes outcome ON outcome.verdict_id = verdict.verdict_id "
+        "WHERE verdict.submission_id = ? AND verdict.verdict_id IS DISTINCT FROM ? "
+        "AND (outcome.outcome IS NULL OR outcome.outcome = 'applied') "
+        "ORDER BY outcome.outcome NULLS LAST, verdict.received_at DESC, verdict.verdict_id DESC "
+        "LIMIT 1",
+        [submission_id, excluding],
+    )
+    if row is None:
+        return None
+    return _Standing(
+        verdict_id=str(row[0]),
+        score=float(row[1]),
+        response_hash=None if row[2] is None else str(row[2]),
+        response_visibility=None if row[3] is None else str(row[3]),
+        held=row[4] is None,
+    )
+
+
+def _applied_verdict_for_task(database: Database, run_id: str, content_id: str) -> str | None:
+    """The applied verdict behind a task's standing result, when it was judged from a
+    submission."""
+
+    value = database.scalar(
+        "SELECT outcome.verdict_id FROM assessment_verdict_outcomes outcome "
+        "JOIN assessment_results result ON result.result_id = outcome.result_id "
+        "WHERE outcome.outcome = 'applied' AND result.run_id = ? AND result.content_id = ? "
+        "LIMIT 1",
+        [run_id, content_id],
+    )
+    return None if value is None else str(value)
+
+
+def _held_verdict_row(database: Database, verdict_id: str, *, submission_id: str | None) -> Any:
+    row = database.one(
+        "SELECT verdict.submission_id, verdict.raw_score, verdict.rubric_json, "
+        "verdict.response_visibility, verdict.response_excerpt, verdict.response_hash, "
+        "outcome.outcome FROM assessment_verdicts verdict "
+        "LEFT JOIN assessment_verdict_outcomes outcome ON outcome.verdict_id = verdict.verdict_id "
+        "WHERE verdict.verdict_id = ?",
+        [verdict_id],
+    )
+    if row is None or row[6] is not None or str(row[0]) != submission_id:
+        raise LinguaWikiError(
+            "assessment_verdict_not_held",
+            f"verdict {verdict_id} is not a held verdict for submission {submission_id}",
+            details=(
+                ErrorDetail(
+                    field="verdict",
+                    reason="not held" if row is not None else "unknown verdict",
+                    context={} if row is None else {"outcome": str(row[6])},
+                ),
+            ),
+        )
+    return row
+
+
+def held_verdict_request(database: Database, verdict_id: str) -> VerdictRequest:
+    """The request that applies a held verdict, rebuilt from what was stored.
+
+    For the resume path: the stored verdict is the account of what the judge said, so the
+    request is read from it -- score, assessor, the retained rubric -- and `applying`
+    makes `plan_verdict` revalidate it and `write_verdict` give it an outcome rather than
+    a twin.
+    """
+
+    row = database.one(
+        "SELECT verdict.submission_id, verdict.claim_id, verdict.raw_score, "
+        "verdict.rubric_json, verdict.assessor_kind, verdict.assessor, verdict.confidence, "
+        "submission.run_id, submission.content_id, submission.artifact_id "
+        "FROM assessment_verdicts verdict "
+        "JOIN assessment_submissions submission "
+        "ON submission.submission_id = verdict.submission_id "
+        "WHERE verdict.verdict_id = ?",
+        [verdict_id],
+    )
+    if row is None:
+        raise LinguaWikiError(
+            "assessment_verdict_not_held",
+            f"verdict {verdict_id} is not a held verdict this workspace can name",
+            details=(ErrorDetail(field="verdict", reason="unknown verdict"),),
+        )
+    return VerdictRequest(
+        run_id=str(row[7]),
+        content_id=str(row[8]),
+        score=float(row[2]),
+        rubric=_stored_rubric(row[3]),
+        assessor_kind=str(row[4]),
+        assessor=None if row[5] is None else str(row[5]),
+        confidence=str(row[6]),
+        audio_artifact=None if row[9] is None else str(row[9]),
+        submission_id=str(row[0]),
+        claim_id=None if row[1] is None else str(row[1]),
+        applying=verdict_id,
+    )
+
+
+def plan_verdict(
+    database: Database, request: VerdictRequest, *, root: Path
+) -> VerdictPlan | Settlement:
+    """Decide what a verdict does, reading only, and refuse it if it cannot land.
+
+    Every refusal `record` makes is here, before any write, so a refused verdict leaves the
+    task still answerable. The one outcome that is not a refusal and not a plan is a
+    `Settlement`: the recording the verdict names can no longer be heard, so the submission
+    must be withdrawn -- returned, not written, because planning reads. The caller settles
+    it (`withdrawal.settle`) and raises `settlement.refusal`, or, resuming, voids and
+    carries on.
+
+    `root` is the workspace root the recording is checked under.
+
+    A run that is paused takes a submission-bound verdict as `hold` -- revalidated now,
+    applied (or voided) at resume -- and refuses any other result, as it always has. A
+    request `applying` a held verdict is planned to apply on a paused run too: that is the
+    resume itself, which may plan before it flips the run's status.
+    """
+
+    from linguawiki.services.withdrawal import Settlement
+
+    run_id, content_id = request.run_id, request.content_id
+    row = _run_row(database, run_id)
+    named = (
+        None
+        if request.submission_id is None
+        else _named_submission(
+            database,
+            request.submission_id,
+            run_id=run_id,
+            content_id=content_id,
+            track_id=request.track_id,
+        )
+    )
+    held_row = (
+        None
+        if request.applying is None
+        else _held_verdict_row(database, request.applying, submission_id=request.submission_id)
+    )
+    # Before the run's own state: a judge retrying a verdict for a result whose recording
+    # was purged is told that, whether or not the run has closed since. It is the more
+    # specific truth, and the one that says no retry will ever land.
+    _assert_not_invalidated(database, run_id=run_id, content_id=content_id)
+    # A verdict is submission-bound when its caller named a submission or the recording
+    # one answers with. Only such a verdict can be held: a held verdict is revalidated
+    # against its submission when it is applied, and nothing else has one to be checked
+    # against.
+    bound_request = request.submission_id is not None or request.audio_artifact is not None
+    status = str(row[4])
+    hold = status == "paused" and bound_request and request.applying is None
+    if not (status == "paused" and bound_request):
+        _assert_running(run_id, status=status, action="take further results")
+    served = database.one(
+        "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
+        "content_family, modality, is_anchor, content_hash, expected_json, "
+        "prompt_snapshot, rubric_json, asset_identity_json FROM assessment_run_tasks "
+        "WHERE run_id = ? AND content_id = ?",
+        [run_id, content_id],
+    )
+    if served is None:
+        raise LinguaWikiError(
+            "assessment_task_not_served",
+            "that task was not served in this run; ask for the next task first",
+            details=(ErrorDetail(field="content_id", reason="task was not served"),),
+        )
+    conditions = json.loads(str(row[6]))
+    kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
+    record_track = learner_service.track_context(database, str(row[1]))
+    # Scored from what was served, never from what the pack now says. Re-reading the
+    # installed pack folded a difficulty the learner never faced into their posterior
+    # whenever the pack changed mid-run.
+    candidate = _served_candidate(run_id, content_id=content_id, served=served)
+    dimension = str(served[1])
+    _assert_not_withdrawn(database, run_id=run_id, content_id=content_id, status=str(served[2]))
+    score = request.score if held_row is None else float(held_row[1])
+    response = request.response if held_row is None else None
+    assessor_kind = request.assessor_kind
+    # Every refusal below runs before any transaction opens, so a refused call leaves the
+    # task still `served` and answerable rather than half-recorded.
+    warnings: list[str] = []
+    if score is None:
+        if response is None:
+            raise LinguaWikiError(
+                "assessment_score_required",
+                f"scoring {content_id} needs either a score or the learner's response",
+                details=(ErrorDetail(field="score", reason="neither score nor response"),),
+            )
+        if assessor_kind != "deterministic":
+            raise LinguaWikiError(
+                "assessment_score_required",
+                f"a {assessor_kind} assessor reaches its own verdict, so it must "
+                "supply the score it reached",
+                details=(ErrorDetail(field="score", reason=f"{assessor_kind} assessor"),),
+            )
+        # Before the key: a rubric-scored task has no key by design, so reading one
+        # first refuses with "your answer key is broken" where the truth is "this
+        # needs a judge". The code is what a skill acts on.
+        assert_machine_scorable(candidate.task_type)
+        key = _scorable_key(
+            database,
+            content_id=content_id,
+            snapshot=served[10:13],
+            content_hash=None if served[9] is None else str(served[9]),
+        )
+        resolved_score = score_response(
+            task_type=candidate.task_type, answers=key.answers, response=response
+        )
+        score_source, policy_version = "computed", SCORING_POLICY_VERSION
+        if key.source == "bank":
+            warnings.append(
+                f"{content_id} was served before its answer key was recorded; the "
+                "pack's content still hashes to what was served, so the key was read "
+                "from the bank"
+            )
+    else:
+        # A supplied score wins, and is labelled as supplied with no policy version:
+        # `assessor_kind` has only ever *labelled* a score, and recording a version
+        # against one would be a claim that work nobody did had been done.
+        resolved_score = score
+        score_source, policy_version = "supplied", None
+    # What a judged score may claim, decided in `evidence.py` and stored with the
+    # result. Nothing held an `ai` verdict to anything before C5.
+    judgement_version = (
+        None
+        if score is None
+        else evidence_policy.assert_judged_claim(
+            dimension_kind=kinds[dimension],
+            modality=candidate.modality,
+            assessor_kind=assessor_kind,
+            assessor=request.assessor,
+            confidence=request.confidence,
+        )
+    )
+    # A named submission names its recording, so the verdict needs no second spelling of
+    # it; a recording named as well must be that one, which `assert_judgeable` checks.
+    audio_artifact = request.audio_artifact
+    if audio_artifact is None and named is not None:
+        audio_artifact = named.artifact_id
+    answered = str(served[2]) == "answered"
+    bound = _judged_recording(
+        database,
+        root,
+        run_id=run_id,
+        content_id=content_id,
+        audio_artifact=audio_artifact,
+        assessor_kind=assessor_kind,
+        answered=answered,
+        # A run opened for recorded judging serves a spoken task *to be recorded*: a
+        # verdict on one with nothing submitted would be a result no purge could ever
+        # reach, standing on audio nobody holds.
+        requires_recording=(
+            _run_scoring(conditions) == RECORDED_SCORING
+            and candidate.modality == SPOKEN_MODALITY
+            and candidate.task_type in RECORDED_JUDGED_TASK_TYPES
+        ),
+    )
+    if isinstance(bound, Settlement):
+        return bound
+    judged = bound
+    submission_id = None if judged is None else judged.submission.submission_id
+    if request.claim_id is not None:
+        _assert_claim(
+            database,
+            request.claim_id,
+            submission_id=submission_id
+            if submission_id is not None
+            else (None if named is None else named.submission_id),
+        )
+    if held_row is not None:
+        # Retained when it was received; retention is not run twice on what it already
+        # decided, and the response itself was never stored to run it on.
+        visibility = str(held_row[3])
+        excerpt = None if held_row[4] is None else str(held_row[4])
+        response_hash = None if held_row[5] is None else str(held_row[5])
+        rubric_json = str(held_row[2])
+    else:
+        # The response goes through retention either way. Scoring in the background and
+        # discarding the result would make the stored score unexplainable, and a
+        # caller-supplied excerpt reaches the column by the same route so that the consent
+        # rule covers both and not only the one this stage added.
+        visibility, excerpt, digest = evidence_service.retain_response(
+            response if response is not None else request.response_excerpt,
+            requested=request.response_visibility,
+            preferences=record_track.preferences,
+        )
+        # `response_hash` promises the hash of the *response*, so that a withheld answer
+        # can be checked against one offered later. A caller-supplied excerpt is the
+        # caller's own truncation of an answer this command never saw: hashing it under
+        # that name would answer "no" for the learner's real answer, which is the opposite
+        # of what the column exists to do. No whole answer, no attestation.
+        response_hash = digest if response is not None else None
+        # A submission-bound verdict's rubric goes through retention too, held or applied,
+        # so neither the verdict row nor the result it produces is an unfiltered copy. A
+        # verdict bound to nothing keeps the rubric as given: that is the deferred C1 gap,
+        # which this stage does not widen and does not claim to close.
+        rubric_payload = (
+            retain_rubric(
+                request.rubric,
+                preferences=record_track.preferences,
+                full=visibility == "full",
+            )
+            if bound_request or submission_id is not None
+            else dict(request.rubric or {})
+        )
+        rubric_json = json.dumps(rubric_payload, ensure_ascii=False, sort_keys=True)
+    # Whether a different verdict is a different *result* (keyless: the C1 contract) or a
+    # second verdict for one submission (keyed: a judge holding a new key for work that
+    # already landed). The caller acts on the code.
+    conflict_code = (
+        "assessment_verdict_conflict"
+        if request.keyed and bound_request
+        else "assessment_result_conflict"
+    )
+    if answered:
+        # Deliberately *here*, below every refusal above rather than above them. A
+        # repeat must not fold the same evidence into the posterior twice, but a
+        # second call carrying a different answer is not a repeat, and returning the
+        # run report for one told the caller a correction had landed when nothing had
+        # been written. A guard placed before the path it guards also disables it:
+        # with this above, asking to keep more than consent allows on an answered task
+        # returned success and the caller believed the transcript was retained.
+        _assert_repeat(
+            database,
+            run_id=run_id,
+            content_id=content_id,
+            score=resolved_score,
+            response_hash=response_hash,
+            visibility=visibility,
+            audio_artifact=audio_artifact,
+            code=conflict_code,
+        )
+        action = REPEAT
+        standing_id = _applied_verdict_for_task(database, run_id, content_id)
+        standing_held = False
+    else:
+        standing = (
+            None
+            if submission_id is None
+            else _standing_verdict(database, submission_id, excluding=request.applying)
+        )
+        if standing is not None:
+            # A held verdict is a recorded verdict: the same one again is a repeat, and a
+            # different one is refused exactly as against a result.
+            _assert_same_observation(
+                content_id,
+                recorded=(
+                    standing.score,
+                    standing.response_hash,
+                    standing.response_visibility,
+                    audio_artifact,
+                ),
+                score=resolved_score,
+                response_hash=response_hash,
+                visibility=visibility,
+                audio_artifact=audio_artifact,
+                code=conflict_code,
+            )
+            action, standing_id, standing_held = REPEAT, standing.verdict_id, standing.held
+        else:
+            action = HOLD if hold else APPLY
+            standing_id, standing_held = request.applying, hold
+    # Derived from the play rows, never accepted: a caller-supplied count would be one
+    # more place a caller could talk its way into a different claim. Only for a task
+    # that played a recording, and only from a surface that records plays.
+    #
+    # Recorded plays are a fact whoever records the result: a page plays, the learner
+    # pauses, and the CLI scores the answer. Only "no plays" depends on the surface --
+    # zero from one that records plays, unknown (`NULL`) from one that cannot know.
+    plays = _plays_used(database, run_id, content_id) if served[13] is not None else 0
+    play_count = (
+        plays
+        if served[13] is not None and (plays or request.actor in PLAY_TRACKING_ACTORS)
+        else None
+    )
+    return VerdictPlan(
+        request=request,
+        action=action,
+        run_id=run_id,
+        track_id=str(row[1]),
+        purpose=str(row[3]),
+        dimension=dimension,
+        sequence=int(served[0]),
+        candidate=candidate,
+        kinds=kinds,
+        levels=_pinned_levels(conditions, fallback=record_track.framework_levels),
+        score=resolved_score,
+        score_source=score_source,
+        policy_version=policy_version,
+        judgement_version=judgement_version,
+        rubric_json=rubric_json,
+        response_visibility=visibility,
+        response_excerpt=excerpt,
+        response_hash=response_hash,
+        play_count=play_count,
+        submission_id=submission_id,
+        artifact_id=None if judged is None else judged.artifact_id,
+        claim_id=request.claim_id,
+        verdict_id=standing_id,
+        held=standing_held,
+        warnings=tuple(warnings),
+    )
+
+
+def settle(database: Database, settlement: Settlement) -> SettlementOutcome:
+    """`withdrawal.settle`, the one writer of settlements, under the name callers here
+    reach for. Inside the caller's transaction; no commit of its own."""
+
+    from linguawiki.services import withdrawal
+
+    return withdrawal.settle(database, settlement)
+
+
+def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
+    """Write what `plan_verdict` decided, inside the caller's transaction.
+
+    A submission-bound verdict is stored first, as the judge delivered it (retained), with
+    `received_at` the write time; a held one stops there -- a verdict with no outcome. An
+    applied one then writes the result, dated twice: `recorded_at` is now, `observed_at` is
+    when the learner answered (the submission's `created_at`), so a verdict arriving a week
+    later is evidence about the learner of a week ago. The submission becomes `judged`, the
+    posterior folds the score, and the verdict's `applied` outcome names the result -- all
+    in the one transaction, so none of them can be seen without the others.
+
+    The posterior is folded from the state read *here*, not when the plan was made: inside
+    a resume several held verdicts are written in one transaction, and each must see what
+    the one before it wrote.
+
+    No commit, no audit entry, and no domain event: those belong to the command.
+    """
+
+    if plan.action == REPEAT:
+        raise AssertionError("a repeat writes nothing; the caller reports it instead")
+    now = database.now()
+    verdict_id = plan.request.applying
+    if plan.submission_id is not None and verdict_id is None:
+        # `rubric_json` here is the retained rubric, always. Verdicts migration 0035
+        # backfilled from C5 results hold '{}' instead: there it means "not copied" -- the
+        # result's unretained rubric was not duplicated into an insert-only row -- and never
+        # "the judge gave no rubric". The applied outcome names the result that holds it.
+        verdict_id = str(AssessmentId.new())
+        database.execute(
+            "INSERT INTO assessment_verdicts (verdict_id, submission_id, claim_id, raw_score, "
+            "rubric_json, assessor_kind, assessor, confidence, response_visibility, "
+            "response_excerpt, response_hash, received_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                verdict_id,
+                plan.submission_id,
+                plan.claim_id,
+                plan.score,
+                plan.rubric_json,
+                plan.request.assessor_kind,
+                plan.request.assessor,
+                plan.request.confidence,
+                plan.response_visibility,
+                plan.response_excerpt,
+                plan.response_hash,
+                now,
+            ],
+        )
+    if plan.action == HOLD:
+        return VerdictWrite(
+            verdict_id=verdict_id,
+            result_id=None,
+            held=True,
+            dimension=plan.dimension,
+            score=plan.score,
+        )
+    states = {
+        state.dimension: state for state in _dimension_states(database, plan.run_id, plan.kinds)
+    }
+    state = states[plan.dimension]
+    prior_snapshot = list(state.posterior)
+    updated = record_score(state, plan.candidate, score=plan.score, level_count=len(plan.levels))
+    result_id = str(AssessmentId.new())
+    # When the learner answered: the submission's moment for a judged recording, which a
+    # verdict arriving later must not redate; otherwise the write time.
+    observed_at = now
+    if plan.submission_id is not None:
+        observed_at = database.scalar(
+            "SELECT created_at FROM assessment_submissions WHERE submission_id = ?",
+            [plan.submission_id],
+        )
+    database.execute(
+        "INSERT INTO assessment_results (result_id, run_id, content_id, dimension, "
+        "raw_score, rubric_json, response_excerpt, assessor_kind, assessor, confidence, "
+        "prior_json, posterior_json, difficulty, recorded_at, scoring_policy_version, "
+        "score_source, response_visibility, response_hash, play_count, "
+        "audio_artifact_id, judgement_policy_version, observed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            result_id,
+            plan.run_id,
+            plan.request.content_id,
+            plan.dimension,
+            plan.score,
+            plan.rubric_json,
+            plan.response_excerpt,
+            plan.request.assessor_kind,
+            plan.request.assessor,
+            plan.request.confidence,
+            json.dumps(prior_snapshot),
+            json.dumps(list(updated.posterior)),
+            plan.candidate.difficulty,
+            now,
+            plan.policy_version,
+            plan.score_source,
+            plan.response_visibility,
+            plan.response_hash,
+            plan.play_count,
+            plan.artifact_id,
+            plan.judgement_version,
+            observed_at,
+        ],
+    )
+    database.execute(
+        "UPDATE assessment_run_tasks SET status = 'answered' WHERE run_id = ? AND sequence = ?",
+        [plan.run_id, plan.sequence],
+    )
+    if plan.submission_id is not None:
+        # In the result's transaction: a judged submission without its result, or a result
+        # whose submission still waits for a judge, is a state nobody can explain
+        # afterwards.
+        database.execute(
+            "UPDATE assessment_submissions SET status = 'judged', updated_at = ? "
+            "WHERE submission_id = ? AND status = 'pending'",
+            [now, plan.submission_id],
+        )
+        database.execute(
+            "INSERT INTO assessment_verdict_outcomes (verdict_id, outcome, result_id, code, "
+            "reason, decided_at) VALUES (?, 'applied', ?, NULL, NULL, ?)",
+            [verdict_id, result_id, now],
+        )
+    # The exposure row already exists: `next_task` wrote it when it served this item.
+    # Scoring adds the answer, and leaves the exposure count alone.
+    _record_exposure(
+        database,
+        track_id=plan.track_id,
+        content_id=plan.request.content_id,
+        purpose=plan.purpose,
+        is_anchor=plan.candidate.is_anchor,
+        now=now,
+        answered=True,
+    )
+    _write_state(database, run_id=plan.run_id, state=updated, levels=plan.levels, insert=False)
+    database.execute(
+        "UPDATE assessment_runs SET updated_at = ? WHERE run_id = ?", [now, plan.run_id]
+    )
+    return VerdictWrite(
+        verdict_id=verdict_id,
+        result_id=result_id,
+        held=False,
+        dimension=plan.dimension,
+        score=plan.score,
+    )
+
+
+def _verdict_report(
+    database: Database, run_id: str, verdict_id: str | None, warnings: Sequence[str] = ()
+) -> AssessmentRunReport:
+    """The run report, saying what became of the verdict this call delivered or replayed."""
+
+    report = _reported(run_report(database, run_id), warnings)
+    if verdict_id is None:
+        return report
+    outcome = database.one(
+        "SELECT outcome FROM assessment_verdict_outcomes WHERE verdict_id = ?", [verdict_id]
+    )
+    status = VERDICT_HELD if outcome is None else str(outcome[0])
+    return report.model_copy(
+        update={"held": status == VERDICT_HELD, "verdict_id": verdict_id, "verdict_status": status}
+    )
+
+
+def _submission_run(database: Database, submission_id: str) -> str:
+    run_id = database.scalar(
+        "SELECT run_id FROM assessment_submissions WHERE submission_id = ?", [submission_id]
+    )
+    if run_id is None:
+        raise LinguaWikiError(
+            "assessment_submission_not_found",
+            f"no submission {submission_id} in this workspace",
+            details=(ErrorDetail(field="submission", reason="unknown submission"),),
+        )
+    return str(run_id)
 
 
 def record(
@@ -1683,6 +2592,8 @@ def record(
     assessor: str | None = None,
     confidence: str = "medium",
     audio_artifact: str | None = None,
+    submission: str | None = None,
+    claim: str | None = None,
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "assessment.record",
@@ -1690,12 +2601,14 @@ def record(
 ) -> AssessmentRunReport:
     """Score one served task and fold it into its dimension's posterior.
 
-    A spoken task answered by a recording is scored by a judge who names the recording
-    they heard (`audio_artifact`). It must be the recording the learner submitted, and it
-    is checked again here, inside the writer that stores the verdict, rather than only when
-    the task was handed to the judge: a purge, an altered file, or a retention change while
-    the judge was listening refuses the verdict with the reason, and because a purge takes
-    the same writer, one of the two is first and the other sees its result.
+    A spoken task answered by a recording is scored by a judge who names the submission
+    (`submission`) or the recording (`audio_artifact`) they heard. It must be the
+    recording the learner submitted, and it is checked again here, inside the writer that
+    stores the verdict, rather than only when the task was handed to the judge: a purge,
+    an altered file, or a retention change while the judge was listening refuses the
+    verdict with the reason, and because a purge takes the same writer, one of the two is
+    first and the other sees its result. A verdict for a submission on a paused run is
+    *held* -- stored, revalidated at resume, reported `held: true` -- rather than refused.
 
     The score is either *computed* here from the key the run snapshotted, or *supplied* by
     a caller who reached its own verdict; `score_source` records which, because
@@ -1705,6 +2618,10 @@ def record(
     The learner's `response` is an input, not an artifact. Scoring uses it in memory, and
     it reaches the database only through `retain_response`, which is where consent is
     honoured -- so automatic scoring never requires keeping text a track has declined.
+
+    The shape is `plan_verdict` (reads, refuses, or settles) then one transaction holding
+    `write_verdict` and the domain event, so receipt and application are one commit: a
+    crash before it leaves nothing, and a retry under the same key after it replays.
     """
 
     active_clock = clock or SystemClock()
@@ -1731,14 +2648,19 @@ def record(
         )
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id = None if track is None else learner_service.resolve_track(database, track)
+        # A named submission names its run: the judge holding a submission identifier
+        # need not also know which run is open, and a run named as well must be that one
+        # (`plan_verdict` refuses a mismatch by name).
+        if submission is not None and run is None:
+            run = _submission_run(database, submission)
         run_id = resolve_run(database, run, track_id=track_id)
-        row = _run_row(database, run_id)
         # The key is checked here -- before the transaction, and before every guard below,
         # including the one that asks whether the run may take further results. A retry is a
         # retry whatever the run has become since: a client whose response was lost and which
         # then paused, or whose pause and retry crossed, was told its completed work was new
         # work it was not allowed to do. Resolving the replay first answers with what already
-        # happened, which is true in any run state.
+        # happened, which is true in any run state -- held, applied, or voided, and the
+        # report says which.
         #
         # It also means the unique index on
         # `domain_events.idempotency_key` is never the thing that refuses: it did, with a
@@ -1746,12 +2668,13 @@ def record(
         # had been placed before the transaction precisely to avoid that.
         #
         # Every argument a refusal below could turn on is in the fingerprint -- the score,
-        # the visibility, the assessor, the rubric -- which is what makes returning early
-        # on a replay safe: a call that asked for something different conflicts rather than
-        # being handed this one's result. The response text itself is never hashed into the
-        # payload under its own name; `payload_json` is never edited, so a payload written
-        # before the retention rule ran would keep what it kept for the life of the
-        # workspace. Its digest answers the same question and carries nothing.
+        # the visibility, the assessor, the rubric, the submission and claim -- which is
+        # what makes returning early on a replay safe: a call that asked for something
+        # different conflicts rather than being handed this one's result. The response text
+        # itself is never hashed into the payload under its own name; `payload_json` is
+        # never edited, so a payload written before the retention rule ran would keep what
+        # it kept for the life of the workspace. Its digest answers the same question and
+        # carries nothing.
         scoring_fingerprint = idempotency.request_hash(
             operation=RECORDED_EVENT,
             run_id=run_id,
@@ -1766,273 +2689,100 @@ def record(
             assessor=assessor,
             confidence=confidence,
             rubric=dict(rubric or {}),
-            # Only when named, so a keyed verdict recorded before C5 still hashes to what it
-            # hashed to then and its retry stays a retry.
+            # Each only when named, so a keyed verdict recorded before the stage that added
+            # it still hashes to what it hashed to then and its retry stays a retry.
             **({} if audio_artifact is None else {"audio_artifact": audio_artifact}),
+            **({} if submission is None else {"submission_id": submission}),
+            **({} if claim is None else {"claim_id": claim}),
         )
-        if (
-            idempotency.resolve(
-                database,
-                key=idempotency_key,
-                event_type=RECORDED_EVENT,
-                request_hash=scoring_fingerprint,
-            )
-            is not None
-        ):
-            return run_report(database, run_id)
-        # Before the run's own state: a judge retrying a verdict for a result whose
-        # recording was purged is told that, whether or not the run has closed since. It is
-        # the more specific truth, and the one that says no retry will ever land.
-        _assert_not_invalidated(database, run_id=run_id, content_id=content_id)
-        _assert_running(run_id, status=str(row[4]), action="take further results")
-        served = database.one(
-            "SELECT sequence, dimension, status, task_type, level_code, difficulty, "
-            "content_family, modality, is_anchor, content_hash, expected_json, "
-            "prompt_snapshot, rubric_json, asset_identity_json FROM assessment_run_tasks "
-            "WHERE run_id = ? AND content_id = ?",
-            [run_id, content_id],
+        replayed = idempotency.resolve(
+            database,
+            key=idempotency_key,
+            event_type=RECORDED_EVENT,
+            request_hash=scoring_fingerprint,
         )
-        if served is None:
-            raise LinguaWikiError(
-                "assessment_task_not_served",
-                "that task was not served in this run; ask for the next task first",
-                details=(ErrorDetail(field="content_id", reason="task was not served"),),
+        if replayed is not None:
+            recorded_verdict = replayed.get("verdict_id")
+            return _verdict_report(
+                database, run_id, None if recorded_verdict is None else str(recorded_verdict)
             )
-        conditions = json.loads(str(row[6]))
-        kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
-        record_track = learner_service.track_context(database, str(row[1]))
-        # Scored from what was served, never from what the pack now says. Re-reading the
-        # installed pack folded a difficulty the learner never faced into their posterior
-        # whenever the pack changed mid-run.
-        candidate = _served_candidate(run_id, content_id=content_id, served=served)
-        dimension = str(served[1])
-        _assert_not_withdrawn(database, run_id=run_id, content_id=content_id, status=str(served[2]))
-        # Every refusal below runs before the transaction opens, so a refused call leaves
-        # the task still `served` and answerable rather than half-recorded.
-        warnings: list[str] = []
-        if score is None:
-            if response is None:
-                raise LinguaWikiError(
-                    "assessment_score_required",
-                    f"scoring {content_id} needs either a score or the learner's response",
-                    details=(ErrorDetail(field="score", reason="neither score nor response"),),
-                )
-            if assessor_kind != "deterministic":
-                raise LinguaWikiError(
-                    "assessment_score_required",
-                    f"a {assessor_kind} assessor reaches its own verdict, so it must "
-                    "supply the score it reached",
-                    details=(ErrorDetail(field="score", reason=f"{assessor_kind} assessor"),),
-                )
-            # Before the key: a rubric-scored task has no key by design, so reading one
-            # first refuses with "your answer key is broken" where the truth is "this
-            # needs a judge". The code is what a skill acts on.
-            assert_machine_scorable(candidate.task_type)
-            key = _scorable_key(
-                database,
+        plan = plan_verdict(
+            database,
+            VerdictRequest(
+                run_id=run_id,
                 content_id=content_id,
-                snapshot=served[10:13],
-                content_hash=None if served[9] is None else str(served[9]),
-            )
-            resolved_score = score_response(
-                task_type=candidate.task_type, answers=key.answers, response=response
-            )
-            score_source, policy_version = "computed", SCORING_POLICY_VERSION
-            if key.source == "bank":
-                warnings.append(
-                    f"{content_id} was served before its answer key was recorded; the "
-                    "pack's content still hashes to what was served, so the key was read "
-                    "from the bank"
-                )
-        else:
-            # A supplied score wins, and is labelled as supplied with no policy version:
-            # `assessor_kind` has only ever *labelled* a score, and recording a version
-            # against one would be a claim that work nobody did had been done.
-            resolved_score = score
-            score_source, policy_version = "supplied", None
-        # What a judged score may claim, decided in `evidence.py` and stored with the
-        # result. Nothing held an `ai` verdict to anything before C5.
-        judgement_version = (
-            None
-            if score is None
-            else evidence_policy.assert_judged_claim(
-                dimension_kind=kinds[dimension],
-                modality=candidate.modality,
+                score=score,
+                response=response,
+                response_visibility=response_visibility,
+                response_excerpt=response_excerpt,
+                rubric=rubric,
                 assessor_kind=assessor_kind,
                 assessor=assessor,
                 confidence=confidence,
-            )
-        )
-        bound = _judged_recording(
-            paths,
-            database,
-            run_id=run_id,
-            content_id=content_id,
-            audio_artifact=audio_artifact,
-            assessor_kind=assessor_kind,
-            answered=str(served[2]) == "answered",
-            # A run opened for recorded judging serves a spoken task *to be recorded*: a
-            # verdict on one with nothing submitted would be a result no purge could ever
-            # reach, standing on audio nobody holds.
-            requires_recording=(
-                _run_scoring(conditions) == RECORDED_SCORING
-                and candidate.modality == SPOKEN_MODALITY
-                and candidate.task_type in RECORDED_JUDGED_TASK_TYPES
-            ),
-        )
-        # The response goes through retention either way. Scoring in the background and
-        # discarding the result would make the stored score unexplainable, and a
-        # caller-supplied excerpt reaches the column by the same route so that the consent
-        # rule covers both and not only the one this stage added.
-        visibility, excerpt, digest = evidence_service.retain_response(
-            response if response is not None else response_excerpt,
-            requested=response_visibility,
-            preferences=record_track.preferences,
-        )
-        # `response_hash` promises the hash of the *response*, so that a withheld answer
-        # can be checked against one offered later. A caller-supplied excerpt is the
-        # caller's own truncation of an answer this command never saw: hashing it under
-        # that name would answer "no" for the learner's real answer, which is the opposite
-        # of what the column exists to do. No whole answer, no attestation.
-        response_hash = digest if response is not None else None
-        if str(served[2]) == "answered":
-            # Deliberately *here*, below every refusal above rather than above them. A
-            # repeat must not fold the same evidence into the posterior twice, but a
-            # second call carrying a different answer is not a repeat, and returning the
-            # run report for one told the caller a correction had landed when nothing had
-            # been written. A guard placed before the path it guards also disables it:
-            # with this above, asking to keep more than consent allows on an answered task
-            # returned success and the caller believed the transcript was retained.
-            _assert_repeat(
-                database,
-                run_id=run_id,
-                content_id=content_id,
-                score=resolved_score,
-                response_hash=response_hash,
-                visibility=visibility,
                 audio_artifact=audio_artifact,
-            )
-            return run_report(database, run_id)
-        states = {state.dimension: state for state in _dimension_states(database, run_id, kinds)}
-        state = states[dimension]
-        levels = _pinned_levels(conditions, fallback=record_track.framework_levels)
-        prior_snapshot = list(state.posterior)
-        updated = record_score(state, candidate, score=resolved_score, level_count=len(levels))
-        result_id = AssessmentId.new()
-        # Derived from the play rows, never accepted: a caller-supplied count would be one
-        # more place a caller could talk its way into a different claim. Only for a task
-        # that played a recording, and only from a surface that records plays.
-        #
-        # Recorded plays are a fact whoever records the result: a page plays, the learner
-        # pauses, and the CLI scores the answer. Only "no plays" depends on the surface --
-        # zero from one that records plays, unknown (`NULL`) from one that cannot know.
-        plays = _plays_used(database, run_id, content_id) if served[13] is not None else 0
-        play_count = (
-            plays if served[13] is not None and (plays or actor in PLAY_TRACKING_ACTORS) else None
+                submission_id=submission,
+                claim_id=claim,
+                track_id=track_id,
+                actor=actor,
+                keyed=idempotency_key is not None,
+            ),
+            root=paths.root,
         )
+        if not isinstance(plan, VerdictPlan):
+            # The recording can no longer be heard. The withdrawal commits on its own, and
+            # the refusal is raised after it, as C5 did: the judge is told why, and the task
+            # no longer holds its dimension for a verdict that can never land.
+            with database.transaction() as transaction:
+                settle(transaction, plan)
+            if plan.refusal is not None:
+                raise plan.refusal
+            raise LinguaWikiError(
+                plan.code,
+                plan.reason,
+                details=(ErrorDetail(field="submission", reason=plan.submission_id),),
+            )
+        if plan.action == REPEAT:
+            return _verdict_report(database, run_id, plan.verdict_id, plan.warnings)
         with database.transaction() as transaction:
-            now = transaction.now()
-            transaction.execute(
-                "INSERT INTO assessment_results (result_id, run_id, content_id, dimension, "
-                "raw_score, rubric_json, response_excerpt, assessor_kind, assessor, confidence, "
-                "prior_json, posterior_json, difficulty, recorded_at, scoring_policy_version, "
-                "score_source, response_visibility, response_hash, play_count, "
-                "audio_artifact_id, judgement_policy_version, observed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                # When the learner answered: the submission's moment for a judged recording,
-                # which a verdict arriving later must not redate; otherwise the write time.
-                "coalesce((SELECT created_at FROM assessment_submissions "
-                "WHERE submission_id = ?), ?))",
-                [
-                    str(result_id),
-                    run_id,
-                    content_id,
-                    dimension,
-                    resolved_score,
-                    json.dumps(dict(rubric or {}), ensure_ascii=False, sort_keys=True),
-                    excerpt,
-                    assessor_kind,
-                    assessor,
-                    confidence,
-                    json.dumps(prior_snapshot),
-                    json.dumps(list(updated.posterior)),
-                    candidate.difficulty,
-                    now,
-                    policy_version,
-                    score_source,
-                    visibility,
-                    response_hash,
-                    play_count,
-                    None if bound is None else bound.artifact_id,
-                    judgement_version,
-                    None if bound is None else bound.submission.submission_id,
-                    now,
-                ],
-            )
-            transaction.execute(
-                "UPDATE assessment_run_tasks SET status = 'answered' WHERE run_id = ? "
-                "AND sequence = ?",
-                [run_id, int(served[0])],
-            )
-            if bound is not None:
-                # In the result's transaction: a judged submission without its result, or a
-                # result whose submission still waits for a judge, is a state nobody can
-                # explain afterwards.
-                transaction.execute(
-                    "UPDATE assessment_submissions SET status = 'judged', updated_at = ? "
-                    "WHERE submission_id = ?",
-                    [now, bound.submission.submission_id],
-                )
-                # Migration 0035's account of the verdict and what became of it, so that
-                # "a judged submission has an applied outcome" holds for every judgement.
-                # Received and applied in one commit: nothing here can be held.
-                _write_applied_verdict(
-                    transaction,
-                    submission_id=bound.submission.submission_id,
-                    result_id=str(result_id),
-                    now=now,
-                )
-            # The exposure row already exists: `next_task` wrote it when it served this
-            # item. Scoring adds the answer, and leaves the exposure count alone.
-            _record_exposure(
-                transaction,
-                track_id=str(row[1]),
-                content_id=content_id,
-                purpose=str(row[3]),
-                is_anchor=candidate.is_anchor,
-                now=now,
-                answered=True,
-            )
-            _write_state(transaction, run_id=run_id, state=updated, levels=levels, insert=False)
-            transaction.execute(
-                "UPDATE assessment_runs SET updated_at = ? WHERE run_id = ?", [now, run_id]
-            )
+            written = write_verdict(transaction, plan)
+            affected = [run_id] + [
+                value for value in (written.verdict_id, written.result_id) if value is not None
+            ]
             migration_module.record_audit_entry(
                 transaction,
                 command=command,
                 correlation_id=EventId.new(),
                 outcome="succeeded",
                 actor=actor,
-                affected_records_json=json.dumps([run_id, str(result_id)], sort_keys=True),
+                affected_records_json=json.dumps(affected, sort_keys=True),
                 after_summary=(
-                    f"scored {content_id} in {dimension} at {resolved_score} ({score_source})"
+                    f"held a verdict on {content_id} in {written.dimension} at {written.score} "
+                    "until the run resumes"
+                    if written.held
+                    else f"scored {content_id} in {written.dimension} at {written.score} "
+                    f"({plan.score_source})"
                 ),
             )
             if idempotency_key is not None:
                 migration_module.record_domain_event(
                     transaction,
-                    event_type="assessment.recorded",
+                    event_type=RECORDED_EVENT,
                     aggregate_type="assessment_run",
                     aggregate_id=run_id,
                     correlation_id=EventId.new(),
+                    # The event names the verdict, which is how a replay finds what it is
+                    # replaying: `assessment_verdicts` carries no key of its own.
                     payload_json=idempotency.payload(
                         scoring_fingerprint,
                         content_id=content_id,
-                        score=resolved_score,
+                        score=written.score,
+                        **(
+                            {} if written.verdict_id is None else {"verdict_id": written.verdict_id}
+                        ),
                     ),
                     idempotency_key=idempotency_key,
                 )
-        return _reported(run_report(database, run_id), warnings)
+        return _verdict_report(database, run_id, written.verdict_id, plan.warnings)
 
 
 class PlayReport(ContractModel):
@@ -3097,15 +3847,23 @@ __all__ = [
     "NextTaskReport",
     "PlayReport",
     "RunListReport",
+    "VerdictPlan",
+    "VerdictRequest",
+    "VerdictWrite",
     "finalize",
+    "held_verdict_request",
     "next_task",
+    "plan_verdict",
     "plays_remaining",
     "record",
     "record_play",
     "report",
     "resumable_runs",
+    "retain_rubric",
     "seed_declared_estimates",
     "served_recording",
     "set_status",
+    "settle",
     "start",
+    "write_verdict",
 ]

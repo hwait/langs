@@ -59,7 +59,6 @@ from linguawiki.placement import RECORDED_JUDGED_TASK_TYPES, SPOKEN_MODALITY
 from linguawiki.services import artifacts as artifact_service
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import learners as learner_service
-from linguawiki.services import withdrawal
 from linguawiki.services.learners import RecordingPolicy, recording_policy
 
 #: The private top-level directory staged bytes live under, and the part of it captures use.
@@ -1407,20 +1406,6 @@ def _filesystem_checks(paths: WorkspacePaths, database: Database) -> list[CheckR
     ]
 
 
-def withdraw_unjudgeable(
-    database: Database, *, submission: SubmissionReport, failure: LinguaWikiError
-) -> None:
-    """A verdict arrived for a recording no judge can hear any more: withdraw it, by name."""
-
-    with database.transaction() as transaction:
-        withdrawal.withdraw_submission(
-            transaction,
-            submission_id=submission.submission_id,
-            code=failure.payload.code,
-            reason=failure.payload.message,
-        )
-
-
 __all__ = [
     "CAPTURE_DIRECTORY",
     "CAPTURE_MEDIA_TYPES",
@@ -1447,5 +1432,4 @@ __all__ = [
     "recover",
     "track_recording_policy",
     "unaccounted_staged_files",
-    "withdraw_unjudgeable",
 ]
