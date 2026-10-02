@@ -23,8 +23,11 @@ package ingestion. Do not reopen it through the browser.
 
 ## Shipped — 2026-10-02
 
-Implemented on `c5-audio-and-evidence`. Release gate figures are recorded below once it
-has run.
+Implemented on `c5-audio-and-evidence`. Release gate `scripts/verify.py`: **2515 passed, 1
+skipped**, branch coverage 93.37% against a 90% floor, wheel and distribution checks clean.
+`linguawiki privacy audit` and `db check` are clean on a scratch workspace driven through a
+crash before promotion, a crash after the move, recovery, a supersession, a duplicate, a
+verdict, and a purge.
 
 Where it went differently from the plan, and why:
 
@@ -90,6 +93,10 @@ Deferred:
   lapses it; neither command withdraws it.
 - A recording made in the page and not yet acknowledged lives in memory only, so a reload
   loses it and the learner records again. A capture already registered is not lost.
+- One run of the browser suite during the stage failed three C4 tests that passed on every
+  later run (39 of 39 across three repeats). It coincided with the disk filling: the suite
+  leaves about 50 GB of pytest temp per run, and an earlier gate run stalled and was
+  killed for the same reason. Unexplained beyond that, and worth watching.
 
 ## 0. Inherited from C2 — pack-shipped recordings
 
