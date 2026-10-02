@@ -613,6 +613,38 @@ def _assert_transition(run_id: str, *, current: str, target: str) -> None:
     )
 
 
+def _write_applied_verdict(
+    database: Database, *, submission_id: str, result_id: str, now: datetime
+) -> str:
+    """Record a verdict received and applied in one commit, inside the caller's transaction.
+
+    The verdict is read back from the result just written rather than restated, so the two
+    cannot disagree about the score, the judge, or the retained response: the result row is
+    already the retained form. Migration 0035's backfill builds C5 verdicts the same way.
+
+    Except the rubric, which never went through retention (the deferred C1 gap): a second,
+    insert-only copy here is the gap widened, so the verdict's rubric stays empty and its
+    outcome names the result that holds it, until rubrics are retained themselves.
+    """
+
+    verdict_id = str(AssessmentId.new())
+    database.execute(
+        "INSERT INTO assessment_verdicts (verdict_id, submission_id, claim_id, raw_score, "
+        "rubric_json, assessor_kind, assessor, confidence, response_visibility, "
+        "response_excerpt, response_hash, received_at) "
+        "SELECT ?, ?, NULL, raw_score, '{}', assessor_kind, assessor, confidence, "
+        "response_visibility, response_excerpt, response_hash, ? "
+        "FROM assessment_results WHERE result_id = ?",
+        [verdict_id, submission_id, now, result_id],
+    )
+    database.execute(
+        "INSERT INTO assessment_verdict_outcomes (verdict_id, outcome, result_id, code, "
+        "reason, decided_at) VALUES (?, 'applied', ?, NULL, NULL, ?)",
+        [verdict_id, result_id, now],
+    )
+    return verdict_id
+
+
 def _record_exposure(
     database: Database,
     *,
@@ -1905,8 +1937,12 @@ def record(
                 "raw_score, rubric_json, response_excerpt, assessor_kind, assessor, confidence, "
                 "prior_json, posterior_json, difficulty, recorded_at, scoring_policy_version, "
                 "score_source, response_visibility, response_hash, play_count, "
-                "audio_artifact_id, judgement_policy_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "audio_artifact_id, judgement_policy_version, observed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                # When the learner answered: the submission's moment for a judged recording,
+                # which a verdict arriving later must not redate; otherwise the write time.
+                "coalesce((SELECT created_at FROM assessment_submissions "
+                "WHERE submission_id = ?), ?))",
                 [
                     str(result_id),
                     run_id,
@@ -1929,6 +1965,8 @@ def record(
                     play_count,
                     None if bound is None else bound.artifact_id,
                     judgement_version,
+                    None if bound is None else bound.submission.submission_id,
+                    now,
                 ],
             )
             transaction.execute(
@@ -1944,6 +1982,15 @@ def record(
                     "UPDATE assessment_submissions SET status = 'judged', updated_at = ? "
                     "WHERE submission_id = ?",
                     [now, bound.submission.submission_id],
+                )
+                # Migration 0035's account of the verdict and what became of it, so that
+                # "a judged submission has an applied outcome" holds for every judgement.
+                # Received and applied in one commit: nothing here can be held.
+                _write_applied_verdict(
+                    transaction,
+                    submission_id=bound.submission.submission_id,
+                    result_id=str(result_id),
+                    now=now,
                 )
             # The exposure row already exists: `next_task` wrote it when it served this
             # item. Scoring adds the answer, and leaves the exposure count alone.

@@ -825,8 +825,8 @@ def _register_and_bind(
         now = transaction.now()
         artifact_id = artifact_service.write_registration(transaction, plan, command=command)
         transaction.execute(
-            f"INSERT INTO assessment_submissions ({_SUBMISSION_COLUMNS}, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)",
+            f"INSERT INTO assessment_submissions ({_SUBMISSION_COLUMNS}, kind, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, 'recording', ?)",
             [submission_id, row.run_id, row.content_id, row.capture_id, artifact_id, now, now],
         )
         transaction.execute(
