@@ -33,6 +33,9 @@ const state = {
   status: "", // "", "waiting", "offline", "unknown"
   error: null, // { code, message }
   recordings: new Map(), // content_id -> object URL
+  // content_id -> what the learner has typed so far. Every redraw rebuilds the field, so
+  // a draft that lived only in the DOM was erased by pressing Play or by any error.
+  drafts: new Map(),
   stale: false,
 };
 
@@ -155,16 +158,41 @@ async function request(method, path, body, { binary = false, attempts = Infinity
       continue;
     }
     const type = response.headers.get("Content-Type") || "";
-    if (binary && response.ok && !type.startsWith("application/json")) {
-      setStatus("");
-      return response.blob();
+    // An answer that cannot be read is not an answer. The request may have landed -- a
+    // response cut off mid-body is exactly that -- so it is handled like a connection that
+    // dropped: a read or a keyed mutation is resent unchanged, which the key makes a
+    // replay; a keyless mutation's outcome is reported as unknown. Treating it as a
+    // refusal discarded the key, and the next press opened a second run.
+    let envelope = null;
+    try {
+      if (binary && response.ok && !type.startsWith("application/json")) {
+        const blob = await response.blob();
+        setStatus("");
+        return blob;
+      }
+      envelope = await response.json();
+    } catch {
+      envelope = null;
     }
-    const envelope = await response.json().catch(() => ({}));
+    const readable =
+      envelope !== null && typeof envelope === "object" && (envelope.ok === true || envelope.error);
+    if (!readable) {
+      if (!mayRetry || attempt + 1 >= attempts) {
+        setStatus("unknown");
+        throw new Refusal(response.status, {
+          code: "client_unreachable",
+          message: "The server's answer could not be read, so whether that landed is unknown.",
+        });
+      }
+      setStatus("offline");
+      await sleep(Math.min(1000 * (attempt + 1), 5000));
+      continue;
+    }
     if (response.ok && envelope.ok) {
       setStatus("");
       return envelope.data;
     }
-    const error = envelope.error || { code: "client_unreadable", message: "The server's answer could not be read." };
+    const error = envelope.error;
     if (STALE_TOKEN.has(error.code)) {
       state.stale = true;
       store(TOKEN_KEY, null);
@@ -497,6 +525,8 @@ function taskView(screen, task) {
       "aria-label": "Your answer",
       disabled: state.busy,
     });
+    field.value = state.drafts.get(task.content_id) || "";
+    field.addEventListener("input", () => state.drafts.set(task.content_id, field.value));
     const shape = task.presentation && task.presentation.response_shape;
     const submit = () => {
       const text = field.value;

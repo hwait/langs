@@ -428,3 +428,56 @@ def test_a_recording_that_cannot_be_fetched_costs_no_play(
     )
     assert plays == 0
     assert "2 plays left" in page.inner_text("[data-role=plays]")
+
+
+def test_an_unreadable_answer_to_a_start_is_retried_under_its_key(
+    page: Any, served: Served, recorded: PolishWorkspace
+) -> None:
+    """The start lands and its response is cut off mid-body.
+
+    An unreadable answer is not a refusal: the outcome is unknown, so the operation is
+    resent under the same key -- and the server answers with the run it already opened.
+    """
+
+    keys: list[str] = []
+    truncated = {"done": False}
+
+    def cut_off(route: Any) -> None:
+        if route.request.method != "POST":
+            route.continue_()
+            return
+        keys.append(json.loads(route.request.post_data)["idempotency_key"])
+        if truncated["done"]:
+            route.continue_()
+            return
+        truncated["done"] = True
+        landed = route.fetch()  # the run is opened...
+        route.fulfill(response=landed, body=landed.text()[:20])  # ...and the answer is cut
+
+    page.route("**/runs", cut_off)
+    page.goto(served.server.launch_url)
+    page.click("text=Start a calibration")
+    _wait_for_work(page)
+
+    assert len(keys) >= 2 and len(set(keys)) == 1, keys
+    assert _scalar(recorded, "SELECT count(*) FROM assessment_runs") == 1
+
+
+def test_playing_a_recording_keeps_what_the_learner_typed(page: Any, served: Served) -> None:
+    _start(page, served)
+    for _ in range(20):
+        _wait_for_work(page)
+        if (
+            page.locator("[data-role=play]").count()
+            and page.locator("input[name=response]").count()
+        ):
+            break
+        _answer_current(page)
+    else:  # pragma: no cover
+        raise AssertionError("no written listening task was served")
+    page.fill("input[name=response]", "w Poznaniu")
+
+    page.click("[data-role=play]")
+    page.wait_for_selector("[data-role=plays]:has-text('1 play left')")
+
+    assert page.input_value("input[name=response]") == "w Poznaniu"
