@@ -23,8 +23,8 @@ package ingestion. Do not reopen it through the browser.
 
 ## Shipped — 2026-10-02
 
-Implemented on `c5-audio-and-evidence`. Release gate `scripts/verify.py` after the review round: **2521
-passed, 1 skipped**, branch coverage 93.39% against a 90% floor, wheel and distribution checks clean.
+Implemented on `c5-audio-and-evidence`. Release gate `scripts/verify.py` after the second review round:
+**2530 passed, 1 skipped**, branch coverage 93.36% against a 90% floor, wheel and distribution checks clean.
 `linguawiki privacy audit` and `db check` are clean on a scratch workspace driven through a
 crash before promotion, a crash after the move, recovery, a supersession, a duplicate, a
 verdict, and a purge.
@@ -102,6 +102,38 @@ Closed in the review round, each with a test that failed before its fix:
   recording made in the page is not swept, and the page now says it is kept until the
   learner removes it; under a rolling window, that it is not removed before a judge hears it.
 
+Closed in the second review round:
+
+- **A disk that refused the move crashed every later `client serve`** on a bare `OSError`
+  naming no capture. The write and the move turn filesystem failures into
+  `capture_write_failed` / `capture_move_failed`, which leave the bytes and the row where
+  they are, and recovery refuses to start with `capture_unresolved` naming the capture.
+- **Recovery deleted a take because its run was paused.** A capture already staged was
+  recorded while the run was live, so its preflight accepts a paused run and only a closed
+  one refuses it. A *new* capture on a paused run is still refused.
+- **The sweep withdrew a lapsed submission in its own committed transaction** before the
+  purge, so a failed purge left a withdrawal beside a recording still on disk. The
+  separate withdrawal is gone: `write_purge` already withdraws a pending submission in the
+  purge's transaction, so both land or neither does. The code is the purge's,
+  `assessment_audio_purged`.
+- **The sweep purged a judged capture in a run still being worked**, invalidating its
+  result and settling the task for the rest of the run. A judged capture is now held like
+  an unheard one until its run closes, and is due after that -- a narrowing of §4, which
+  had treated it as due under its policy at once.
+- **One blocked upload held the single handler for about twenty seconds**, the server's
+  four attempts each wrapping the service's own wait. Uploads are not retried by the
+  server; the service waits once and the page resends.
+- **A pack that could not be found was reported as an unresolvable recording path.** The
+  pack's own refusal (`pack_not_found`) now reaches the caller.
+- **The judged-claims check restated the policy in SQL.** It now asks
+  `evidence.assert_judged_claim` for each result, so the check and the service cannot
+  disagree.
+- **A capture ran its preflight three times and hashed its bytes up to four times.** The
+  check before the move was a copy of the two after it, and is gone.
+- **An upload answered with an envelope carrying neither `ok` nor `error` stranded the
+  take.** The page treats it like a dropped connection and resends the same bytes under
+  the same capture identifier.
+
 Deferred:
 
 - The pilot's six listening recordings (§0) are still not produced. They need real
@@ -111,7 +143,7 @@ Deferred:
   spoken task is not withdrawn when the recording is purged. `record` writes no evidence,
   and a test pins that, but this path writes it.
 - A pending submission in a run that is finalized or abandoned stays pending until a sweep
-  lapses it; neither command withdraws it.
+  purges its recording; neither command withdraws it.
 - A recording made in the page and not yet acknowledged lives in memory only, so a reload
   loses it and the learner records again. A capture already registered is not lost.
 - One run of the browser suite during the stage failed three C4 tests that passed on every

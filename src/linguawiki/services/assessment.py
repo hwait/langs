@@ -2586,10 +2586,14 @@ def _asset_bytes(
     source = str(pack_service.installed_pack(database, pack_key)["source_path"] or "")
     if not source:
         return None, "the pack's installed location is not recorded"
+    # Outside the handler: a pack that cannot be found reports itself, by its own code.
+    # Folding that into "the recording's path cannot be resolved" sends an operator to look
+    # for one missing file when the whole pack is the problem.
+    pack_root = resolve_pack_path(source)
     try:
-        root = resolve_pack_path(source).resolve(strict=True)
+        root = pack_root.resolve(strict=True)
         path = (root / asset.path).resolve(strict=True)
-    except (OSError, RuntimeError, LinguaWikiError):
+    except (OSError, RuntimeError):
         # `RuntimeError` is a symlink loop under Python 3.12, which no handler above this
         # one would catch.
         return None, "its path cannot be resolved"

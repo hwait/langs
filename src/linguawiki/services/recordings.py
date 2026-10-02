@@ -317,8 +317,14 @@ def _preflight(
     sha256: str,
     capture_id: str,
     paths_to_claim: tuple[str, ...] = (),
+    resuming: bool = False,
 ) -> str:
     """Every refusal a capture can meet before its first write, as a read. Returns the track.
+
+    `resuming` is for a capture already staged: the learner spoke while the run was being
+    worked, so a run paused since then still takes it -- only a closed run cannot. Refusing
+    it for a pause would delete an answer the learner gave, and a retry after resuming
+    would replay that refusal.
 
     The same function for a new capture and for a resumed one: a capture recovered after a
     restart is held to the rules in force when it is promoted, not the ones in force when
@@ -335,7 +341,8 @@ def _preflight(
             details=(ErrorDetail(field="run", reason="unknown run"),),
         )
     track_id = str(run[1])
-    assessment_service.assert_running(run_id, status=str(run[2]), action="take a recording")
+    if not (resuming and str(run[2]) in assessment_service.RESUMABLE_STATUSES):
+        assessment_service.assert_running(run_id, status=str(run[2]), action="take a recording")
     # Before the task's own status: once judged the task is also settled, and "the learner's
     # answer was taken" is the reason a caller can act on.
     live = live_submission(database, run_id, content_id)
@@ -622,13 +629,21 @@ def _write_staged(root: Path, relative: str, data: bytes) -> None:
     """Write the bytes once, durably, and never over something already there."""
 
     target = root / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(descriptor, data)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(descriptor, data)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as failure:
+        raise LinguaWikiError(
+            "capture_write_failed",
+            f"the recording could not be written to {relative}: {failure}. The capture is "
+            "staged without its bytes, and resending it writes them.",
+            details=(ErrorDetail(field="capture_id", reason=str(failure)),),
+        ) from failure
 
 
 def _promote(
@@ -666,30 +681,9 @@ def _promote(
                     details=(ErrorDetail(field="capture_id", reason="no staged file"),),
                 ),
             )
-        if absolute is None or artifact_service.digest_or_none(absolute) != row.sha256:
-            raise _refuse(
-                database,
-                root,
-                row,
-                LinguaWikiError(
-                    "capture_hash_mismatch",
-                    f"the staged bytes of capture {row.capture_id} are not the bytes that were "
-                    "sent",
-                    details=(ErrorDetail(field="sha256", reason=row.sha256),),
-                ),
-            )
-        try:
-            _preflight(
-                database,
-                root,
-                run_id=row.run_id,
-                content_id=row.content_id,
-                sha256=row.sha256,
-                capture_id=row.capture_id,
-                paths_to_claim=(row.final_path,),
-            )
-        except LinguaWikiError as failure:
-            raise _refuse(database, root, row, failure) from None
+        # Nothing else is checked here: `_move` verifies the bytes and the destination at the
+        # rename, and `_register_and_bind` runs the preflight before anything binds, so a
+        # check here would only be a third copy of both.
         with database.transaction() as transaction:
             transaction.execute(
                 "UPDATE capture_stagings SET state = 'promoting', updated_at = ? "
@@ -765,8 +759,19 @@ def _move(database: Database, root: Path, row: _Staging) -> None:
             ),
         )
     target = root / row.final_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staged, target)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, target)
+    except OSError as failure:
+        # The disk refused the move -- a read-only or cross-volume artifacts directory. The
+        # bytes are still staged and the row still says so, which is a state the next
+        # attempt can name; nothing is deleted, because nothing is wrong with the capture.
+        raise LinguaWikiError(
+            "capture_move_failed",
+            f"capture {row.capture_id} could not be moved from {row.staged_path} to "
+            f"{row.final_path}: {failure}. Its bytes were left staged.",
+            details=(ErrorDetail(field="capture_id", reason=row.capture_id),),
+        ) from failure
 
 
 def _register_and_bind(
@@ -788,6 +793,9 @@ def _register_and_bind(
             content_id=row.content_id,
             sha256=row.sha256,
             capture_id=row.capture_id,
+            # Already staged: the learner spoke while the run was live. A fresh upload got
+            # here through a preflight that required a running run, in this same writer.
+            resuming=True,
         )
         plan = artifact_service.plan_registration(
             database,
@@ -944,7 +952,12 @@ def recover(
                         command=RECOVERY_COMMAND,
                     )
                     registered.append(row.capture_id)
-                except LinguaWikiError as failure:
+                except (LinguaWikiError, OSError) as raised:
+                    failure = (
+                        raised
+                        if isinstance(raised, LinguaWikiError)
+                        else LinguaWikiError("capture_unresolved", str(raised))
+                    )
                     after = _staging(database, row.capture_id)
                     if after is None or after.state in (STAGED, PROMOTING):
                         # The refusal did not land -- its cleanup failed and the transaction
@@ -956,7 +969,7 @@ def recover(
                             f"{failure.payload.message}. The server will not start over it; "
                             "fix the cause and start it again.",
                             details=failure.payload.details,
-                        ) from failure
+                        ) from raised
                     refused.append(row.capture_id)
                     findings.append(f"capture {row.capture_id}: {failure.payload.message}")
             findings.extend(unaccounted_staged_files(paths, database))

@@ -810,8 +810,9 @@ def test_the_hold_lapses_when_the_run_closes_unjudged(polish_workspace: PolishWo
     swept = artifact_service.sweep(polish_workspace.paths, clock=polish_workspace.clock)
 
     assert swept.purged == (waiting,) and len(swept.withdrawn_submissions) == 1
+    # Withdrawn by the purge that removed the recording, in its transaction.
     assert rows(polish_workspace, "SELECT status, withdrawn_code FROM assessment_submissions") == [
-        ("withdrawn", "assessment_run_closed")
+        ("withdrawn", "assessment_audio_purged")
     ]
     assert content_id
     assert not failed_checks(polish_workspace)
@@ -1233,7 +1234,10 @@ def test_a_recovery_whose_cleanup_fails_refuses_to_report_success(
     assert refused(recording_service.recover, speaking.paths, clock=speaking.clock) == (
         "capture_unresolved"
     )
-    assert staging_states(speaking) == [("staged", None)]
+    # Still unresolved -- whichever step the refusal was reached at -- and still owning its
+    # bytes, so nothing was reported as resolved that is not.
+    assert staging_states(speaking)[0][0] in ("staged", "promoting")
+    assert_everything_accounted_for(speaking)
     assert (
         refused(server_module.build_server, speaking.paths, clock=speaking.clock)
         == "capture_unresolved"
@@ -1263,3 +1267,179 @@ def test_a_verdict_repeat_naming_another_recording_is_a_conflict(
         "assessment_result_conflict"
     )
     assert refused(judge, speaking, run_id, content_id, None) == "assessment_result_conflict"
+
+
+# --- second review round -----------------------------------------------------------------
+
+
+def test_a_move_the_disk_refuses_names_the_capture_and_deletes_nothing(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-only or cross-volume artifacts directory: recovery names the capture, keeps
+    its bytes staged, and succeeds once the disk lets it."""
+
+    import errno
+
+    run_id = start_spoken(speaking, ("pronunciation",))
+    task = serve(speaking, run_id)
+    with monkeypatch.context() as patched:
+        crash_at(patched, "_move")
+        with pytest.raises(Crash):
+            take(speaking, run_id, task.content_id, data=spoken_bytes(80))
+    identifier = str(rows(speaking, "SELECT capture_id FROM capture_stagings")[0][0])
+
+    def cross_device(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(recording_service.os, "replace", cross_device)
+        with pytest.raises(LinguaWikiError) as failure:
+            recording_service.recover(speaking.paths, clock=speaking.clock)
+    assert failure.value.payload.code == "capture_unresolved"
+    assert identifier in failure.value.payload.message
+    assert staging_states(speaking) == [("promoting", None)]
+    assert any(path.startswith("staging/") for path in private_files(speaking.root))
+
+    recovered = recording_service.recover(speaking.paths, clock=speaking.clock)
+
+    assert recovered.registered == (identifier,)
+    assert_everything_accounted_for(speaking)
+
+
+def test_a_capture_staged_before_a_pause_is_recovered_rather_than_deleted(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = start_spoken(speaking, ("pronunciation",))
+    task = serve(speaking, run_id)
+    with monkeypatch.context() as patched:
+        crash_at(patched, "_promote")
+        with pytest.raises(Crash):
+            take(speaking, run_id, task.content_id, data=spoken_bytes(81))
+    assessment_service.set_status(speaking.paths, status="paused", run=run_id, clock=speaking.clock)
+
+    recovered = recording_service.recover(speaking.paths, clock=speaking.clock)
+
+    assert len(recovered.registered) == 1
+    assert rows(speaking, "SELECT status FROM assessment_submissions") == [("pending",)]
+    assessment_service.set_status(
+        speaking.paths, status="in-progress", run=run_id, clock=speaking.clock
+    )
+    assert recording_service.pending(speaking.paths, run=run_id).pending[0].judgeable
+
+
+def test_a_new_capture_on_a_paused_run_is_still_refused(speaking: PolishWorkspace) -> None:
+    run_id = start_spoken(speaking, ("pronunciation",))
+    task = serve(speaking, run_id)
+    assessment_service.set_status(speaking.paths, status="paused", run=run_id, clock=speaking.clock)
+
+    assert refused(take, speaking, run_id, task.content_id, data=spoken_bytes(82)) == (
+        "assessment_run_paused"
+    )
+    assert private_files(speaking.root) == set()
+
+
+def test_a_sweep_whose_purge_fails_leaves_the_submission_pending(
+    polish_workspace: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    permit_recording(
+        polish_workspace, audio_retention_policy="rolling-days", audio_retention_days=1
+    )
+    run_id, _, _ = pending_task(polish_workspace, 83)
+    assessment_service.set_status(
+        polish_workspace.paths, status="abandoned", run=run_id, clock=polish_workspace.clock
+    )
+    polish_workspace.clock.advance(timedelta(days=3))
+
+    def cannot_delete(*_args: Any, **_kwargs: Any) -> None:
+        raise LinguaWikiError("artifact_file_not_removed", "the disk refused the deletion")
+
+    monkeypatch.setattr(artifact_service, "_remove_file", cannot_delete)
+    with pytest.raises(LinguaWikiError):
+        artifact_service.sweep(polish_workspace.paths, clock=polish_workspace.clock)
+
+    assert rows(polish_workspace, "SELECT status FROM assessment_submissions") == [("pending",)]
+
+
+def test_a_judged_capture_in_a_live_run_is_held_until_the_run_closes(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    permit_recording(
+        polish_workspace, audio_retention_policy="rolling-days", audio_retention_days=1
+    )
+    run_id, _, judged = judged_run(polish_workspace, seed=84, finalize=False)
+    polish_workspace.clock.advance(timedelta(days=3))
+
+    held = artifact_service.sweep(polish_workspace.paths, clock=polish_workspace.clock)
+    assert held.purged == () and held.held_for_judging == (judged,)
+    assert rows(
+        polish_workspace, "SELECT count(*) FROM assessment_results WHERE invalidated_at IS NULL"
+    ) == [(1,)]
+
+    assessment_service.finalize(polish_workspace.paths, run=run_id, clock=polish_workspace.clock)
+    swept = artifact_service.sweep(polish_workspace.paths, clock=polish_workspace.clock)
+    assert swept.purged == (judged,)
+
+
+def test_a_blocked_upload_waits_once_and_not_once_per_layer(speaking: PolishWorkspace) -> None:
+    import time
+
+    from tests.support.client_http import serving
+
+    run_id = start_spoken(speaking, ("pronunciation",))
+    task = serve(speaking, run_id)
+    with serving(speaking.paths, speaking.clock) as client:
+        started = time.monotonic()
+        with open_writer(speaking.paths, command="test.hold"):
+            answer = client.upload(
+                f"/runs/{run_id}/tasks/{task.content_id}/captures/{capture_id()}",
+                spoken_bytes(85),
+            )
+        elapsed = time.monotonic() - started
+
+    assert answer.status == 503 and answer.code == "writer_locked"
+    assert elapsed < recording_service.TRANSIENT_WAIT_SECONDS * 2, elapsed
+    assert private_files(speaking.root) == set()
+
+
+def test_a_pack_that_cannot_be_found_reports_itself_at_playback(
+    polish_workspace: PolishWorkspace, tmp_path: Path
+) -> None:
+    import shutil
+
+    from tests.support.recordings import publish_pilot_with_recordings
+
+    root = publish_pilot_with_recordings(polish_workspace, tmp_path)
+    run = assessment_service.start(
+        polish_workspace.paths,
+        dimensions=["listening"],
+        modalities=["audio"],
+        scoring="machine",
+        clock=polish_workspace.clock,
+    )
+    task = serve(polish_workspace, run.run_id)
+    shutil.move(str(root), str(tmp_path / "moved-away"))
+
+    code = refused(
+        assessment_service.served_recording,
+        polish_workspace.paths,
+        run=run.run_id,
+        content_id=task.content_id,
+    )
+    assert code == "pack_not_found"
+
+
+def test_db_check_and_the_service_agree_about_a_verdicts_policy_version(
+    speaking: PolishWorkspace,
+) -> None:
+    run_id, content_id, artifact_id = pending_task(speaking, 86)
+    judge(speaking, run_id, content_id, artifact_id)
+    assert "judged_claims_within_policy" not in failed_checks(speaking)
+
+    with (
+        open_writer(speaking.paths, command="test.damage") as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute("UPDATE assessment_results SET judgement_policy_version = NULL")
+
+    check = failed_checks(speaking)["judged_claims_within_policy"]
+    assert "judgement.v1" in "".join(check.context.values())

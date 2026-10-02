@@ -6,6 +6,7 @@ import json
 
 from pydantic import Field
 
+from linguawiki import evidence as evidence_policy
 from linguawiki.contracts import (
     SNAPSHOT_PARTIAL,
     LockManifest,
@@ -1256,19 +1257,52 @@ def _recorded_judgement_checks(database: Database) -> list[CheckResult]:
             field="results",
         )
     )
-    unjudged = [
-        f"{result_id} ({reason})"
-        for result_id, reason in database.query(
-            "SELECT result_id, CASE "
-            "  WHEN judgement_policy_version IS NULL THEN 'no judgement policy version' "
-            "  WHEN assessor_kind NOT IN ('ai', 'human') THEN 'not judged by ai or human' "
-            "  WHEN assessor IS NULL OR length(trim(assessor)) = 0 THEN 'judge not named' "
-            "  WHEN assessor_kind = 'ai' AND confidence = 'high' THEN 'ai above medium' "
-            "  END AS reason "
-            "FROM assessment_results WHERE audio_artifact_id IS NOT NULL "
-            "AND reason IS NOT NULL ORDER BY 1"
-        )
-    ]
+    # Asked of the policy itself, never restated here: a second encoding of the rule in SQL
+    # is a second rule, and the first time the two disagree the check reports damage the
+    # service accepted, or passes what it refused.
+    unjudged: list[str] = []
+    for (
+        result_id,
+        conditions,
+        dimension,
+        modality,
+        kind,
+        assessor,
+        confidence,
+        version,
+    ) in database.query(
+        "SELECT result.result_id, run.conditions_json, result.dimension, task.modality, "
+        "result.assessor_kind, result.assessor, result.confidence, "
+        "result.judgement_policy_version FROM assessment_results result "
+        "JOIN assessment_runs run ON run.run_id = result.run_id "
+        "LEFT JOIN assessment_run_tasks task ON task.run_id = result.run_id "
+        "AND task.content_id = result.content_id "
+        "WHERE result.audio_artifact_id IS NOT NULL ORDER BY 1"
+    ):
+        try:
+            kinds = json.loads(str(conditions)).get("dimension_kinds") or {}
+        except (ValueError, AttributeError, RecursionError):
+            kinds = {}
+        dimension_kind = kinds.get(str(dimension)) if isinstance(kinds, dict) else None
+        if dimension_kind is None or modality is None:
+            unjudged.append(f"{result_id} (the run cannot say what kind of task it judged)")
+            continue
+        if str(kind) not in evidence_policy.JUDGING_ASSESSORS:
+            unjudged.append(f"{result_id} (judged from a recording by a {kind} assessor)")
+            continue
+        try:
+            expected = evidence_policy.assert_judged_claim(
+                dimension_kind=str(dimension_kind),
+                modality=str(modality),
+                assessor_kind=str(kind),
+                assessor=None if assessor is None else str(assessor),
+                confidence=str(confidence),
+            )
+        except LinguaWikiError as failure:
+            unjudged.append(f"{result_id} ({failure.payload.code})")
+            continue
+        if (None if version is None else str(version)) != expected:
+            unjudged.append(f"{result_id} (records policy {version}, the rule says {expected})")
     checks.append(
         _named(
             "judged_claims_within_policy",

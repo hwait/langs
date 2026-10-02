@@ -181,3 +181,36 @@ def test_the_page_does_not_promise_a_deletion_the_sweep_never_makes(
         context.close()
         server.close()
         thread.join(timeout=5)
+
+
+def test_an_unreadable_answer_to_an_upload_resends_the_same_take(
+    browser: Any, served: Any, speaking: PolishWorkspace
+) -> None:
+    """An envelope with neither `ok` nor `error` is not an answer: the page resends the same
+    bytes under the same identifier, and the server answers the resend."""
+
+    context = browser.new_context(viewport={"width": 420, "height": 720})
+    context.grant_permissions(["microphone"])
+    page = context.new_page()
+    seen: list[str] = []
+
+    def first_unreadable(route: Any) -> None:
+        seen.append(route.request.url)
+        if len(seen) == 1:
+            route.fulfill(status=200, content_type="application/json", body="{}")
+        else:
+            route.continue_()
+
+    page.route("**/captures/**", first_unreadable)
+    try:
+        page.goto(served.launch_url)
+        page.click("[data-role=record]", timeout=20000)
+        page.wait_for_selector("[data-role=stop]")
+        page.wait_for_timeout(500)
+        page.click("[data-role=stop]")
+        page.wait_for_selector("[data-role=awaiting-judge]", timeout=20000)
+
+        assert len(seen) == 2 and seen[0] == seen[1]
+        assert _rows(speaking, "SELECT count(*) FROM assessment_submissions") == [(1,)]
+    finally:
+        context.close()

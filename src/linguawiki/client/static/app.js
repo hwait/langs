@@ -274,7 +274,14 @@ async function uploadTake(task, take) {
     } catch {
       envelope = null;
     }
-    if (envelope === null || typeof envelope !== "object") {
+    // An answer that cannot be read is not an answer -- the upload may have landed -- so it
+    // is resent under the same identifier, which the server answers as a replay. Reading
+    // `error.code` off an envelope that has none threw, and stranded the take.
+    const readable =
+      envelope !== null &&
+      typeof envelope === "object" &&
+      ((response.ok && envelope.ok === true) || (envelope.error && typeof envelope.error.code === "string"));
+    if (!readable) {
       setStatus("offline");
       await sleep(Math.min(1000 * (attempt + 1), 5000));
       continue;

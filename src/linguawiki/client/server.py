@@ -219,13 +219,15 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 # commits and then opens a reader for its report retries that *read* itself,
                 # so brief contention no longer reports a landed mutation as a failure. This
                 # rule is the backstop for when that budget is exhausted.
-                # An upload is keyed by the capture identifier in its path, which is what
-                # makes its retry a replay.
+                # An upload is not retried here: the capture service already waits out a
+                # held writer for its own bounded interval, and wrapping that in this loop
+                # multiplied the two into a twenty-second hold on the only handler. The
+                # page resends under the same capture identifier, which makes its retry a
+                # replay.
                 attempts = (
                     DEFAULT_ATTEMPTS
-                    if not route.mutates
-                    or route.upload is not None
-                    or request.optional("idempotency_key", str) is not None
+                    if route.upload is None
+                    and (not route.mutates or request.optional("idempotency_key", str) is not None)
                     else 1
                 )
                 report = with_retry(lambda: route.handler(request), attempts=attempts)

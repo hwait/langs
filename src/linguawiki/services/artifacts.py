@@ -1724,10 +1724,10 @@ class SweepReport(ContractModel):
     #: what matters before running it for real.
     unclipped_recordings: tuple[str, ...] = ()
     invalidated_observations: tuple[str, ...] = ()
-    #: Captures a judge has not yet heard, in a run still being worked. Held back under
-    #: every policy: deleting one discards the learner's answer.
+    #: Captures in a run still being worked, heard by a judge or not. Held back under every
+    #: policy: deleting one discards the learner's answer or a result the run rests on.
     held_for_judging: tuple[str, ...] = ()
-    #: Captures a judged result rests on that were due anyway. Purged like any whole
+    #: Captures a judged result rests on, due once their run closed. Purged like any whole
     #: recording, so their results are invalidated exactly as an explicit purge does it.
     judged_recordings: tuple[str, ...] = ()
     invalidated_results: tuple[str, ...] = ()
@@ -1826,9 +1826,10 @@ def sweep(
             )
         }
         judged = {
-            str(artifact_id)
-            for (artifact_id,) in database.query(
-                "SELECT DISTINCT result.audio_artifact_id FROM assessment_results result "
+            str(artifact_id): str(status)
+            for artifact_id, status in database.query(
+                "SELECT DISTINCT result.audio_artifact_id, run.status "
+                "FROM assessment_results result "
                 "JOIN assessment_runs run ON run.run_id = result.run_id "
                 "WHERE run.track_id = ? AND result.audio_artifact_id IS NOT NULL "
                 "AND result.invalidated_at IS NULL",
@@ -1863,14 +1864,21 @@ def sweep(
             # decision than the one they made.
             continue
         waiting = awaiting.get(str(artifact_id))
+        live_run = (waiting is not None and waiting[1] in ("in-progress", "paused")) or (
+            judged.get(str(artifact_id)) in ("in-progress", "paused")
+        )
+        if live_run:
+            # The run is still being worked. A recording a judge has not heard is an answer
+            # the learner has given; one a judge has heard rests a result the run is still
+            # folding, and purging it now would invalidate that result and settle the task
+            # for the rest of the run. A retention window is a weaker reason than either,
+            # and the hold lapses when the run closes.
+            held_for_judging.append(str(artifact_id))
+            continue
         if waiting is not None:
-            if waiting[1] in ("in-progress", "paused"):
-                # The run is live and a judge has not heard this yet. A retention window is
-                # a weaker reason than an answer the learner has already given.
-                held_for_judging.append(str(artifact_id))
-                continue
-            # The run closed with the recording unjudged: nothing will hear it now, so the
-            # hold lapses and the submission is withdrawn before the recording goes.
+            # The run closed with the recording unjudged: nothing will hear it now. The
+            # purge below withdraws the submission in its own transaction, so the
+            # withdrawal and the deletion land together or not at all.
             lapsed.append(waiting[0])
         if str(artifact_id) in judged:
             # A judged result rests on it. It is due like any whole recording, and it goes
@@ -1904,36 +1912,22 @@ def sweep(
         )
     if held_for_judging:
         warnings.append(
-            f"{len(held_for_judging)} recording(s) a judge has not yet heard were kept, "
-            "because their run is still being worked: "
+            f"{len(held_for_judging)} recorded answer(s) were kept, because their run is "
+            "still being worked: "
             + ", ".join(held_for_judging[:10])
-            + ". Deleting them would discard answers the learner has already given."
+            + ". Deleting them would discard answers the learner has given, or invalidate "
+            "results the run still rests on; they become due when the run closes."
         )
     if judged_due:
         warnings.append(
             f"{len(judged_due)} recording(s) a judged assessment result rests on are due and "
             "will go, invalidating those results: " + ", ".join(judged_due[:10])
         )
-    if lapsed and not dry_run:
-        from linguawiki.services import withdrawal
-
-        with (
-            open_writer(paths, command=command, clock=active_clock) as database,
-            database.transaction() as transaction,
-        ):
-            for submission_id in lapsed:
-                withdrawal.withdraw_submission(
-                    transaction,
-                    submission_id=submission_id,
-                    code="assessment_run_closed",
-                    reason="its run closed before a judge heard it, and the retention policy "
-                    "came due",
-                )
     if lapsed:
         warnings.append(
             f"{len(lapsed)} submission(s) whose run closed unjudged "
             + ("would be" if dry_run else "were")
-            + " withdrawn before their recordings went"
+            + " withdrawn with their recordings, in the purge that removes them"
         )
     purged: list[str] = []
     invalidated: list[str] = []
