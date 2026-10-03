@@ -3364,8 +3364,8 @@ def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
         database.execute(
             "INSERT INTO assessment_verdicts (verdict_id, submission_id, claim_id, raw_score, "
             "rubric_json, assessor_kind, assessor, confidence, response_visibility, "
-            "response_excerpt, response_hash, received_at, requested_visibility) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "response_excerpt, response_hash, received_at, requested_visibility, held) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 verdict_id,
                 plan.submission_id,
@@ -3382,6 +3382,9 @@ def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
                 # What the judge asked to keep, apart from what this row kept: the only
                 # account of the request a held written answer's verdict has at resume.
                 plan.request.response_visibility,
+                # Stored with no outcome in this transaction. Recorded as the fact it is,
+                # because R19's check turns on it and a clock cannot be trusted to imply it.
+                plan.action == HOLD,
             ],
         )
     if plan.action == HOLD:

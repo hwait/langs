@@ -1483,11 +1483,11 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
     # excerpt's sole copy, which is a held recording verdict before resume. One applied in
     # the transaction that received it keeps none -- its result holds the retained form.
     # The insert-only row cannot drop an excerpt later, so a held verdict applied at resume,
-    # or voided, still has one, and is allowed it. The rule that tells the two apart: an
-    # immediate apply writes `received_at` and the outcome's `decided_at` from the one
-    # write-time instant, so they are equal; a resume is a later transaction, so a verdict
-    # that was held has `received_at` strictly before `decided_at`. An excerpt on an applied
-    # verdict whose times are equal (or reversed) is therefore one nobody needed to keep.
+    # or voided, still has one, and is allowed it. What tells the two apart is `held`,
+    # written once when the verdict was stored without an outcome. It used to be inferred
+    # from `received_at < decided_at`, which a clock stepping backwards between hold and
+    # resume -- an NTP correction, a restore onto another machine -- turned into a failure
+    # on a perfectly kept workspace.
     misshapen_verdicts = [
         f"{verdict_id} ({reason})"
         for verdict_id, reason in database.query(
@@ -1499,7 +1499,7 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "    OR verdict.response_visibility IS DISTINCT FROM 'withheld') "
             "    THEN 'a written answer''s verdict keeps some of its words' "
             "  WHEN verdict.response_excerpt IS NOT NULL AND outcome.outcome = 'applied' "
-            "    AND NOT (verdict.received_at < outcome.decided_at) "
+            "    AND NOT coalesce(verdict.held, false) "
             "    THEN 'applied when it arrived, and keeps an excerpt its result already holds' "
             "  END AS problem "
             "FROM assessment_verdicts verdict "
@@ -1524,7 +1524,9 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
         )
     )
     # A held verdict waits for a paused run to resume. On a run in any other state it can
-    # never be applied, and nothing would ever say what became of it.
+    # never be applied, and nothing would ever say what became of it. A verdict with no
+    # outcome that was not stored as held is a broken apply: `write_verdict` writes an
+    # immediate verdict's outcome in the transaction that stores it.
     stranded = [
         f"{verdict_id} ({reason})"
         for verdict_id, reason in database.query(
@@ -1532,6 +1534,8 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "  WHEN submission.submission_id IS NULL THEN 'names no submission' "
             "  WHEN run.run_id IS NULL THEN 'its submission names no run' "
             "  WHEN run.status <> 'paused' THEN 'held on a run that is ' || run.status "
+            "  WHEN NOT coalesce(verdict.held, false) "
+            "    THEN 'has no outcome, but was not stored as held' "
             "  END AS problem "
             "FROM assessment_verdicts verdict "
             "LEFT JOIN assessment_submissions submission "
@@ -1547,7 +1551,7 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "held_verdicts_on_paused_runs",
             stranded,
             failed="a verdict is held on a run that is not paused, so nothing will ever apply "
-            "or void it",
+            "or void it, or has no outcome although it was not stored as held",
             ok="every held verdict waits on a paused run",
             field="verdicts",
         )

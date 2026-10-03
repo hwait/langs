@@ -1,13 +1,13 @@
 [
   {
     "actor": "cli",
-    "affected_records_json": "[\"wsp_01M3ZQEY2P2B4CFTRWTN9TQVXM\"]",
+    "affected_records_json": "[\"wsp_01M3ZSD2G461BDB1KF3R40SPHG\"]",
     "after_summary": "initialized workspace Polish LinguaWiki",
-    "audit_id": "evt_01M3ZQEYDKXXYKB0AA19QX7TT6",
+    "audit_id": "evt_01M3ZSD2MRTNMWRBHB8AK7DHV8",
     "before_summary": null,
     "command": "workspace.init",
-    "correlation_id": "evt_01M3ZQEY2PNBWA4GFBA7W38RYT",
+    "correlation_id": "evt_01M3ZSD2G4PFSDYY3AK745J4Y0",
     "outcome": "succeeded",
-    "recorded_at": "2026-10-03T01:53:35.155204Z"
+    "recorded_at": "2026-10-03T02:27:31.096035Z"
   }
 ]

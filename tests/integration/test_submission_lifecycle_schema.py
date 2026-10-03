@@ -437,7 +437,8 @@ def _judged(workspace: PolishWorkspace) -> tuple[str, str, str]:
 def _held_verdict(submission_id: str) -> tuple[str, list[Any]]:
     return (
         "INSERT INTO assessment_verdicts (verdict_id, submission_id, raw_score, assessor_kind, "
-        "assessor, confidence, received_at) VALUES (?, ?, 0.5, 'ai', 'judge', 'medium', now())",
+        "assessor, confidence, received_at, held) "
+        "VALUES (?, ?, 0.5, 'ai', 'judge', 'medium', now(), true)",
         [_id(IdPrefix.ASSESSMENT), submission_id],
     )
 
@@ -583,8 +584,8 @@ def test_a_second_applied_verdict_for_one_submission_is_reported(
         speaking,
         (
             "INSERT INTO assessment_verdicts (verdict_id, submission_id, raw_score, "
-            "assessor_kind, assessor, confidence, received_at) "
-            "VALUES (?, ?, 0.2, 'ai', 'judge', 'medium', now())",
+            "assessor_kind, assessor, confidence, received_at, held) "
+            "VALUES (?, ?, 0.2, 'ai', 'judge', 'medium', now(), false)",
             [verdict_id, submission_id],
         ),
         (
@@ -678,6 +679,15 @@ def test_a_held_verdict_is_reported_unless_its_run_is_paused(
 
     assert paused["held_verdicts_on_paused_runs"].status == "ok"
     assert content_id
+
+    # With no outcome but not stored as held: an apply that never wrote its outcome.
+    unheld = _tamper(speaking, ("UPDATE assessment_verdicts SET held = false", []))
+
+    assert unheld["held_verdicts_on_paused_runs"].status == "failed"
+    assert (
+        "has no outcome, but was not stored as held"
+        in (unheld["held_verdicts_on_paused_runs"].context["verdicts"])
+    )
 
 
 def test_a_judged_submission_with_no_applied_verdict_is_reported(
@@ -950,8 +960,9 @@ def test_a_written_answers_verdict_that_keeps_its_words_is_reported(
 def test_a_verdict_applied_when_it_arrived_that_keeps_an_excerpt_is_reported(
     speaking: PolishWorkspace,
 ) -> None:
-    """R19: an applied verdict keeps an excerpt only if it was held first. Applied in the
-    transaction that received it, its `received_at` is its outcome's `decided_at`."""
+    """R19: an applied verdict keeps an excerpt only if it was held first -- which `held`
+    records, written when the verdict was stored without an outcome. The times are not
+    consulted: an immediate verdict dated before its outcome is still reported."""
 
     _, _, verdict_id = _judged(speaking)
     checks = _tamper(
@@ -967,14 +978,23 @@ def test_a_verdict_applied_when_it_arrived_that_keeps_an_excerpt_is_reported(
         f"{verdict_id} (applied when it arrived, and keeps an excerpt its result already holds)"
     )
 
-    # Received before it was applied -- held, then resumed -- the same excerpt is allowed.
-    allowed = _tamper(
+    # Received a minute before it was applied, but never held: still reported. The old
+    # inference read these times, and would have let this one keep its excerpt.
+    earlier = _tamper(
         speaking,
         (
             "UPDATE assessment_verdicts SET received_at = received_at - INTERVAL 1 MINUTE "
             "WHERE verdict_id = ?",
             [verdict_id],
         ),
+    )
+
+    assert earlier["verdict_response_shape"].status == "failed"
+
+    # Stored as held, the same excerpt is allowed: held, then resumed.
+    allowed = _tamper(
+        speaking,
+        ("UPDATE assessment_verdicts SET held = true WHERE verdict_id = ?", [verdict_id]),
     )
 
     assert allowed["verdict_response_shape"].status == "ok"

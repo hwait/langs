@@ -1715,9 +1715,9 @@ def test_withdrawing_transcript_consent_withdraws_written_answers_and_clears_the
         transaction.execute(
             "INSERT INTO assessment_verdicts (verdict_id, submission_id, claim_id, raw_score, "
             "rubric_json, assessor_kind, assessor, confidence, response_visibility, "
-            "response_excerpt, response_hash, received_at) "
+            "response_excerpt, response_hash, received_at, held) "
             "VALUES (?, ?, NULL, 0.5, '{}', 'ai', 'synthetic-ai-judge', 'medium', "
-            "'withheld', NULL, NULL, ?)",
+            "'withheld', NULL, NULL, ?, true)",
             [verdict_id, submission_id, now],
         )
     assert_clean(polish_workspace)
@@ -1863,6 +1863,43 @@ def test_a_held_verdict_applied_after_transcript_consent_was_withdrawn_copies_no
         )[0][0]
         == words
     )
+
+
+def test_a_held_verdict_resumed_under_a_clock_that_stepped_backwards_is_clean(
+    speaking: PolishWorkspace,
+) -> None:
+    """R19 by structure, not by clock. A verdict held, then applied at resume after the
+    clock stepped back an hour, is received *after* its outcome is decided -- and it was
+    held, so its excerpt is allowed. `held` was written at insert; no time is consulted."""
+
+    words = "the learner said something about the weather"
+    run_id, content_id, submission_id, _ = submitted(speaking, 433)
+    pause(speaking, run_id)
+    held = assessment_service.record(
+        speaking.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=submission_id,
+        response_excerpt=words,
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=speaking.clock,
+    )
+    assert held.held
+    speaking.clock.advance(-timedelta(hours=1))
+
+    resumed = resume(speaking, run_id)
+
+    assert [entry.verdict_id for entry in resumed.applied_verdicts] == [held.verdict_id]
+    assert rows(
+        speaking,
+        "SELECT verdict.held, verdict.response_excerpt, outcome.outcome, "
+        "outcome.decided_at < verdict.received_at FROM assessment_verdicts verdict "
+        "JOIN assessment_verdict_outcomes outcome USING (verdict_id) WHERE verdict_id = ?",
+        [held.verdict_id],
+    ) == [(True, words, "applied", True)]
+    assert_clean(speaking)
 
 
 def test_a_recording_verdict_keeps_an_excerpt_only_while_it_is_the_only_copy(

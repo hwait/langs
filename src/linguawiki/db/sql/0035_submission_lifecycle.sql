@@ -173,7 +173,13 @@ CREATE TABLE assessment_verdicts (
     -- when the verdict is applied, now or at resume. NULL: no request was made.
     requested_visibility VARCHAR  CHECK (
         requested_visibility IS NULL OR requested_visibility IN ('withheld', 'excerpt', 'full')
-    )
+    ),
+    -- Stored without an outcome, in the transaction that received it: the run was paused.
+    -- Written once, at insert, because it is a fact about the arrival and nothing later
+    -- changes it -- a held verdict applied or voided at resume was still held. R19 turns on
+    -- it (only a verdict that was held may keep an excerpt), and inferring it from
+    -- `received_at < decided_at` made the answer depend on a clock that can step backwards.
+    held                BOOLEAN   NOT NULL
 );
 
 -- What became of a verdict: applied, producing a result, or void, with the reason.
@@ -242,7 +248,8 @@ ALTER TABLE assessment_results ADD COLUMN observed_at TIMESTAMP;
 -- result that still holds it. The excerpt is left behind for the same reason (R19): a
 -- verdict row keeps a learner excerpt only while it is the excerpt's sole copy -- a held
 -- verdict, before resume -- and these were applied when they arrived, so the result holds
--- the retained form. The response hash stays: it names the answer without quoting it.
+-- the retained form, and none of them was held. The response hash stays: it names the
+-- answer without quoting it.
 --
 -- The identifiers are derived rather than generated: DuckDB has no ULID, and a hex digest
 -- of the submission is a valid opaque identifier (hex digits are Crockford digits) that a
@@ -252,7 +259,7 @@ SELECT 'asm_' || upper(substr(sha256('lingua.0035.verdict' || submission.submiss
        submission.submission_id, NULL, result.raw_score, '{}',
        result.assessor_kind, result.assessor, result.confidence,
        'withheld', NULL, result.response_hash,
-       result.recorded_at, NULL
+       result.recorded_at, NULL, false
 FROM assessment_submissions submission
 JOIN assessment_results result
   ON result.run_id = submission.run_id

@@ -244,7 +244,8 @@ it. C6 splits it, following the `plan_*`/`write_*` pattern `session close` uses.
       has an applied or held one is `assessment_verdict_conflict`, naming the recorded score.
 - [x] **Storage and relations.** `assessment_verdicts` (insert-only: `verdict_id`,
       `submission_id`, `claim_id`, score, assessor, confidence, rubric, retained response fields,
-      `received_at`, and for a judge's narrower retention request `requested_visibility`) and
+      `received_at`, for a judge's narrower retention request `requested_visibility`, and
+      `held`, written at insert when the verdict is stored with no outcome) and
       `assessment_verdict_outcomes` (insert-only, unique on `verdict_id`:
       `applied` with `result_id`, or `void` with code and reason, `decided_at`). A held verdict is
       a verdict with no outcome.

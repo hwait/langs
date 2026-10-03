@@ -1,29 +1,29 @@
 [
   {
-    "applied_at": "2026-10-03T01:53:35.156345Z",
-    "audit_event_id": "evt_01M3ZQEYDKXXYKB0AA19QX7TT6",
+    "applied_at": "2026-10-03T02:27:31.097218Z",
+    "audit_event_id": "evt_01M3ZSD2MRTNMWRBHB8AK7DHV8",
     "component": "core",
     "component_key": "core",
-    "sha256": "26ded3e46cad0977eadc878d9baf0e0245934489a87970df050f73e5f7407ca0",
+    "sha256": "ce32dce11aa9097a5053367438a274cf3a03af7e22e71e7b351942b11b82d0a5",
     "version": "0.1.0",
-    "workspace_id": "wsp_01M3ZQEY2P2B4CFTRWTN9TQVXM"
+    "workspace_id": "wsp_01M3ZSD2G461BDB1KF3R40SPHG"
   },
   {
-    "applied_at": "2026-10-03T01:53:35.156345Z",
-    "audit_event_id": "evt_01M3ZQEYDKXXYKB0AA19QX7TT6",
+    "applied_at": "2026-10-03T02:27:31.097218Z",
+    "audit_event_id": "evt_01M3ZSD2MRTNMWRBHB8AK7DHV8",
     "component": "database_schema",
     "component_key": "database_schema",
-    "sha256": "bf03b0f4ca8133e65df36765404c8c750b3ee77776ceec751b7216e510345a1c",
+    "sha256": "c2161ccee2da738740932acb5869b1440aa09d24044ffa08727c16899512df92",
     "version": "35",
-    "workspace_id": "wsp_01M3ZQEY2P2B4CFTRWTN9TQVXM"
+    "workspace_id": "wsp_01M3ZSD2G461BDB1KF3R40SPHG"
   },
   {
-    "applied_at": "2026-10-03T01:53:35.156345Z",
-    "audit_event_id": "evt_01M3ZQEYDKXXYKB0AA19QX7TT6",
+    "applied_at": "2026-10-03T02:27:31.097218Z",
+    "audit_event_id": "evt_01M3ZSD2MRTNMWRBHB8AK7DHV8",
     "component": "skill_bundle",
     "component_key": "skill_bundle",
-    "sha256": "057c4603d4314ee983784a98f64eb825892648c3c0829efeff48ed80830a9950",
+    "sha256": "532dec917b705f8c18c8f67176910c3d07b7dd0fac04cb7e25fc93305d23d35e",
     "version": "0.1.0",
-    "workspace_id": "wsp_01M3ZQEY2P2B4CFTRWTN9TQVXM"
+    "workspace_id": "wsp_01M3ZSD2G461BDB1KF3R40SPHG"
   }
 ]
