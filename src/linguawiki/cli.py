@@ -561,6 +561,13 @@ def _assessment_parser(subcommands: Any) -> None:
     # Serving is a mutation: it spends an item's exposure. Without a key a retry after a
     # lost response consumed a second task and burned a second item.
     nxt.add_argument("--idempotency-key")
+    # One task in every free open dimension, in one transaction. A batch is several serves
+    # at once, so its key is required: a retry has to return those tasks, not serve more.
+    nxt.add_argument(
+        "--batch",
+        action="store_true",
+        help="serve one task per open dimension at once (requires --idempotency-key)",
+    )
     _add_workspace(nxt)
     record = actions.add_parser("record", help="score one served task")
     record.add_argument("--run")
@@ -2481,8 +2488,41 @@ def _assessment_response(args: argparse.Namespace) -> str | None:
     return response
 
 
+def _batch_lines(batch: assessment_service.BatchReport) -> str:
+    lines = [f"batch {batch.batch_id}" + (" (replayed)" if batch.replayed else "")]
+    lines.extend(
+        f"{entry.position}. [{entry.dimension}] {entry.task.task_type} "
+        f"({entry.task.modality}, {entry.task.level_code}) {entry.content_id}: {entry.state}"
+        for entry in batch.tasks
+    )
+    if batch.waiting:
+        lines.append(f"waiting: {', '.join(batch.waiting)}")
+    if batch.exhausted:
+        lines.append(f"exhausted: {', '.join(batch.exhausted)}")
+    if not batch.tasks and not batch.waiting:
+        lines.append("nothing to serve: no open dimension is free")
+    return "\n".join(lines)
+
+
 def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int:
     paths = _pack_workspace(args)
+    if args.action == "next" and args.batch:
+        batch = assessment_service.next_batch(
+            paths,
+            run=args.run,
+            track=args.track,
+            clock=clock,
+            # The service's own name rather than this invocation's, so a batch served from
+            # the CLI and one served by the page leave the same audit trail.
+            command="assessment.batch",
+            idempotency_key=args.idempotency_key,
+        )
+        _print(
+            _envelope(command, batch, clock, batch.warnings),
+            _batch_lines(batch),
+            args.format,
+        )
+        return 0
     if args.action == "next":
         outcome = assessment_service.next_task(
             paths,

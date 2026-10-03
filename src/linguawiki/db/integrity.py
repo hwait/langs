@@ -1626,6 +1626,34 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             field="submissions",
         )
     )
+    # A batch's membership is what a retry of its key is answered with, and each member is
+    # reported in its run task's current state. The foreign key reaches the *bank* row, not
+    # the run's record of serving it, so a member its own run never served -- a restore, a
+    # hand repair -- would be answered with no state at all. Membership is established with
+    # a LEFT JOIN, so a member with no counterpart is a finding rather than a row to skip.
+    unserved_members = [
+        f"{batch_id} position {position} ({content_id} in {dimension})"
+        for batch_id, position, content_id, dimension in database.query(
+            "SELECT member.batch_id, member.position, member.content_id, member.dimension "
+            "FROM assessment_batch_tasks member "
+            "LEFT JOIN assessment_batches batch ON batch.batch_id = member.batch_id "
+            "LEFT JOIN assessment_run_tasks served ON served.run_id = batch.run_id "
+            "  AND served.content_id = member.content_id "
+            "  AND served.dimension = member.dimension "
+            "WHERE served.content_id IS NULL ORDER BY 1, 2"
+        )
+    ]
+    checks.append(
+        _named(
+            "batch_members_were_served_by_their_run",
+            unserved_members,
+            failed="a batch names a task its run has no record of serving in that dimension, "
+            "so a retry of the batch's key cannot say where the task stands; serve with a new "
+            "key, and restore the run's tasks from a backup if they were lost",
+            ok="every batch member is a task its run served, in the dimension it names",
+            field="batches",
+        )
+    )
     # When the learner answered. The rule, by what a result is:
     #
     # - bound to a submission (an applied verdict names it): the submission's `created_at`,

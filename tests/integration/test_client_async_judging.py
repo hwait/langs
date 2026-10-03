@@ -10,18 +10,26 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from linguawiki.db.connection import open_writer
 from linguawiki.errors import LinguaWikiError
+from linguawiki.paths import workspace_paths
 from linguawiki.services import artifacts as artifact_service
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import judging, withdrawal
 from linguawiki.services import learners as learner_service
 from linguawiki.services import recordings as recording_service
-from tests.conftest import PolishWorkspace
+from tests.conftest import (
+    PilotTemplate,
+    PolishWorkspace,
+    SyntheticWorkspace,
+    materialize_pilot,
+    polish_learner,
+)
 from tests.integration.test_client_audio import (
     _cli,
     database_check,
@@ -33,6 +41,7 @@ from tests.integration.test_client_audio import (
     start_spoken,
     take,
 )
+from tests.support.clocks import AdvancingClock
 
 __all__ = ["speaking"]
 
@@ -2453,3 +2462,418 @@ def test_a_written_answer_stranded_on_a_closed_run_is_given_a_remedy_that_works(
         withdrawal.NOT_RETAINED_CODE,
     )
     assert "no_pending_submission_on_a_closed_run" not in failed_checks(writing)
+
+
+# --- batching --------------------------------------------------------------------------------
+#
+# A batch serves one task in each free open dimension in one transaction. The answers below
+# are scores chosen by a fixed rule of the task's stable key, so two runs answering the same
+# tasks fold in the same evidence -- which is what lets a batched run be compared with one
+# served a task at a time.
+
+MACHINE_DIMENSIONS = ("grammar-control", "reading", "vocabulary-control")
+
+
+def batch(workspace: PolishWorkspace, run_id: str, key: str) -> assessment_service.BatchReport:
+    return assessment_service.next_batch(
+        workspace.paths, run=run_id, idempotency_key=key, clock=workspace.clock, actor="client"
+    )
+
+
+def fixed_score(stable_key: str) -> float:
+    """A score that depends only on which task was asked, so both runs earn the same."""
+
+    return 1.0 if int(digest(stable_key)[:2], 16) % 3 else 0.0
+
+
+def answer(workspace: PolishWorkspace, run_id: str, task: Any) -> None:
+    assessment_service.record(
+        workspace.paths,
+        run=run_id,
+        content_id=task.content_id,
+        score=fixed_score(task.stable_key),
+        clock=workspace.clock,
+    )
+
+
+def start_machine(workspace: PolishWorkspace, dimensions: tuple[str, ...]) -> str:
+    return assessment_service.start(
+        workspace.paths, dimensions=list(dimensions), clock=workspace.clock
+    ).run_id
+
+
+def batched_sequence(workspace: PolishWorkspace, run_id: str) -> dict[str, list[str]]:
+    """Serve batches until none serves anything, answering each task; per dimension."""
+
+    served: dict[str, list[str]] = {}
+    for round_number in range(1, 100):
+        report = batch(workspace, run_id, f"round-{round_number}")
+        if not report.tasks:
+            return served
+        assert not report.waiting
+        for entry in report.tasks:
+            served.setdefault(entry.dimension, []).append(entry.task.stable_key)
+            answer(workspace, run_id, entry.task)
+    raise AssertionError("a bounded run never stopped serving")
+
+
+def sequential_sequence(workspace: PolishWorkspace, run_id: str) -> dict[str, list[str]]:
+    """Serve one task at a time until the run reports itself, answering each; per dimension."""
+
+    served: dict[str, list[str]] = {}
+    for _ in range(1, 300):
+        outcome = assessment_service.next_task(workspace.paths, run=run_id, clock=workspace.clock)
+        if not isinstance(outcome, assessment_service.NextTaskReport):
+            return served
+        served.setdefault(outcome.dimension, []).append(outcome.stable_key)
+        answer(workspace, run_id, outcome)
+    raise AssertionError("a bounded run never stopped serving")
+
+
+@pytest.fixture
+def twin(pilot_template: PilotTemplate, tmp_path: Path) -> PolishWorkspace:
+    """A second workspace identical to `polish_workspace`, to serve the other way."""
+
+    target = tmp_path / "twin" / "PolishLinguaWiki"
+    clock = AdvancingClock()
+    materialize_pilot(
+        pilot_template, target=target, backup_root=tmp_path / "twin-backups", clock=clock
+    )
+    return polish_learner(
+        SyntheticWorkspace(
+            paths=workspace_paths(target),
+            backup_root=tmp_path / "twin-backups",
+            clock=clock,
+            report=pilot_template.report,
+        )
+    )
+
+
+def run_estimates(workspace: PolishWorkspace, run_id: str) -> list[tuple[Any, ...]]:
+    return rows(
+        workspace,
+        "SELECT dimension, status, tasks_used, posterior_json, stop_reason "
+        "FROM placement_dimension_state WHERE run_id = ? ORDER BY dimension",
+        [run_id],
+    )
+
+
+def test_a_batched_run_serves_what_one_at_a_time_serves(
+    polish_workspace: PolishWorkspace, twin: PolishWorkspace
+) -> None:
+    batched_run = start_machine(polish_workspace, MACHINE_DIMENSIONS)
+    sequential_run = start_machine(twin, MACHINE_DIMENSIONS)
+
+    batched = batched_sequence(polish_workspace, batched_run)
+    sequential = sequential_sequence(twin, sequential_run)
+
+    assert set(batched) == set(MACHINE_DIMENSIONS)
+    assert batched == sequential
+    # The same evidence, folded in the same order within each dimension, is the same
+    # posterior: batching changed when tasks were shown, not what they were.
+    assert run_estimates(polish_workspace, batched_run) == run_estimates(twin, sequential_run)
+    assert_clean(polish_workspace)
+
+
+def test_two_dimensions_drawing_on_one_content_family_serve_what_the_sequential_path_would(
+    polish_workspace: PolishWorkspace, twin: PolishWorkspace
+) -> None:
+    # Families are shared across dimensions in the pilot bank, and content-family diversity
+    # is a duty *within* a dimension (`select_task` reads the dimension's own families). The
+    # batch re-reads every exclusion after each dimension's write, so a round whose best
+    # candidates share a family must serve exactly what serving them one at a time would --
+    # neither dropping the second for the first one's family nor letting one dimension
+    # repeat its own.
+    batched_run = start_machine(polish_workspace, MACHINE_DIMENSIONS)
+    sequential_run = start_machine(twin, MACHINE_DIMENSIONS)
+
+    shared_rounds = []
+    batched: dict[str, list[str]] = {}
+    for round_number in range(1, 100):
+        report = batch(polish_workspace, batched_run, f"round-{round_number}")
+        if not report.tasks:
+            break
+        families = [entry.task.content_family for entry in report.tasks]
+        if len(set(families)) < len(families):
+            shared_rounds.append(round_number)
+        for entry in report.tasks:
+            batched.setdefault(entry.dimension, []).append(entry.task.stable_key)
+            answer(polish_workspace, batched_run, entry.task)
+
+    assert shared_rounds, "no round put two dimensions on one family; the test proves nothing"
+    assert batched == sequential_sequence(twin, sequential_run)
+    for dimension in MACHINE_DIMENSIONS:
+        first_two = rows(
+            polish_workspace,
+            "SELECT content_family FROM assessment_run_tasks "
+            "WHERE run_id = ? AND dimension = ? ORDER BY sequence LIMIT 2",
+            [batched_run, dimension],
+        )
+        assert first_two[0] != first_two[1], dimension
+
+
+def test_a_batch_serves_only_free_dimensions_and_reports_the_rest_waiting(
+    writing: PolishWorkspace,
+) -> None:
+    run_id = assessment_service.start(
+        writing.paths,
+        dimensions=["reading", "writing"],
+        scoring="machine+judged",
+        clock=writing.clock,
+    ).run_id
+    first = batch(writing, run_id, "round-1")
+    by_dimension = {entry.dimension: entry for entry in first.tasks}
+    assert sorted(by_dimension) == ["reading", "writing"]
+    assert [entry.position for entry in first.tasks] == [1, 2]
+    hand_in(writing, run_id, by_dimension["writing"].content_id)
+    answer(writing, run_id, by_dimension["reading"].task)
+
+    second = batch(writing, run_id, "round-2")
+
+    assert [entry.dimension for entry in second.tasks] == ["reading"]
+    assert second.waiting == ("writing",) and second.exhausted == ()
+    assert second.batch_id != first.batch_id
+
+
+def test_a_refusal_in_any_dimension_writes_nothing_for_the_batch_and_names_it(
+    polish_workspace: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = start_machine(polish_workspace, MACHINE_DIMENSIONS)
+    planned: list[str] = []
+    real = assessment_service.plan_serve
+
+    def refusing(database: Any, context: Any, state: Any, *, clock: Any) -> Any:
+        planned.append(state.dimension)
+        if state.dimension == "vocabulary-control":
+            raise LinguaWikiError("assessment_asset_unavailable", "the recording is gone")
+        return real(database, context, state, clock=clock)
+
+    monkeypatch.setattr(assessment_service, "plan_serve", refusing)
+    failure = refusal(batch, polish_workspace, run_id, "round-1")
+
+    # The run's recorded order, and the refused dimension planned after two that wrote.
+    assert planned == list(MACHINE_DIMENSIONS)
+    assert failure.payload.code == "assessment_asset_unavailable"
+    assert "vocabulary-control" in failure.payload.message
+    assert failure.payload.details[0].context == {"dimension": "vocabulary-control"}
+    for table in (
+        "assessment_run_tasks",
+        "assessment_item_exposures",
+        "assessment_batches",
+        "assessment_batch_tasks",
+    ):
+        assert rows(polish_workspace, f"SELECT count(*) FROM {table}") == [(0,)], table
+
+    # A refusal leaves its key unspent: the retry the caller is entitled to make serves.
+    monkeypatch.setattr(assessment_service, "plan_serve", real)
+    retried = batch(polish_workspace, run_id, "round-1")
+    assert [entry.dimension for entry in retried.tasks] == list(MACHINE_DIMENSIONS)
+    assert_clean(polish_workspace)
+
+
+def test_a_dimension_the_bank_cannot_serve_is_closed_and_reported_exhausted(
+    polish_workspace: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = start_machine(polish_workspace, MACHINE_DIMENSIONS)
+    real = assessment_service.plan_serve
+
+    def empty_reading(database: Any, context: Any, state: Any, *, clock: Any) -> Any:
+        return None if state.dimension == "reading" else real(database, context, state, clock=clock)
+
+    monkeypatch.setattr(assessment_service, "plan_serve", empty_reading)
+    report = batch(polish_workspace, run_id, "round-1")
+
+    assert [entry.dimension for entry in report.tasks] == ["grammar-control", "vocabulary-control"]
+    assert report.exhausted == ("reading",)
+    assert any("reading stopped early" in warning for warning in report.warnings)
+    assert rows(
+        polish_workspace,
+        "SELECT status, stop_reason FROM placement_dimension_state "
+        "WHERE run_id = ? AND dimension = 'reading'",
+        [run_id],
+    ) == [("not-tested", assessment_service.EXHAUSTED_REASON)]
+
+
+def test_a_lost_batch_is_replayed_with_each_task_as_it_stands_and_serves_nothing(
+    writing: PolishWorkspace,
+) -> None:
+    run_id = assessment_service.start(
+        writing.paths,
+        dimensions=["grammar-control", "reading", "writing"],
+        scoring="machine+judged",
+        clock=writing.clock,
+    ).run_id
+    first = batch(writing, run_id, "round-1")
+    by_dimension = {entry.dimension: entry for entry in first.tasks}
+    membership = [(entry.position, entry.dimension, entry.content_id) for entry in first.tasks]
+    assert [entry.state for entry in first.tasks] == ["served"] * 3
+
+    answer(writing, run_id, by_dimension["reading"].task)
+    submission = hand_in(writing, run_id, by_dimension["writing"].content_id).submission
+    waiting = batch(writing, run_id, "round-1")
+
+    assert waiting.replayed and waiting.batch_id == first.batch_id
+    assert [(entry.position, entry.dimension, entry.content_id) for entry in waiting.tasks] == (
+        membership
+    )
+    assert {entry.dimension: entry.state for entry in waiting.tasks} == {
+        "grammar-control": "served",
+        "reading": "answered",
+        "writing": "awaiting-judge",
+    }
+
+    verdict(
+        writing,
+        run_id,
+        by_dimension["writing"].content_id,
+        submission.submission_id,
+        score=0.6,
+    )
+    judged = batch(writing, run_id, "round-1")
+
+    assert [(entry.position, entry.dimension, entry.content_id) for entry in judged.tasks] == (
+        membership
+    )
+    assert {entry.dimension: entry.state for entry in judged.tasks} == {
+        "grammar-control": "served",
+        "reading": "answered",
+        "writing": "answered",
+    }
+    # Reading opened again when it was answered; the replay does not add it. That is a new
+    # batch, under a new key.
+    assert rows(
+        writing, "SELECT count(*) FROM assessment_run_tasks WHERE run_id = ?", [run_id]
+    ) == [(3,)]
+    assert rows(writing, "SELECT count(*) FROM assessment_batches") == [(1,)]
+    # The replayed task is the one served, from the record of its serving.
+    assert judged.tasks[0].task.prompt == first.tasks[0].task.prompt
+    assert judged.tasks[0].task.served_again
+    assert_clean(writing)
+
+
+def test_a_batch_key_is_required_and_bound_to_its_request_and_operation(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run_id = start_machine(polish_workspace, MACHINE_DIMENSIONS)
+    other_run = start_machine(polish_workspace, ("reading",))
+    batch(polish_workspace, run_id, "round-1")
+
+    missing = refusal(
+        assessment_service.next_batch,
+        polish_workspace.paths,
+        run=run_id,
+        idempotency_key=None,
+        clock=polish_workspace.clock,
+    )
+    elsewhere = refusal(batch, polish_workspace, other_run, "round-1")
+    single = refusal(
+        assessment_service.next_task,
+        polish_workspace.paths,
+        run=run_id,
+        idempotency_key="round-1",
+        clock=polish_workspace.clock,
+    )
+    assessment_service.next_task(
+        polish_workspace.paths,
+        run=other_run,
+        idempotency_key="single",
+        clock=polish_workspace.clock,
+    )
+    taken = refusal(batch, polish_workspace, other_run, "single")
+
+    assert missing.payload.code == "invalid_arguments"
+    assert missing.payload.details[0].field == "idempotency_key"
+    assert elsewhere.payload.code == "idempotency_conflict"
+    assert single.payload.code == "idempotency_conflict"
+    assert taken.payload.code == "idempotency_conflict"
+    assert rows(
+        polish_workspace, "SELECT count(*) FROM assessment_run_tasks WHERE run_id = ?", [other_run]
+    ) == [(1,)]
+
+
+def test_a_batch_settles_what_lapsed_first_and_says_so(speaking: PolishWorkspace) -> None:
+    run_id, content_id, submission_id, _ = submitted(speaking, 230)
+    for _ in range(judging.JUDGING_POLICY.max_attempts):
+        claimed_one(speaking, run_id)
+        lapse(speaking)
+
+    report = batch(speaking, run_id, "round-1")
+
+    assert submission_state(speaking, submission_id)[0] == "withdrawn"
+    assert any(submission_id in warning or content_id in warning for warning in report.warnings)
+    assert [entry.dimension for entry in report.tasks] == ["pronunciation"]
+
+
+def test_the_cli_and_the_route_serve_a_batch(
+    polish_workspace: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from linguawiki.client import routes
+
+    run_id = start_machine(polish_workspace, ("grammar-control", "reading"))
+    code, payload = _cli(
+        polish_workspace,
+        capsys,
+        "assessment",
+        "next",
+        "--run",
+        run_id,
+        "--batch",
+        "--idempotency-key",
+        "cli-round",
+    )
+    assert code == 0
+    assert [task["dimension"] for task in payload["data"]["tasks"]] == [
+        "grammar-control",
+        "reading",
+    ]
+    code, refused_payload = _cli(
+        polish_workspace, capsys, "assessment", "next", "--run", run_id, "--batch"
+    )
+    assert code != 0 and refused_payload["error"]["code"] == "invalid_arguments"
+
+    found = routes.match("POST", f"/runs/{run_id}/batch")
+    assert found is not None
+    route, values = found
+    replayed = route.handler(
+        routes.Request(
+            path_values=values,
+            body={"idempotency_key": "cli-round"},
+            clock=polish_workspace.clock,
+            paths=polish_workspace.paths,
+        )
+    )
+    assert replayed.replayed and replayed.batch_id == payload["data"]["batch_id"]
+    assert rows(
+        polish_workspace,
+        "SELECT DISTINCT command, actor FROM audit_log WHERE after_summary LIKE 'served %'",
+    ) == [("assessment.batch", "cli")]
+
+
+def test_a_batch_member_its_run_never_served_is_found_and_refused_on_replay(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run_id = start_machine(polish_workspace, ("reading",))
+    made = batch(polish_workspace, run_id, "round-1")
+    assert "batch_members_were_served_by_their_run" not in failed_checks(polish_workspace)
+    stranger = str(
+        rows(
+            polish_workspace,
+            "SELECT task.content_id FROM assessment_tasks task "
+            "WHERE task.dimension = 'grammar-control' LIMIT 1",
+        )[0][0]
+    )
+    with (
+        open_writer(polish_workspace.paths, command="test.tamper") as database,
+        database.transaction() as transaction,
+    ):
+        # A hand repair that added a member nothing served.
+        transaction.execute(
+            "INSERT INTO assessment_batch_tasks (batch_id, position, content_id, dimension) "
+            "VALUES (?, 2, ?, 'grammar-control')",
+            [made.batch_id, stranger],
+        )
+
+    check = failed_checks(polish_workspace)["batch_members_were_served_by_their_run"]
+    assert stranger in str(check.context)
+    failure = refusal(batch, polish_workspace, run_id, "round-1")
+    assert failure.payload.code == "assessment_batch_unrecorded"

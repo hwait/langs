@@ -1,4 +1,4 @@
-"""The route table: twelve operations, each one service call wide.
+"""The route table: thirteen operations, each one service call wide.
 
 A handler resolves its arguments, calls one service function, and returns the report. There
 is no business logic here and there must not be -- selection, scoring, the stop rule, the
@@ -189,6 +189,17 @@ def _serve(request: Request) -> Any:
     )
 
 
+def _batch(request: Request) -> Any:
+    return assessment_service.next_batch(
+        request.paths,
+        run=request.path_values["run_id"],
+        clock=request.clock,
+        command="assessment.batch",
+        actor=ACTOR,
+        idempotency_key=request.required("idempotency_key", str),
+    )
+
+
 def _record(request: Request) -> Any:
     return assessment_service.record(
         request.paths,
@@ -375,6 +386,21 @@ ROUTES: tuple[Route, ...] = (
             assessment_service.NextTaskReport,
             assessment_service.AssessmentRunReport,
         ),
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/runs/{RUN_ID}/batch$"),
+        "assessment.batch",
+        _batch,
+        mutates=True,
+        summary=(
+            "Serve one task in every free open dimension at once, or replay the batch a key "
+            "already served"
+        ),
+        # Required, not optional as it is for a single serve: a batch is several serves,
+        # and a retry after a lost response must return those tasks rather than serve more.
+        request_schema=_body({"idempotency_key": IDEMPOTENCY_KEY}, required=["idempotency_key"]),
+        response_models=(assessment_service.BatchReport,),
     ),
     Route(
         "GET",

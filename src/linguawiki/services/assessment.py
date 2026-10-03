@@ -23,7 +23,7 @@ import random
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import Field
 
@@ -524,6 +524,8 @@ STARTED_EVENT = "assessment.started"
 SERVED_EVENT = "assessment.served"
 RECORDED_EVENT = "assessment.recorded"
 PLAYED_EVENT = "assessment.played"
+#: A batch: one task per free open dimension, served in one transaction under one key.
+BATCHED_EVENT = "assessment.batched"
 FINALIZED_EVENT = "assessment.finalized"
 
 
@@ -667,7 +669,7 @@ def _settle_lapsed(
     )
 
 
-def _noting_settled[R: AssessmentRunReport | NextTaskReport](
+def _noting_settled[R: AssessmentRunReport | NextTaskReport | BatchReport](
     settled: tuple[WithdrawnSubmission, ...], work: Callable[[], R]
 ) -> R:
     """Run a command's own work after its sweep, and make what it says name the sweep.
@@ -1122,6 +1124,318 @@ def _hand_back(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ServeContext:
+    """Everything a serve reads once per call, before any dimension is planned.
+
+    What is *not* here is the point: the served set, the exposures, and the next sequence
+    number are read by `plan_serve` itself, every time it is called. A batch plans each
+    dimension after writing the one before it, and a context that cached them would let
+    dimension *n* select as though dimensions 1..n-1 had served nothing.
+    """
+
+    run_id: str
+    track_id: str
+    #: The run's type, which is what an exposure row records as its purpose.
+    purpose: str
+    pack_key: str | None
+    #: The run's dimensions and their kinds, in the order the run recorded them.
+    kinds: Mapping[str, str]
+    levels: tuple[str, ...]
+    #: The bank tasks this run may serve under its own scoring condition and the learner's
+    #: *current* consent -- read now, not from the run, so consent withdrawn after the run
+    #: opened stops the next spoken or written judged task from being served.
+    candidates: tuple[Candidate, ...]
+    available: tuple[str, ...]
+
+
+def _serve_context(database: Database, run_id: str, row: Sequence[Any]) -> ServeContext:
+    """Read what every dimension's plan shares, refusing a run that cannot serve at all."""
+
+    _assert_running(run_id, status=str(row[4]))
+    conditions = json.loads(str(row[6]))
+    kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
+    record = learner_service.track_context(database, str(row[1]))
+    pack_row = pack_service.installed_pack(database, record.pack_key)
+    _assert_same_bank(run_id, conditions=conditions, pack_row=pack_row)
+    # The run's own condition, never the caller's: a run opened for machine scoring never
+    # serves a task that needs a judge, whatever the bank has come to hold.
+    scoring = _run_scoring(conditions)
+    recorded = (
+        frozenset()
+        if scoring == DEFAULT_SCORING
+        else _recorded_task_ids(database, pack_row["pack_id"])
+    )
+    recording = recording_permitted(record.preferences)
+    writing = written_judging_permitted(record.preferences)
+    return ServeContext(
+        run_id=run_id,
+        track_id=str(row[1]),
+        purpose=str(row[3]),
+        pack_key=record.pack_key,
+        kinds=kinds,
+        levels=_pinned_levels(conditions, fallback=record.framework_levels),
+        candidates=tuple(
+            candidate
+            for candidate in _candidates(database, pack_row["pack_id"])
+            if servable_candidate(
+                candidate,
+                scoring=scoring,
+                recorded=recorded,
+                recording=recording,
+                writing=writing,
+            )
+        ),
+        available=tuple(str(value) for value in conditions["available_modalities"]),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ServePlan:
+    """One dimension's serve, decided and not yet written.
+
+    Everything `write_serve` stores is resolved here -- the selection, the bank row's
+    snapshot, the shuffled order, the recording's identity, the sequence -- so the write
+    has nothing left to refuse except what the database itself would.
+    """
+
+    run_id: str
+    track_id: str
+    purpose: str
+    dimension: str
+    sequence: int
+    candidate: Candidate
+    selection_reason: str
+    stable_key: str
+    prompt: str
+    rubric_json: str
+    rubric_version: int
+    permitted_help: str
+    content_hash: str
+    target_refs_json: str
+    expected_json: str
+    presentation: TaskPresentation | None
+    asset: ServedAsset | None
+
+    def report(
+        self, *, remaining_open_dimensions: Sequence[str], warnings: Sequence[str] = ()
+    ) -> NextTaskReport:
+        return NextTaskReport(
+            run_id=self.run_id,
+            dimension=self.dimension,
+            sequence=self.sequence,
+            content_id=self.candidate.content_id,
+            stable_key=self.stable_key,
+            task_type=self.candidate.task_type,
+            modality=self.candidate.modality,
+            level_code=self.candidate.level_code,
+            difficulty=self.candidate.difficulty,
+            content_family=self.candidate.content_family,
+            prompt=self.prompt,
+            presentation=self.presentation,
+            asset=self.asset,
+            rubric=json.loads(self.rubric_json),
+            rubric_version=self.rubric_version,
+            permitted_help=self.permitted_help,
+            selection_reason=self.selection_reason,
+            remaining_open_dimensions=tuple(remaining_open_dimensions),
+            warnings=tuple(warnings),
+        )
+
+
+def plan_serve(
+    database: Database, context: ServeContext, state: DimensionState, *, clock: Clock
+) -> ServePlan | None:
+    """Decide one dimension's next task, or `None` when the bank has nothing left for it.
+
+    A read, so it runs inside the caller's transaction and sees what that transaction has
+    already written: the exclusions and the next sequence number are read here on every
+    call, never carried in from an earlier one. That is what lets a batch plan its second
+    dimension after writing its first and select exactly what a second, separate serve would.
+    """
+
+    excluded = _excluded_task_ids(
+        database, track_id=context.track_id, run_id=context.run_id, clock=clock
+    )
+    selection = select_task(
+        state, context.candidates, available_modalities=context.available, excluded=excluded
+    )
+    if selection is None:
+        return None
+    # The answer key is read here, from the bank row, and never from the selected
+    # `Candidate`. `Candidate` carries everything item selection is allowed to consider, and
+    # the key is not among it: putting it there would let the staircase see the answers it
+    # is choosing between.
+    task = database.one(
+        "SELECT record.stable_key, task.prompt, task.rubric_json, task.rubric_version, "
+        "task.permitted_help, record.content_hash, task.target_refs_json, "
+        "task.expected_json, task.presentation_json "
+        "FROM assessment_tasks task "
+        "JOIN content_records record ON record.content_id = task.content_id "
+        "WHERE task.content_id = ?",
+        [selection.candidate.content_id],
+    )
+    assert task is not None
+    # Resolved here, before anything is written: a shuffle happens once, and the order the
+    # learner saw is the order that is stored. Re-reading the bank on resume would
+    # reshuffle, which is a different question asked under the identity of the one they
+    # were credited for.
+    shown = _serve_presentation(
+        parse_task_presentation(None if task[8] is None else str(task[8])),
+        run_id=context.run_id,
+        content_id=selection.candidate.content_id,
+    )
+    # Resolved here too: a task that says it plays a recording the installed pack cannot
+    # produce is refused while it is still unserved, rather than written as a row nothing
+    # can read afterwards.
+    played = None
+    if _plays_audio(shown):
+        played = _serve_asset_identity(database, context.pack_key, shown)
+    sequence = (
+        int(
+            database.scalar(
+                "SELECT coalesce(max(sequence), 0) FROM assessment_run_tasks WHERE run_id = ?",
+                [context.run_id],
+            )
+        )
+        + 1
+    )
+    return ServePlan(
+        run_id=context.run_id,
+        track_id=context.track_id,
+        purpose=context.purpose,
+        dimension=state.dimension,
+        sequence=sequence,
+        candidate=selection.candidate,
+        selection_reason=selection.reason,
+        stable_key=str(task[0]),
+        prompt=str(task[1]),
+        rubric_json=str(task[2]),
+        rubric_version=int(task[3]),
+        permitted_help=str(task[4]),
+        content_hash=str(task[5]),
+        target_refs_json=str(task[6]),
+        expected_json=str(task[7]),
+        presentation=shown,
+        asset=played,
+    )
+
+
+def write_serve(
+    transaction: Database, plan: ServePlan, *, now: datetime, command: str, actor: str
+) -> None:
+    """Write one planned serve inside the caller's transaction: run task, exposure, audit.
+
+    Opens no transaction of its own, because DuckDB forbids nesting them and a batch has to
+    write every dimension's serve in one. The keyed event is the caller's, since what a key
+    records -- one task, or a batch's membership -- depends on which operation it keys.
+    """
+
+    candidate = plan.candidate
+    # The served facts are copied here, not re-read later. A pack is mutable and a run is
+    # not: the score must fold in the difficulty of the task the learner actually saw, and
+    # an observation attributed to this task must be about the items it targeted when it
+    # was served -- not the ones a later pack edit says it targets now.
+    #
+    # The same reasoning is why the answer key, the prompt, and the rubric body are copied:
+    # they are what a scorer needs to reach a verdict, and scoring against the live bank
+    # would let an edit made after the sitting decide whether the learner was right. The
+    # three are written together, always: a row carrying some of them and not the others
+    # can establish neither what the learner faced nor that it predates the snapshot.
+    transaction.execute(
+        "INSERT INTO assessment_run_tasks (run_id, sequence, content_id, "
+        "dimension, status, served_at, task_type, level_code, difficulty, "
+        "content_family, modality, is_anchor, rubric_version, content_hash, "
+        "target_refs_json, "
+        "expected_json, prompt_snapshot, rubric_json, presentation_json, "
+        "asset_identity_json, permitted_help) "
+        "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?, ?)",
+        [
+            plan.run_id,
+            plan.sequence,
+            candidate.content_id,
+            plan.dimension,
+            now,
+            candidate.task_type,
+            candidate.level_code,
+            candidate.difficulty,
+            candidate.content_family,
+            candidate.modality,
+            candidate.is_anchor,
+            plan.rubric_version,
+            plan.content_hash,
+            plan.target_refs_json,
+            plan.expected_json,
+            plan.prompt,
+            plan.rubric_json,
+            None
+            if plan.presentation is None
+            else json.dumps(
+                plan.presentation.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+            ),
+            None
+            if plan.asset is None
+            else json.dumps(plan.asset.model_dump(mode="json"), ensure_ascii=False, sort_keys=True),
+            # The allowance the learner was held to, from the same row the report hands
+            # back -- so the stored value and the reported one cannot disagree. Snapshotted
+            # for the same reason as the prompt: a second serve of this task must not read
+            # it from a pack that has been edited since.
+            plan.permitted_help,
+        ],
+    )
+    # The learner has now seen it, whether or not they answer. Recording the exposure here,
+    # in the same transaction, is what keeps an abandoned run from handing the same task
+    # back inside the reuse window.
+    _record_exposure(
+        transaction,
+        track_id=plan.track_id,
+        content_id=candidate.content_id,
+        purpose=plan.purpose,
+        is_anchor=candidate.is_anchor,
+        now=now,
+    )
+    # Serving is a mutation -- it writes a run task and spends an exposure -- and it wrote
+    # no audit row until C3. Putting it here rather than in the server is what keeps the two
+    # entry points' trails identical: a guard or a record the server owns is one the CLI
+    # does not have.
+    migration_module.record_audit_entry(
+        transaction,
+        command=command,
+        correlation_id=EventId.new(),
+        outcome="succeeded",
+        actor=actor,
+        affected_records_json=json.dumps([plan.run_id, candidate.content_id], sort_keys=True),
+        after_summary=(f"served {candidate.content_id} as {plan.dimension} task {plan.sequence}"),
+    )
+
+
+#: Why a dimension a serve found open has no task to show for it.
+EXHAUSTED_REASON = "bank exhausted inside the reuse window"
+
+
+def _close_exhausted(transaction: Database, context: ServeContext, state: DimensionState) -> str:
+    """Close a dimension the bank can no longer serve, and say so in a warning."""
+
+    _write_state(
+        transaction,
+        run_id=context.run_id,
+        state=close_dimension(state, reason=EXHAUSTED_REASON),
+        levels=context.levels,
+        insert=False,
+    )
+    return f"{state.dimension} stopped early: no unseen task is available"
+
+
+def _open_dimensions(database: Database, run_id: str, row: Sequence[Any]) -> list[str]:
+    kinds = {str(k): str(v) for k, v in json.loads(str(row[6]))["dimension_kinds"].items()}
+    return [
+        state.dimension
+        for state in _dimension_states(database, run_id, kinds)
+        if state.status == "open"
+    ]
+
+
 def next_task(
     paths: WorkspacePaths,
     *,
@@ -1132,7 +1446,12 @@ def next_task(
     actor: str = DEFAULT_ACTOR,
     idempotency_key: str | None = None,
 ) -> NextTaskReport | AssessmentRunReport:
-    """Serve the next task, or report the run when no dimension is still open."""
+    """Serve the next task, or report the run when no dimension is still open.
+
+    Plan and write in one transaction. Until C6 a dimension the bank had run out of was
+    closed in a transaction of its own and the serve committed in another, so a refusal
+    planning the second dimension left the first one closed by a call that then failed.
+    """
 
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
@@ -1166,57 +1485,13 @@ def next_task(
                     database,
                     run_id,
                     content_id=str(recorded),
-                    open_dimensions=[
-                        state.dimension
-                        for state in _dimension_states(
-                            database,
-                            run_id,
-                            {
-                                str(k): str(v)
-                                for k, v in json.loads(str(row[6]))["dimension_kinds"].items()
-                            },
-                        )
-                        if state.status == "open"
-                    ],
+                    open_dimensions=_open_dimensions(database, run_id, row),
                 )
-            _assert_running(run_id, status=str(row[4]))
-            conditions = json.loads(str(row[6]))
-            kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
-            record = learner_service.track_context(database, str(row[1]))
-            pack_row = pack_service.installed_pack(database, record.pack_key)
-            _assert_same_bank(run_id, conditions=conditions, pack_row=pack_row)
-            states = _dimension_states(database, run_id, kinds)
+            context = _serve_context(database, run_id, row)
+            states = _dimension_states(database, run_id, context.kinds)
             open_states = [state for state in states if state.status == "open"]
             if not open_states:
                 return run_report(database, run_id)
-            # The run's own condition, never the caller's: a run opened for machine scoring
-            # never serves a task that needs a judge, whatever the bank has come to hold.
-            scoring = _run_scoring(conditions)
-            recorded = (
-                frozenset()
-                if scoring == DEFAULT_SCORING
-                else _recorded_task_ids(database, pack_row["pack_id"])
-            )
-            # Read now, not from the run: consent withdrawn after the run opened stops the
-            # next spoken or written judged task from being served, whatever the run was
-            # opened under.
-            recording = recording_permitted(record.preferences)
-            writing = written_judging_permitted(record.preferences)
-            candidates = tuple(
-                candidate
-                for candidate in _candidates(database, pack_row["pack_id"])
-                if servable_candidate(
-                    candidate,
-                    scoring=scoring,
-                    recorded=recorded,
-                    recording=recording,
-                    writing=writing,
-                )
-            )
-            excluded = _excluded_task_ids(
-                database, track_id=str(row[1]), run_id=run_id, clock=active_clock
-            )
-            available = tuple(str(value) for value in conditions["available_modalities"])
             # Serve the least-progressed open dimension first, so a run that stops early has
             # spread its evidence rather than finishing one dimension and testing no other.
             open_states.sort(key=lambda state: (state.tasks_used, state.dimension))
@@ -1226,150 +1501,14 @@ def next_task(
             outstanding = _outstanding_dimensions(database, run_id)
             free_states = [state for state in open_states if state.dimension not in outstanding]
             warnings: list[str] = []
-            for state in free_states:
-                selection = select_task(
-                    state, candidates, available_modalities=available, excluded=excluded
-                )
-                if selection is None:
-                    exhausted = close_dimension(
-                        state, reason="bank exhausted inside the reuse window"
-                    )
-                    with database.transaction() as transaction:
-                        _write_state(
-                            transaction,
-                            run_id=run_id,
-                            state=exhausted,
-                            levels=_pinned_levels(conditions, fallback=record.framework_levels),
-                            insert=False,
-                        )
-                    warnings.append(f"{state.dimension} stopped early: no unseen task is available")
-                    continue
-                # The answer key is read here, from the bank row, and never from the selected
-                # `Candidate`. `Candidate` carries everything item selection is allowed to
-                # consider, and the key is not among it: putting it there would let the
-                # staircase see the answers it is choosing between.
-                task = database.one(
-                    "SELECT record.stable_key, task.prompt, task.rubric_json, task.rubric_version, "
-                    "task.permitted_help, record.content_hash, task.target_refs_json, "
-                    "task.expected_json, task.presentation_json "
-                    "FROM assessment_tasks task "
-                    "JOIN content_records record ON record.content_id = task.content_id "
-                    "WHERE task.content_id = ?",
-                    [selection.candidate.content_id],
-                )
-                assert task is not None
-                # Resolved here, before anything is written: a shuffle happens once, and the
-                # order the learner saw is the order that is stored. Re-reading the bank on
-                # resume would reshuffle, which is a different question asked under the
-                # identity of the one they were credited for.
-                shown = _serve_presentation(
-                    parse_task_presentation(None if task[8] is None else str(task[8])),
-                    run_id=run_id,
-                    content_id=selection.candidate.content_id,
-                )
-                # Resolved here too, and before the transaction: a task that says it plays a
-                # recording the installed pack cannot produce is refused while it is still
-                # unserved, rather than written as a row nothing can read afterwards.
-                played = None
-                if _plays_audio(shown):
-                    played = _serve_asset_identity(database, record.pack_key, shown)
-                sequence = (
-                    int(
-                        database.scalar(
-                            "SELECT coalesce(max(sequence), 0) FROM assessment_run_tasks "
-                            "WHERE run_id = ?",
-                            [run_id],
-                        )
-                    )
-                    + 1
-                )
-                with database.transaction() as transaction:
-                    now = transaction.now()
-                    # The served facts are copied here, not re-read later. A pack is mutable
-                    # and a run is not: the score must fold in the difficulty of the task the
-                    # learner actually saw, and an observation attributed to this task must be
-                    # about the items it targeted when it was served -- not the ones a later
-                    # pack edit says it targets now.
-                    #
-                    # The same reasoning is why the answer key, the prompt, and the rubric
-                    # body are copied: they are what a scorer needs to reach a verdict, and
-                    # scoring against the live bank would let an edit made after the sitting
-                    # decide whether the learner was right. The three are written together,
-                    # always: a row carrying some of them and not the others can establish
-                    # neither what the learner faced nor that it predates the snapshot.
-                    transaction.execute(
-                        "INSERT INTO assessment_run_tasks (run_id, sequence, content_id, "
-                        "dimension, status, served_at, task_type, level_code, difficulty, "
-                        "content_family, modality, is_anchor, rubric_version, content_hash, "
-                        "target_refs_json, "
-                        "expected_json, prompt_snapshot, rubric_json, presentation_json, "
-                        "asset_identity_json, permitted_help) "
-                        "VALUES (?, ?, ?, ?, 'served', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                        "?, ?)",
-                        [
-                            run_id,
-                            sequence,
-                            selection.candidate.content_id,
-                            state.dimension,
-                            now,
-                            selection.candidate.task_type,
-                            selection.candidate.level_code,
-                            selection.candidate.difficulty,
-                            selection.candidate.content_family,
-                            selection.candidate.modality,
-                            selection.candidate.is_anchor,
-                            int(task[3]),
-                            str(task[5]),
-                            str(task[6]),
-                            str(task[7]),
-                            str(task[1]),
-                            str(task[2]),
-                            None
-                            if shown is None
-                            else json.dumps(
-                                shown.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
-                            ),
-                            None
-                            if played is None
-                            else json.dumps(
-                                played.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
-                            ),
-                            # The allowance the learner was held to, from the same row the
-                            # report hands back -- so the stored value and the reported one
-                            # cannot disagree. Snapshotted for the same reason as the prompt:
-                            # a second serve of this task must not read it from a pack that
-                            # has been edited since.
-                            str(task[4]),
-                        ],
-                    )
-                    # The learner has now seen it, whether or not they answer. Recording the
-                    # exposure here, in the same transaction, is what keeps an abandoned run
-                    # from handing the same task back inside the reuse window.
-                    _record_exposure(
-                        transaction,
-                        track_id=str(row[1]),
-                        content_id=selection.candidate.content_id,
-                        purpose=str(row[3]),
-                        is_anchor=selection.candidate.is_anchor,
-                        now=now,
-                    )
-                    # Serving is a mutation -- it writes a run task and spends an exposure --
-                    # and it wrote no audit row until C3. Putting it here rather than in the
-                    # server is what keeps the two entry points' trails identical: a guard or
-                    # a record the server owns is one the CLI does not have.
-                    migration_module.record_audit_entry(
-                        transaction,
-                        command=command,
-                        correlation_id=EventId.new(),
-                        outcome="succeeded",
-                        actor=actor,
-                        affected_records_json=json.dumps(
-                            [run_id, selection.candidate.content_id], sort_keys=True
-                        ),
-                        after_summary=(
-                            f"served {selection.candidate.content_id} as {state.dimension} "
-                            f"task {sequence}"
-                        ),
+            with database.transaction() as transaction:
+                for state in free_states:
+                    plan = plan_serve(transaction, context, state, clock=active_clock)
+                    if plan is None:
+                        warnings.append(_close_exhausted(transaction, context, state))
+                        continue
+                    write_serve(
+                        transaction, plan, now=transaction.now(), command=command, actor=actor
                     )
                     if idempotency_key is not None:
                         migration_module.record_domain_event(
@@ -1380,64 +1519,45 @@ def next_task(
                             correlation_id=EventId.new(),
                             payload_json=idempotency.payload(
                                 fingerprint,
-                                content_id=selection.candidate.content_id,
-                                dimension=state.dimension,
-                                sequence=sequence,
+                                content_id=plan.candidate.content_id,
+                                dimension=plan.dimension,
+                                sequence=plan.sequence,
                             ),
                             idempotency_key=idempotency_key,
                         )
-                return NextTaskReport(
-                    run_id=run_id,
-                    dimension=state.dimension,
-                    sequence=sequence,
-                    content_id=selection.candidate.content_id,
-                    stable_key=str(task[0]),
-                    task_type=selection.candidate.task_type,
-                    modality=selection.candidate.modality,
-                    level_code=selection.candidate.level_code,
-                    difficulty=selection.candidate.difficulty,
-                    content_family=selection.candidate.content_family,
-                    prompt=str(task[1]),
-                    presentation=shown,
-                    asset=played,
-                    rubric=json.loads(str(task[2])),
-                    rubric_version=int(task[3]),
-                    permitted_help=str(task[4]),
-                    selection_reason=selection.reason,
-                    remaining_open_dimensions=tuple(
-                        other.dimension for other in open_states if other.status == "open"
-                    ),
-                    warnings=tuple(warnings),
+                    return plan.report(
+                        remaining_open_dimensions=[other.dimension for other in open_states],
+                        warnings=warnings,
+                    )
+                # Nothing fresh could be served. An open dimension still holding an unanswered
+                # task has work on it, so the run is not finished and must not report as though
+                # it were: hand that task back instead. The states are already sorted, so this
+                # is the least-progressed one.
+                held = [state for state in open_states if state.dimension in outstanding]
+                handed_content_id = outstanding[held[0].dimension] if held else None
+                # Read and validated *before* the key is claimed. `_hand_back` refuses a
+                # damaged snapshot, and a refusal has to leave nothing behind -- which, now
+                # that it runs inside the transaction, includes the exhausted dimensions
+                # closed above.
+                handed = (
+                    None
+                    if handed_content_id is None
+                    else _hand_back(
+                        transaction,
+                        run_id,
+                        content_id=handed_content_id,
+                        open_dimensions=[state.dimension for state in held],
+                    )
                 )
-            # Nothing fresh could be served. An open dimension still holding an unanswered
-            # task has work on it, so the run is not finished and must not report as though it
-            # were: hand that task back instead. The states are already sorted, so this is
-            # the least-progressed one.
-            held = [state for state in open_states if state.dimension in outstanding]
-            handed_content_id = outstanding[held[0].dimension] if held else None
-            # Read and validated *before* the key is claimed. `_hand_back` refuses a damaged
-            # snapshot, and a refusal has to leave nothing behind: claiming the key first meant a
-            # refused call burned it, so the retry the caller was entitled to make came back as a
-            # conflict about a request that had never succeeded.
-            handed = (
-                None
-                if handed_content_id is None
-                else _hand_back(
-                    database,
-                    run_id,
-                    content_id=handed_content_id,
-                    open_dimensions=[state.dimension for state in held],
-                )
-            )
-            if idempotency_key is not None:
-                # Whatever this call did -- handed a task back, or closed the last dimension and
-                # served nothing -- it is the one operation this key performed, and recording it
-                # is what stops a retry from doing something else. A hand-back writes nothing
-                # about the *learner*: no run task, no exposure, no dimension state. An event
-                # saying which task this key was answered with is bookkeeping about the request,
-                # and without it a retry after the task was scored went on to serve a different
-                # one under the same key.
-                with database.transaction() as transaction:
+                if idempotency_key is not None:
+                    # Whatever this call did -- handed a task back, or closed the last
+                    # dimension and served nothing -- it is the one operation this key
+                    # performed, and recording it is what stops a retry from doing something
+                    # else. A hand-back writes nothing about the *learner*: no run task, no
+                    # exposure, no dimension state. An event saying which task this key was
+                    # answered with is bookkeeping about the request, and without it a retry
+                    # after the task was scored went on to serve a different one under the
+                    # same key.
                     migration_module.record_domain_event(
                         transaction,
                         event_type=SERVED_EVENT,
@@ -1450,6 +1570,301 @@ def next_task(
             if handed is not None:
                 return handed.model_copy(update={"warnings": tuple(warnings)})
             return _reported(run_report(database, run_id), warnings)
+
+        return _noting_settled(settled, work)
+
+
+#: Where a batch's task stands now. `served` is still waiting for the learner;
+#: `awaiting-judge` has an answer handed in that nobody has marked -- derived exactly as the
+#: run screen derives it, from the live submission -- and `answered` and `skipped` are
+#: settled.
+BatchTaskState = Literal["served", "answered", "awaiting-judge", "skipped"]
+
+
+class BatchTask(ContractModel):
+    """One task a batch served, in the position the batch served it."""
+
+    position: int
+    dimension: str
+    content_id: str
+    state: BatchTaskState
+    #: The task as it was served, read from the record of the serving on a replay.
+    task: NextTaskReport
+
+
+class BatchReport(ContractModel):
+    """One task for each open dimension, served together -- or replayed by their key."""
+
+    batch_id: str
+    run_id: str
+    tasks: tuple[BatchTask, ...] = ()
+    #: Open dimensions the batch served nothing in because each was already holding a task
+    #: -- unanswered, or answered and awaiting a judge. Not a refusal: the dimension is
+    #: waiting for its own work to settle, and `select_task` must not probe a posterior no
+    #: answer has moved yet.
+    waiting: tuple[str, ...] = ()
+    #: Dimensions the batch found open with nothing left in the bank to serve, and closed.
+    exhausted: tuple[str, ...] = ()
+    #: True when this report is a retry of the call that made the batch: nothing was
+    #: served, and each task's state is what it is now, not what it was then.
+    replayed: bool = False
+    warnings: tuple[str, ...] = ()
+
+
+def _batch_task_state(database: Database, run_id: str, content_id: str) -> BatchTaskState:
+    """Where a served task stands now, by the run task's status and its live submission.
+
+    `awaiting-judge` is the run screen's own derivation (`assessment_view.run_screen_report`):
+    a task still `served` whose answer has been handed in. A second account of "is this
+    waiting for a judge" is a second thing to drift.
+    """
+
+    from linguawiki.services import recordings as recording_service
+
+    stored = database.scalar(
+        "SELECT status FROM assessment_run_tasks WHERE run_id = ? AND content_id = ?",
+        [run_id, content_id],
+    )
+    if stored is None:
+        # Only damage reaches this: the member and its serving were written together. A
+        # state guessed for a task the run never served would be a report about nothing.
+        raise LinguaWikiError(
+            "assessment_batch_unrecorded",
+            f"a batch on run {run_id} names {content_id}, which the run has no record of "
+            "serving; run `db check` (batch_members_were_served_by_their_run), and serve "
+            "with a new key",
+            details=(ErrorDetail(field="content_id", reason="batch member was never served"),),
+        )
+    status = str(stored)
+    if status == "served" and (
+        recording_service.live_submission(database, run_id, content_id) is not None
+    ):
+        return "awaiting-judge"
+    return cast(BatchTaskState, status)
+
+
+def _naming_dimension(failure: LinguaWikiError, dimension: str) -> LinguaWikiError:
+    """A dimension's refusal, as the batch's refusal: same code, naming the dimension.
+
+    The code is kept because it is the contract a caller acts on; the dimension is added
+    because "which of the five" is the first thing a caller holding a batch needs to know,
+    and nothing else in the refusal says it.
+    """
+
+    payload = failure.payload
+    return LinguaWikiError(
+        payload.code,
+        f"{dimension}: {payload.message}; nothing in this batch was served",
+        retryable=payload.retryable,
+        details=(
+            ErrorDetail(
+                field="dimension",
+                reason="this dimension's serve was refused",
+                context={"dimension": dimension},
+            ),
+            *payload.details,
+        ),
+    )
+
+
+def _assert_batch_key(idempotency_key: str | None) -> str:
+    if idempotency_key is None or not idempotency_key.strip():
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "a batch needs an idempotency key: it serves several tasks at once, and a retry "
+            "after a lost response must return those tasks rather than serve more",
+            details=(ErrorDetail(field="idempotency_key", reason="absent"),),
+        )
+    return idempotency_key
+
+
+def _replayed_batch(
+    database: Database,
+    run_id: str,
+    row: Sequence[Any],
+    *,
+    key: str,
+    replay: Mapping[str, Any],
+    fingerprint: str,
+) -> BatchReport:
+    """The batch this key made, each task in its state now. Nothing is served.
+
+    Membership is read from `assessment_batch_tasks`, never re-planned: a dimension that has
+    opened since is not added, because adding it would be a second batch under the first
+    one's key.
+    """
+
+    batch_id = str(replay.get("batch_id"))
+    stored = database.one(
+        "SELECT run_id, idempotency_key, request_hash FROM assessment_batches WHERE batch_id = ?",
+        [batch_id],
+    )
+    if stored is None or (str(stored[0]), str(stored[1]), str(stored[2])) != (
+        run_id,
+        key,
+        fingerprint,
+    ):
+        # The event and the membership are written in one transaction, so this is damage or
+        # a hand repair. Serving afresh would answer the key with tasks it never served.
+        raise LinguaWikiError(
+            "assessment_batch_unrecorded",
+            f"idempotency key {key} recorded batch {batch_id}, and the batch's own record "
+            "is missing or disagrees with it; run `db check`, and serve with a new key",
+            details=(ErrorDetail(field="idempotency_key", reason="batch record is missing"),),
+        )
+    open_dimensions = _open_dimensions(database, run_id, row)
+    tasks = tuple(
+        BatchTask(
+            position=int(position),
+            dimension=str(dimension),
+            content_id=str(content_id),
+            state=_batch_task_state(database, run_id, str(content_id)),
+            task=_hand_back(
+                database, run_id, content_id=str(content_id), open_dimensions=open_dimensions
+            ),
+        )
+        for position, dimension, content_id in database.query(
+            "SELECT position, dimension, content_id FROM assessment_batch_tasks "
+            "WHERE batch_id = ? ORDER BY position",
+            [batch_id],
+        )
+    )
+    return BatchReport(
+        batch_id=batch_id,
+        run_id=run_id,
+        tasks=tasks,
+        waiting=tuple(str(value) for value in replay.get("waiting") or ()),
+        exhausted=tuple(str(value) for value in replay.get("exhausted") or ()),
+        replayed=True,
+    )
+
+
+def next_batch(
+    paths: WorkspacePaths,
+    *,
+    idempotency_key: str | None,
+    run: str | None = None,
+    track: str | None = None,
+    clock: Clock | None = None,
+    command: str = "assessment.batch",
+    actor: str = DEFAULT_ACTOR,
+) -> BatchReport:
+    """Serve one task in every open dimension that is free, in one transaction.
+
+    Never two in one dimension: `select_task` probes the boundary of the current posterior,
+    so a dimension's second task depends on its first answer. A dimension already holding a
+    task is reported `waiting`; one the bank can no longer serve is closed and reported
+    `exhausted`. Neither is a refusal. A refusal in any dimension writes nothing at all --
+    no served task, no exposure, no batch -- and names the dimension.
+
+    Dimensions are planned in the order the run recorded them, and each is planned after
+    the one before it was written, inside the same transaction, so the exclusions dimension
+    *n* sees include whatever dimensions 1..n-1 just served. That is what makes a batch
+    select exactly what the same dimensions would have selected served one at a time.
+    """
+
+    key = _assert_batch_key(idempotency_key)
+    active_clock = clock or SystemClock()
+    with open_writer(paths, command=command, clock=active_clock) as database:
+        track_id = None if track is None else learner_service.resolve_track(database, track)
+        run_id = resolve_run(database, run, track_id=track_id)
+        settled = _settle_lapsed(database, run_id, command=command, actor=actor)
+
+        def work() -> BatchReport:
+            row = _run_row(database, run_id)
+            # Before `_assert_running`, like a single serve: a retry is answered with what
+            # the key did, whatever state the run has reached since.
+            fingerprint = idempotency.request_hash(operation=BATCHED_EVENT, run_id=run_id)
+            replay = idempotency.resolve(
+                database, key=key, event_type=BATCHED_EVENT, request_hash=fingerprint
+            )
+            if replay is not None:
+                return _replayed_batch(
+                    database, run_id, row, key=key, replay=replay, fingerprint=fingerprint
+                )
+            context = _serve_context(database, run_id, row)
+            states = {
+                state.dimension: state
+                for state in _dimension_states(database, run_id, context.kinds)
+            }
+            outstanding = _outstanding_dimensions(database, run_id)
+            batch_id = str(AssessmentId.new())
+            plans: list[ServePlan] = []
+            waiting: list[str] = []
+            exhausted: list[str] = []
+            warnings: list[str] = []
+            with database.transaction() as transaction:
+                now = transaction.now()
+                transaction.execute(
+                    "INSERT INTO assessment_batches (batch_id, run_id, idempotency_key, "
+                    "request_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+                    [batch_id, run_id, key, fingerprint, now],
+                )
+                # The run's recorded order -- `conditions_json.dimension_kinds` as it was
+                # stored -- rather than the single serve's least-progressed-first. The spread
+                # rule is moot when every free dimension is served at once, and a fixed order
+                # is what lets a retry and the one-at-a-time comparison agree.
+                for dimension in context.kinds:
+                    state = states.get(dimension)
+                    if state is None or state.status != "open":
+                        continue
+                    if dimension in outstanding:
+                        waiting.append(dimension)
+                        continue
+                    try:
+                        plan = plan_serve(transaction, context, state, clock=active_clock)
+                        if plan is None:
+                            exhausted.append(dimension)
+                            warnings.append(_close_exhausted(transaction, context, state))
+                            continue
+                        write_serve(transaction, plan, now=now, command=command, actor=actor)
+                    except LinguaWikiError as failure:
+                        raise _naming_dimension(failure, dimension) from failure
+                    plans.append(plan)
+                    transaction.execute(
+                        "INSERT INTO assessment_batch_tasks (batch_id, position, content_id, "
+                        "dimension) VALUES (?, ?, ?, ?)",
+                        [batch_id, len(plans), plan.candidate.content_id, dimension],
+                    )
+                migration_module.record_domain_event(
+                    transaction,
+                    event_type=BATCHED_EVENT,
+                    aggregate_type="assessment_run",
+                    aggregate_id=run_id,
+                    correlation_id=EventId.new(),
+                    payload_json=idempotency.payload(
+                        fingerprint,
+                        batch_id=batch_id,
+                        content_ids=[plan.candidate.content_id for plan in plans],
+                        waiting=waiting,
+                        exhausted=exhausted,
+                    ),
+                    idempotency_key=key,
+                )
+            remaining = [
+                dimension
+                for dimension in context.kinds
+                if dimension in states
+                and states[dimension].status == "open"
+                and dimension not in exhausted
+            ]
+            return BatchReport(
+                batch_id=batch_id,
+                run_id=run_id,
+                tasks=tuple(
+                    BatchTask(
+                        position=position,
+                        dimension=plan.dimension,
+                        content_id=plan.candidate.content_id,
+                        state="served",
+                        task=plan.report(remaining_open_dimensions=remaining),
+                    )
+                    for position, plan in enumerate(plans, start=1)
+                ),
+                waiting=tuple(waiting),
+                exhausted=tuple(exhausted),
+                warnings=tuple(warnings),
+            )
 
         return _noting_settled(settled, work)
 
@@ -4559,10 +4974,15 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
 __all__ = [
     "AppliedVerdict",
     "AssessmentRunReport",
+    "BatchReport",
+    "BatchTask",
+    "BatchTaskState",
     "DimensionReport",
     "NextTaskReport",
     "PlayReport",
     "RunListReport",
+    "ServeContext",
+    "ServePlan",
     "VerdictPlan",
     "VerdictRequest",
     "VerdictWrite",
@@ -4570,7 +4990,9 @@ __all__ = [
     "WithdrawnSubmission",
     "finalize",
     "held_verdict_request",
+    "next_batch",
     "next_task",
+    "plan_serve",
     "plan_verdict",
     "plays_remaining",
     "record",
@@ -4583,5 +5005,6 @@ __all__ = [
     "set_status",
     "settle",
     "start",
+    "write_serve",
     "write_verdict",
 ]

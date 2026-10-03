@@ -228,6 +228,16 @@ def installed_pilot(
 def polish_workspace(installed_pilot: SyntheticWorkspace) -> PolishWorkspace:
     """One learner with a declared-A2 Polish track, ready for onboarding."""
 
+    return polish_learner(installed_pilot)
+
+
+def polish_learner(installed_pilot: SyntheticWorkspace) -> PolishWorkspace:
+    """Add the `polish_workspace` learner and track to an installed pilot workspace.
+
+    A function as well as the fixture, for a test that needs two identical workspaces to
+    compare -- one built from `installed_pilot`, the other from `materialize_pilot`.
+    """
+
     from linguawiki.services import learners as learner_service
 
     user = learner_service.create_user(

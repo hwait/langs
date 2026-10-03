@@ -264,6 +264,103 @@
         "title": "AssessmentRunReport",
         "type": "object"
       },
+      "BatchReport": {
+        "additionalProperties": false,
+        "description": "One task for each open dimension, served together -- or replayed by their key.",
+        "properties": {
+          "batch_id": {
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "exhausted": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Exhausted",
+            "type": "array"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "tasks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/BatchTask"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "waiting": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Waiting",
+            "type": "array"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "batch_id",
+          "run_id"
+        ],
+        "title": "BatchReport",
+        "type": "object"
+      },
+      "BatchTask": {
+        "additionalProperties": false,
+        "description": "One task a batch served, in the position the batch served it.",
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "dimension": {
+            "title": "Dimension",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "served",
+              "answered",
+              "awaiting-judge",
+              "skipped"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "task": {
+            "$ref": "#/components/schemas/NextTaskReport"
+          }
+        },
+        "required": [
+          "position",
+          "dimension",
+          "content_id",
+          "state",
+          "task"
+        ],
+        "title": "BatchTask",
+        "type": "object"
+      },
       "CaptureReport": {
         "additionalProperties": false,
         "description": "What became of one capture.",
@@ -2191,6 +2288,176 @@
           }
         },
         "summary": "A run's per-dimension estimates and budgets"
+      }
+    },
+    "/runs/{run_id}/batch": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_batch",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "idempotency_key"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/BatchReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Serve one task in every free open dimension at once, or replay the batch a key already served"
       }
     },
     "/runs/{run_id}/finalization": {

@@ -223,6 +223,7 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
     # instead of joining a tally nobody reads.
     assert sorted(keyed) == [
         "/runs",
+        "/runs/{run_id}/batch",
         "/runs/{run_id}/finalization",
         "/runs/{run_id}/results",
         "/runs/{run_id}/tasks",
