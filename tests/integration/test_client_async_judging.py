@@ -2293,9 +2293,16 @@ def test_a_held_verdict_whose_consent_went_while_paused_leaves_no_text_and_is_vo
 
 
 @pytest.mark.parametrize("paused", [False, True], ids=["applied", "held"])
-def test_a_judge_asking_for_an_excerpt_has_the_request_recorded_and_not_the_text(
-    writing: PolishWorkspace, paused: bool
+@pytest.mark.parametrize(
+    ("requested", "kept"),
+    [("excerpt", ("excerpt", ANSWER[:240])), ("withheld", ("withheld", None))],
+)
+def test_a_judges_narrower_request_is_recorded_beside_the_verdict_and_honoured(
+    writing: PolishWorkspace, paused: bool, requested: str, kept: tuple[str, str | None]
 ) -> None:
+    """R12: the verdict row keeps nothing and records the request in its own column, so a
+    request survives a hold and is honoured at resume exactly as when applied at once."""
+
     run_id, content_id, submission_id = written(writing)
     if paused:
         pause(writing, run_id)
@@ -2306,7 +2313,7 @@ def test_a_judge_asking_for_an_excerpt_has_the_request_recorded_and_not_the_text
         content_id=content_id,
         score=0.5,
         submission=submission_id,
-        response_visibility="excerpt",
+        response_visibility=requested,
         assessor_kind="ai",
         assessor="synthetic-ai-judge",
         clock=writing.clock,
@@ -2316,24 +2323,26 @@ def test_a_judge_asking_for_an_excerpt_has_the_request_recorded_and_not_the_text
 
     assert rows(
         writing,
-        "SELECT response_visibility, response_excerpt FROM assessment_verdicts "
-        "WHERE submission_id = ?",
+        "SELECT response_visibility, response_excerpt, response_hash, requested_visibility "
+        "FROM assessment_verdicts WHERE submission_id = ?",
         [submission_id],
-    ) == [("excerpt", None)]
+    ) == [("withheld", None, digest(ANSWER), requested)]
     assert rows(
         writing,
-        "SELECT response_visibility, response_excerpt FROM assessment_results WHERE run_id = ?",
+        "SELECT response_visibility, response_excerpt, response_hash FROM assessment_results "
+        "WHERE run_id = ?",
         [run_id],
-    ) == [("excerpt", ANSWER[:240])]
+    ) == [(*kept, digest(ANSWER))]
     assert_clean(writing)
 
 
-def test_a_verdict_may_not_ask_a_written_answers_result_to_keep_nothing(
+def test_a_second_keyed_verdict_asking_for_a_different_visibility_is_a_conflict(
     writing: PolishWorkspace,
 ) -> None:
     run_id, content_id, submission_id = written(writing)
+    verdict(writing, run_id, content_id, submission_id, score=0.5, key="v-1")
 
-    refused = refusal(
+    conflict = refusal(
         assessment_service.record,
         writing.paths,
         run=run_id,
@@ -2343,12 +2352,56 @@ def test_a_verdict_may_not_ask_a_written_answers_result_to_keep_nothing(
         response_visibility="withheld",
         assessor_kind="ai",
         assessor="synthetic-ai-judge",
+        rubric={"accuracy": 0.5},
+        idempotency_key="v-2",
         clock=writing.clock,
     )
 
-    assert refused.payload.code == "invalid_arguments"
-    assert "transcript retention consent" in refused.payload.message
-    assert rows(writing, "SELECT count(*) FROM assessment_verdicts") == [(0,)]
+    assert conflict.payload.code == "assessment_verdict_conflict"
+
+
+def test_a_held_full_request_is_narrowed_at_resume_by_the_preferences_in_force_then(
+    speaking: PolishWorkspace,
+) -> None:
+    """The "retained against current preferences" apply path, with preferences *changed*
+    rather than withdrawn. For a written answer every change that keeps less than the whole
+    makes it ineligible -- `assert_text_judgeable` settles it, as the eligibility test shows
+    -- so the narrowing is exercised on a recording's verdict, which the same held branch
+    applies. Transcript consent goes from yes to unset, which `track update` cannot express,
+    so the row is removed directly."""
+
+    transcript = " ".join(["Synthetic transcript of a spoken answer."] * 10)
+    run_id, content_id, submission_id, _ = submitted(speaking, 601)
+    pause(speaking, run_id)
+    assessment_service.record(
+        speaking.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=submission_id,
+        response=transcript,
+        response_visibility="full",
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        rubric={"accuracy": 0.5},
+        clock=speaking.clock,
+    )
+    assert rows(
+        speaking,
+        "SELECT response_visibility, requested_visibility FROM assessment_verdicts "
+        "WHERE submission_id = ?",
+        [submission_id],
+    ) == [("full", "full")]
+    unset_transcript_consent(speaking)
+
+    resumed = resume(speaking, run_id)
+
+    assert [entry.submission_id for entry in resumed.applied_verdicts] == [submission_id]
+    assert rows(
+        speaking,
+        "SELECT response_visibility, response_excerpt FROM assessment_results WHERE run_id = ?",
+        [run_id],
+    ) == [("excerpt", transcript[:240])]
 
 
 def test_an_over_long_answer_or_key_is_refused_by_name_before_anything_is_written(

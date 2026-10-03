@@ -2,7 +2,7 @@
   "application_version": "0.1.0",
   "database_schema_version": 35,
   "duckdb_version": "1.5.5",
-  "exported_at": "2026-10-02T20:02:43.495418Z",
+  "exported_at": "2026-10-02T23:59:51.715247Z",
   "migrations": [
     [
       1,
@@ -177,7 +177,7 @@
     [
       35,
       "0035_submission_lifecycle",
-      "83fa5c957f1bf6a94c40badfcf618a66655a597463365980b7b79f0ba859dbea"
+      "08a12002c2e593a0eb1c6494ba448327b0d064c5caf5f2a7ea9254e2ed89c8bc"
     ]
   ],
   "schema_name": "linguawiki.portable-export.v1",
@@ -3924,6 +3924,10 @@
         [
           "received_at",
           "TIMESTAMP"
+        ],
+        [
+          "requested_visibility",
+          "VARCHAR"
         ]
       ],
       "file": "assessment_verdicts.parquet",
@@ -5036,5 +5040,5 @@
       "table": "jobs"
     }
   ],
-  "workspace_id": "wsp_01M3Z3CFCC24CWRXKGJWT9M57B"
+  "workspace_id": "wsp_01M3ZGYP7CR2HHHWSGSK1JKMC6"
 }

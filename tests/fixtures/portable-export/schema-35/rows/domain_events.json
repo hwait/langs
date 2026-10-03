@@ -1,14 +1,14 @@
 [
   {
-    "aggregate_id": "wsp_01M3Z3CFCC24CWRXKGJWT9M57B",
+    "aggregate_id": "wsp_01M3ZGYP7CR2HHHWSGSK1JKMC6",
     "aggregate_type": "workspace",
-    "correlation_id": "evt_01M3Z3CFCCC72ASCY63Y8GCF7Z",
-    "event_id": "evt_01M3Z3CFNASVWX84217T1D1T7R",
+    "correlation_id": "evt_01M3ZGYP7C4H6J5DCD63BFGJPC",
+    "event_id": "evt_01M3ZGYPDF6Y8DXZH73WVJ99Z0",
     "event_type": "workspace.initialized",
-    "idempotency_key": "workspace.initialized:wsp_01M3Z3CFCC24CWRXKGJWT9M57B",
-    "occurred_at": "2026-10-02T20:02:42.986585Z",
+    "idempotency_key": "workspace.initialized:wsp_01M3ZGYP7CR2HHHWSGSK1JKMC6",
+    "occurred_at": "2026-10-02T23:59:51.215916Z",
     "payload_json": "{\"core_version\": \"0.1.0\", \"history_policy\": \"git-wiki\"}",
-    "recorded_at": "2026-10-02T20:02:42.986585Z",
+    "recorded_at": "2026-10-02T23:59:51.215916Z",
     "schema_version": 1
   }
 ]

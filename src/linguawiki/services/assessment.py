@@ -1870,18 +1870,6 @@ def _judged_text(
             "from the answer itself; a verdict does not bring an excerpt of its own",
             details=(ErrorDetail(field="response_excerpt", reason="a written answer"),),
         )
-    if request.response_visibility == "withheld":
-        # The verdict row records a judge's narrower request in its visibility, and a
-        # written answer's verdict row is `withheld` already -- it keeps none of the words
-        # (R10) -- so a request to keep none on the result could not be told from no request
-        # once held, and would be applied as `full` at resume. Refused rather than widened.
-        raise LinguaWikiError(
-            "invalid_arguments",
-            f"{named.submission_id} is a written answer, and its result keeps what the "
-            "track's consent keeps of it, or an excerpt if the verdict asks for one; to keep "
-            "none of a learner's writing, withdraw transcript retention consent on the track",
-            details=(ErrorDetail(field="response_visibility", reason="a written answer"),),
-        )
     if request.applying is None:
         if request.score is None:
             raise LinguaWikiError(
@@ -2002,6 +1990,24 @@ def retain_rubric(
     return {str(name): retained(item, str(name)) for name, item in (rubric or {}).items()}
 
 
+#: Visibilities from least kept to most.
+VISIBILITY_ORDER: tuple[str, ...] = ("withheld", "excerpt", "full")
+
+
+def consented_visibility(preferences: Mapping[str, object]) -> str:
+    """The most of a learner's words a track's consent lets anything keep:
+    `evidence.retain_response`'s rule, as a ceiling."""
+
+    consent = preferences.get("transcript_retention_consent")
+    if consent is True:
+        return "full"
+    return "withheld" if consent is False else "excerpt"
+
+
+def narrower_visibility(first: str, second: str) -> str:
+    return min(first, second, key=VISIBILITY_ORDER.index)
+
+
 def _narrowed_retention(
     visibility: str, excerpt: str | None, *, preferences: Mapping[str, object]
 ) -> tuple[str, str | None]:
@@ -2091,10 +2097,8 @@ class VerdictPlan:
     warnings: tuple[str, ...] = ()
     #: What the *verdict row* keeps of the answer, when that differs from what the result
     #: keeps: `(visibility, excerpt)`. Set for a written answer, whose verdict keeps none of
-    #: its words (ruling R10) -- the row is insert-only and no consent withdrawal could
-    #: reach a copy there. `visibility` is `withheld`, or the narrower form the judge asked
-    #: the result to keep (`excerpt`), and the excerpt is always `None`. `None` means the
-    #: verdict keeps what the result keeps, as for every other verdict.
+    #: its words (R10): always `("withheld", None)` -- the row is insert-only and no consent
+    #: withdrawal could reach a copy there. `None`: the verdict keeps what the result keeps.
     verdict_response: tuple[str, str | None] | None = None
 
 
@@ -2261,6 +2265,7 @@ class _Standing:
     response_hash: str | None
     response_visibility: str | None
     held: bool
+    requested_visibility: str | None = None
 
 
 def _standing_verdict(
@@ -2274,7 +2279,8 @@ def _standing_verdict(
 
     row = database.one(
         "SELECT verdict.verdict_id, verdict.raw_score, verdict.response_hash, "
-        "verdict.response_visibility, outcome.outcome FROM assessment_verdicts verdict "
+        "verdict.response_visibility, outcome.outcome, verdict.requested_visibility "
+        "FROM assessment_verdicts verdict "
         "LEFT JOIN assessment_verdict_outcomes outcome ON outcome.verdict_id = verdict.verdict_id "
         "WHERE verdict.submission_id = ? AND verdict.verdict_id IS DISTINCT FROM ? "
         "AND (outcome.outcome IS NULL OR outcome.outcome = 'applied') "
@@ -2290,6 +2296,7 @@ def _standing_verdict(
         response_hash=None if row[2] is None else str(row[2]),
         response_visibility=None if row[3] is None else str(row[3]),
         held=row[4] is None,
+        requested_visibility=None if row[5] is None else str(row[5]),
     )
 
 
@@ -2311,7 +2318,7 @@ def _held_verdict_row(database: Database, verdict_id: str, *, submission_id: str
     row = database.one(
         "SELECT verdict.submission_id, verdict.raw_score, verdict.rubric_json, "
         "verdict.response_visibility, verdict.response_excerpt, verdict.response_hash, "
-        "outcome.outcome FROM assessment_verdicts verdict "
+        "outcome.outcome, verdict.requested_visibility FROM assessment_verdicts verdict "
         "LEFT JOIN assessment_verdict_outcomes outcome ON outcome.verdict_id = verdict.verdict_id "
         "WHERE verdict.verdict_id = ?",
         [verdict_id],
@@ -2576,18 +2583,21 @@ def plan_verdict(
         )
     verdict_response: tuple[str, str | None] | None = None
     if written is not None:
-        # R10: a written answer's verdict keeps none of its words -- it names the submission,
-        # and its hash is the submission's digest. What it does keep is how much the judge
-        # asked the result to keep, when that is less than the whole.
-        if held_row is not None:
-            ceiling = "excerpt" if str(held_row[3]) == "excerpt" else "full"
-        else:
-            ceiling = request.response_visibility or "full"
-        verdict_response = ("excerpt" if ceiling == "excerpt" else "withheld", None)
-        # The result's text is the submission's *current* text, retained against the
-        # consent in force now -- which `_judged_text` has just found still keeps it whole --
-        # so a result written at resume can only narrow to what a verdict arriving now
-        # would keep.
+        # R10/R12: a written answer's verdict keeps none of its words -- it names the
+        # submission, its hash is the submission's digest, and the judge's request for how
+        # much the result may keep is its own column, `requested_visibility`.
+        verdict_response = ("withheld", None)
+        requested = (
+            request.response_visibility
+            if held_row is None
+            else (None if held_row[7] is None else str(held_row[7]))
+        )
+        # The result's text is the submission's *current* text, kept to the narrower of what
+        # the judge asked for and what the consent in force now keeps -- so a result written
+        # at resume is what a verdict arriving now would write, and can only narrow.
+        ceiling = narrower_visibility(
+            requested or "full", consented_visibility(record_track.preferences)
+        )
         visibility, excerpt, response_hash = evidence_service.retain_response(
             written.text, requested=ceiling, preferences=record_track.preferences
         )
@@ -2705,14 +2715,18 @@ def plan_verdict(
                 recorded=(
                     standing.score,
                     standing.response_hash,
-                    standing.response_visibility,
+                    standing.response_visibility
+                    if verdict_response is None
+                    else (standing.requested_visibility or "full"),
                     audio_artifact,
                 ),
                 score=resolved_score,
                 response_hash=response_hash,
-                # Verdict against verdict: what this one's row would keep, which for a
-                # written answer is not what its result keeps.
-                visibility=visibility if verdict_response is None else verdict_response[0],
+                # Verdict against verdict. A written answer's rows all keep nothing, so what
+                # tells two of its verdicts apart is what each asked the result to keep.
+                visibility=visibility
+                if verdict_response is None
+                else (request.response_visibility or "full"),
                 audio_artifact=audio_artifact,
                 code=conflict_code,
             )
@@ -2803,8 +2817,8 @@ def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
         database.execute(
             "INSERT INTO assessment_verdicts (verdict_id, submission_id, claim_id, raw_score, "
             "rubric_json, assessor_kind, assessor, confidence, response_visibility, "
-            "response_excerpt, response_hash, received_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "response_excerpt, response_hash, received_at, requested_visibility) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 verdict_id,
                 plan.submission_id,
@@ -2822,6 +2836,9 @@ def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
                 else plan.verdict_response[1],
                 plan.response_hash,
                 now,
+                # What the judge asked to keep, apart from what this row kept: the only
+                # account of the request a held written answer's verdict has at resume.
+                plan.request.response_visibility,
             ],
         )
     if plan.action == HOLD:

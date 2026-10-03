@@ -269,6 +269,7 @@ def test_c5_submissions_migrate_to_recordings_and_judged_ones_gain_their_verdict
         "no_pending_submission_on_a_closed_run": "ok",
         "judged_submissions_have_an_applied_verdict": "ok",
         "result_observation_times": "ok",
+        "verdict_response_shape": "ok",
     }
 
 
@@ -855,4 +856,77 @@ def test_a_written_answers_result_resting_on_a_recording_is_reported(
     assert (
         f"{verdict_id} (a written answer's result rests on a recording)"
         in (checks["applied_verdicts_name_their_result"].context["verdicts"])
+    )
+
+
+def test_a_verdicts_request_outside_the_vocabulary_is_refused_and_reported(
+    speaking: PolishWorkspace,
+) -> None:
+    """R12: `requested_visibility` is a single-column CHECK on the table, and the named
+    check re-asserts it for a restore that predates the constraint."""
+
+    _, _, verdict_id = _judged(speaking)
+    with (
+        open_writer(speaking.paths, command="test.tamper", clock=speaking.clock) as database,
+        pytest.raises(duckdb.ConstraintException),
+        database.transaction() as transaction,
+    ):
+        transaction.execute(
+            "UPDATE assessment_verdicts SET requested_visibility = 'everything' "
+            "WHERE verdict_id = ?",
+            [verdict_id],
+        )
+
+    checks = _tamper(
+        speaking,
+        ("CREATE TABLE verdicts_copy AS SELECT * FROM assessment_verdicts", []),
+        ("DROP TABLE assessment_verdicts", []),
+        ("ALTER TABLE verdicts_copy RENAME TO assessment_verdicts", []),
+        ("UPDATE assessment_verdicts SET requested_visibility = 'everything'", []),
+    )
+
+    assert checks["verdict_response_shape"].context["verdicts"] == (
+        f"{verdict_id} (requested_visibility everything)"
+    )
+
+
+def test_a_written_answers_verdict_that_keeps_its_words_is_reported(
+    speaking: PolishWorkspace,
+) -> None:
+    from linguawiki.services import assessment as assessment_service
+    from linguawiki.services import written_answers
+
+    run_id, content_id = _served_written_task(speaking)
+    handed_in = written_answers.submit(
+        speaking.paths,
+        run=run_id,
+        content_id=content_id,
+        submission_key="words-kept",
+        response="Dzień dobry, nazywam się Anna.",
+        clock=speaking.clock,
+    )
+    submission_id = handed_in.submission.submission_id
+    assessment_service.record(
+        speaking.paths,
+        run=run_id,
+        content_id=content_id,
+        score=0.5,
+        submission=submission_id,
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=speaking.clock,
+    )
+
+    checks = _tamper(
+        speaking,
+        (
+            "UPDATE assessment_verdicts SET response_visibility = 'full', "
+            "response_excerpt = 'Dzień dobry, nazywam się Anna.' WHERE submission_id = ?",
+            [submission_id],
+        ),
+    )
+
+    assert (
+        "a written answer's verdict keeps some of its words"
+        in (checks["verdict_response_shape"].context["verdicts"])
     )

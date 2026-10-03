@@ -1468,6 +1468,37 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             field="verdicts",
         )
     )
+    # 0035's single-column CHECK on `requested_visibility`, re-asserted for a restore that
+    # predates it, and R10's rule that a written answer's verdict keeps none of its words:
+    # the row is insert-only, so a copy there is one no consent withdrawal can reach.
+    misshapen_verdicts = [
+        f"{verdict_id} ({reason})"
+        for verdict_id, reason in database.query(
+            "SELECT verdict.verdict_id, CASE "
+            "  WHEN verdict.requested_visibility IS NOT NULL "
+            "    AND verdict.requested_visibility NOT IN ('withheld', 'excerpt', 'full') "
+            "    THEN 'requested_visibility ' || verdict.requested_visibility "
+            "  WHEN submission.kind = 'text' AND (verdict.response_excerpt IS NOT NULL "
+            "    OR verdict.response_visibility IS DISTINCT FROM 'withheld') "
+            "    THEN 'a written answer''s verdict keeps some of its words' "
+            "  END AS problem "
+            "FROM assessment_verdicts verdict "
+            "LEFT JOIN assessment_submissions submission "
+            "  ON submission.submission_id = verdict.submission_id "
+            "WHERE problem IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "verdict_response_shape",
+            misshapen_verdicts,
+            failed="a verdict asks for a visibility outside the vocabulary, or a verdict on a "
+            "written answer keeps some of the learner's words, which only the submission may",
+            ok="every verdict's request is known, and no verdict on a written answer keeps its "
+            "words",
+            field="verdicts",
+        )
+    )
     # A held verdict waits for a paused run to resume. On a run in any other state it can
     # never be applied, and nothing would ever say what became of it.
     stranded = [

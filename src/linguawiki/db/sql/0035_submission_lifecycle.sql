@@ -166,7 +166,14 @@ CREATE TABLE assessment_verdicts (
     ),
     response_excerpt    VARCHAR,
     response_hash       VARCHAR   CHECK (response_hash IS NULL OR length(response_hash) = 64),
-    received_at         TIMESTAMP NOT NULL
+    received_at         TIMESTAMP NOT NULL,
+    -- What the judge asked the result to keep of the answer, apart from what this row
+    -- kept: a written answer's verdict keeps none of its words (`response_visibility` is
+    -- `withheld`), and the request is how much the result may take from the submission
+    -- when the verdict is applied, now or at resume. NULL: no request was made.
+    requested_visibility VARCHAR  CHECK (
+        requested_visibility IS NULL OR requested_visibility IN ('withheld', 'excerpt', 'full')
+    )
 );
 
 -- What became of a verdict: applied, producing a result, or void, with the reason.
@@ -242,7 +249,7 @@ SELECT 'asm_' || upper(substr(sha256('lingua.0035.verdict' || submission.submiss
        submission.submission_id, NULL, result.raw_score, '{}',
        result.assessor_kind, result.assessor, result.confidence,
        result.response_visibility, result.response_excerpt, result.response_hash,
-       result.recorded_at
+       result.recorded_at, NULL
 FROM assessment_submissions submission
 JOIN assessment_results result
   ON result.run_id = submission.run_id
