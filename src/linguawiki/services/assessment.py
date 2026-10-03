@@ -4914,6 +4914,11 @@ class RunListReport(ContractModel):
     #: Whether this track lets a learner record a spoken answer, and how long a recording
     #: is kept. A page reads it before it has a run, to know which run to offer to start.
     recording: learner_service.RecordingPolicy | None = None
+    #: Whether this track keeps a written answer whole, so a judge can mark it from what
+    #: the learner typed (`placement.written_judging_permitted`). The page reads it beside
+    #: `recording.offered` to choose `machine+judged`; it has no preferences of its own to
+    #: decide that from, and a second account of the rule would be one to drift.
+    written_offered: bool = False
 
 
 def resumable_runs(
@@ -4955,6 +4960,9 @@ def resumable_runs(
             runs=tuple(run_report(database, str(row[0])) for row in kept),
             omitted=len(rows) - len(kept),
             recording=learner_service.track_recording_policy(database, track_id),
+            written_offered=written_judging_permitted(
+                learner_service.track_context(database, track_id).preferences
+            ),
         )
 
 

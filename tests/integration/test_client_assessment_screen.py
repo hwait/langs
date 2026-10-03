@@ -283,6 +283,22 @@ def test_a_fresh_page_finds_the_runs_it_can_resume_newest_first(plain: Client) -
     assert listed["omitted"] == 0
 
 
+def test_discovery_says_whether_a_judge_can_mark_the_learners_writing(
+    polish_workspace: PolishWorkspace, plain: Client
+) -> None:
+    """The page chooses `machine+judged` from this, having no preferences of its own."""
+
+    from linguawiki.services import learners as learner_service
+
+    assert plain.get("/runs").data["written_offered"] is True
+    learner_service.update_track(
+        polish_workspace.paths,
+        preferences=learner_service.TrackPreferences(transcript_retention_consent=False),
+        clock=polish_workspace.clock,
+    )
+    assert plain.get("/runs").data["written_offered"] is False
+
+
 def test_discovery_filters_by_status(plain: Client) -> None:
     _open(plain)
     paused = _open(plain)

@@ -175,7 +175,22 @@ header h1 {
   font-size: 0.9rem;
 }
 
-input[type="text"] {
+textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.note p {
+  margin: 0;
+}
+
+.note .judgements {
+  margin: 4px 0 0;
+  padding-left: 1.2em;
+}
+
+input[type="text"],
+textarea {
   font: inherit;
   padding: 10px 12px;
   border: 1px solid var(--line);

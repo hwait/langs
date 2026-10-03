@@ -1196,6 +1196,11 @@
           "track_id": {
             "title": "Track Id",
             "type": "string"
+          },
+          "written_offered": {
+            "default": false,
+            "title": "Written Offered",
+            "type": "boolean"
           }
         },
         "required": [
