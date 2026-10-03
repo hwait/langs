@@ -541,6 +541,31 @@ def test_a_submission_from_another_run_or_task_is_refused_by_name(
     assert elsewhere.payload.code == "assessment_submission_mismatch"
 
 
+def test_a_verdict_naming_a_submission_from_another_learners_run_is_refused(
+    speaking: PolishWorkspace,
+) -> None:
+    """A run belongs to one learner. The submission is resolved through the run it was
+    made in, and one from another track's run is refused by that name -- not as an answer
+    to some other task, which would send the judge looking for the right task."""
+
+    from tests.integration.test_artifact_refusals import second_track
+
+    _, _, theirs, _ = submitted(speaking, 241)
+    other = second_track(speaking)
+    run_id = assessment_service.start(
+        speaking.paths, track=other.track_id, dimensions=["reading"], clock=speaking.clock
+    ).run_id
+    task = assessment_service.next_task(speaking.paths, run=run_id, clock=speaking.clock)
+    assert isinstance(task, assessment_service.NextTaskReport)
+
+    failure = refusal(verdict, speaking, run_id, task.content_id, theirs)
+
+    assert failure.payload.code == "assessment_submission_out_of_scope"
+    assert failure.payload.details[0].reason == "another track's run"
+    assert results(speaking, run_id) == 0
+    assert submission_state(speaking, theirs) == ("pending", None)
+
+
 def test_a_held_verdict_applies_through_plan_and_write_in_a_callers_transaction(
     speaking: PolishWorkspace,
 ) -> None:
@@ -737,6 +762,38 @@ def test_an_expired_lease_is_claimable_again_and_its_late_verdict_still_lands(
     assert identical.verdict_id == late.verdict_id
     assert len(verdict_rows(speaking, submission_id)) == 1
     assert_clean(speaking)
+
+
+def test_a_claim_with_no_lease_end_reads_as_expired_rather_than_raising(
+    speaking: PolishWorkspace,
+) -> None:
+    """The column is NOT NULL; a restore that predates the constraint is how one arrives.
+    Readers -- the run report, `db check` -- must still answer."""
+
+    run_id, _, submission_id, _ = submitted(speaking, 207)
+    claim_id = claimed_one(speaking, run_id)
+    with (
+        open_writer(speaking.paths, command="test.tamper", clock=speaking.clock) as database,
+        database.transaction() as transaction,
+    ):
+        transaction.execute("CREATE TABLE claims_copy AS SELECT * FROM judging_claims")
+        transaction.execute("DROP TABLE judging_claims")
+        transaction.execute("ALTER TABLE claims_copy RENAME TO judging_claims")
+        transaction.execute(
+            "UPDATE judging_claims SET lease_expires_at = NULL WHERE claim_id = ?", [claim_id]
+        )
+
+    with open_writer(speaking.paths, command="test.read", clock=speaking.clock) as database:
+        state = judging.claim_states(database, run_id)[submission_id]
+        claimed_at = database.scalar(
+            "SELECT claimed_at FROM judging_claims WHERE claim_id = ?", [claim_id]
+        )
+
+    assert state.live_claim is None and state.attempts == 1
+    assert state.last_ended_at == claimed_at
+    report = assessment_service.report(speaking.paths, run=run_id, clock=speaking.clock)
+    assert [entry.claim_state for entry in report.outstanding_judgements] == ["unclaimed"]
+    database_check(speaking)
 
 
 def test_a_release_returns_the_submission_to_the_queue_once(speaking: PolishWorkspace) -> None:
@@ -2027,6 +2084,40 @@ def test_a_key_another_operation_used_or_a_recording_holds_is_refused(
 
     assert reused.payload.code == "idempotency_conflict"
     assert rows(writing, "SELECT count(*) FROM assessment_submissions") == [(0,)]
+
+
+def test_a_capture_id_a_written_answer_holds_is_refused_before_anything_is_staged(
+    writing: PolishWorkspace,
+) -> None:
+    """The mirror of the test above: a capture ID and a submission key are one column, so
+    a recording under a written answer's key is refused by name, with no bytes staged."""
+
+    from tests.integration.test_client_audio import permit_recording
+
+    shared = "7f9c2b1e-4a3d-4e8f-9b6a-2c5d1e0f3a4b"  # a valid capture ID, a key first
+    written_run, _, submission_id = written(writing, key=shared)
+    assessment_service.set_status(
+        writing.paths, status="abandoned", run=written_run, clock=writing.clock
+    )
+    permit_recording(writing)
+    run_id = start_spoken(writing, ("pronunciation",))
+    task = serve(writing, run_id)
+
+    failure = refusal(
+        take,
+        writing,
+        run_id,
+        task.content_id,
+        data=spoken_bytes(611),
+        identifier=shared,
+    )
+
+    assert failure.payload.code == "capture_conflict"
+    assert failure.payload.details[0].context["submission_id"] == submission_id
+    assert rows(writing, "SELECT count(*) FROM capture_stagings") == [(0,)]
+    assert rows(writing, "SELECT count(*) FROM artifacts WHERE kind = 'audio'") == [(0,)]
+    staged = writing.root / recording_service.CAPTURE_STAGING
+    assert not staged.exists() or not any(staged.iterdir())
 
 
 @pytest.mark.parametrize("consent", [None, False], ids=["excerpt-only", "declined"])
@@ -3371,6 +3462,41 @@ def test_a_lapsed_answer_blocks_nothing_and_the_next_serve_settles_it(
     after = screen_of(writing, run_id)
     assert after.outstanding_judgements == () and after.progress == "working"
     assert_clean(writing)
+
+
+@pytest.mark.parametrize("spelling", ["--content", "--content-id"])
+def test_record_and_submit_take_either_spelling_of_the_task(spelling: str) -> None:
+    from linguawiki.cli import _parser
+
+    parser = _parser()
+    recorded = parser.parse_args(["assessment", "record", spelling, "cnt_1"])
+    submitted_answer = parser.parse_args(
+        ["assessment", "submit", spelling, "cnt_1", "--submission-key", "k"]
+    )
+
+    assert recorded.content == "cnt_1"
+    assert submitted_answer.content_id == "cnt_1"
+
+
+def test_the_cli_says_a_lapsed_answer_lapsed_rather_than_unclaimed_since_nothing(
+    writing: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from linguawiki.cli import run as run_cli
+
+    run_id, _, submission_id = written(writing)
+    exhaust(writing, run_id)
+    capsys.readouterr()
+
+    code = run_cli(
+        ["assessment", "report", "--run", run_id, "--workspace", str(writing.root)],
+        clock=writing.clock,
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert f"text submission {submission_id}" in out, out
+    assert "lapsed, its judging attempts used up" in out, out
+    assert "unclaimed since" not in out
 
 
 def test_an_answer_whose_held_verdict_was_voided_is_unclaimed_since_the_voiding(

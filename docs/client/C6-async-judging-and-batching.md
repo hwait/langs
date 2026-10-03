@@ -165,11 +165,15 @@ from rows, never stored.
       `settle_lapsed(database, transaction, run_id)` runs inside every writer that touches the
       run — `claim`, `submit`, `record`, `release`, `set_status`, `finalize`, serving — before its
       own work, in its own transaction, and the writer names what it withdrew in its report's
-      `warnings` (or in the refusal's details if it then refuses). `db check` reports a pending submission whose attempts are exhausted and
-      unsettled, so a workspace nobody has touched since says so.
+      `warnings` (or in the refusal's details if it then refuses). `db check` reports a pending
+      submission whose attempts are exhausted and unsettled, so a workspace nobody has touched
+      since says so.
 - [x] **Restart recovery.** Nothing is held in memory: claims, leases, verdicts, and outcomes are
       rows, and the next invocation reads them. A server or judge restart is the expired-lease
       case.
+
+`JUDGING_POLICY`'s version lives in the exhausted withdrawal's `withdrawn_reason` for now (R20);
+a structured home is owed when the policy first changes.
 
 ## 4. The submission lifecycle
 

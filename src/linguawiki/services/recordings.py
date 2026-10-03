@@ -373,6 +373,26 @@ def _preflight(
             details=(ErrorDetail(field="run", reason="unknown run"),),
         )
     track_id = str(run[1])
+    # A capture ID and a submission key share one column and one unique index: a written
+    # answer handed in under this identifier already owns it, and binding would collide
+    # with that row after the bytes were staged. The mirror of `assessment submit` refusing
+    # a key a recording holds; checked for a resumed capture too, since an answer may have
+    # been handed in under the identifier while the capture sat staged.
+    taken = submission_by_key(database, capture_id)
+    if taken is not None and taken.kind == "text":
+        raise LinguaWikiError(
+            "capture_conflict",
+            f"capture {capture_id} is the submission key of written answer "
+            f"{taken.submission_id} to {taken.content_id} in run {taken.run_id}; a new "
+            "recording needs a new identifier",
+            details=(
+                ErrorDetail(
+                    field="capture_id",
+                    reason="a written answer's submission key",
+                    context={"submission_id": taken.submission_id, "kind": taken.kind},
+                ),
+            ),
+        )
     if not (resuming and str(run[2]) in assessment_service.RESUMABLE_STATUSES):
         assessment_service.assert_running(run_id, status=str(run[2]), action="take a recording")
     # Before the task's own status: once judged the task is also settled, and "the learner's

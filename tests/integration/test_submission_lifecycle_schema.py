@@ -979,3 +979,62 @@ def test_a_verdict_applied_when_it_arrived_that_keeps_an_excerpt_is_reported(
 
     assert allowed["verdict_response_shape"].status == "ok"
 
+
+def test_an_applied_verdict_whose_submission_is_not_judged_is_reported(
+    speaking: PolishWorkspace,
+) -> None:
+    submission_id, _, verdict_id = _judged(speaking)
+    checks = _tamper(
+        speaking,
+        *_unconstrained_submissions(),
+        (
+            "UPDATE assessment_submissions SET status = 'pending' WHERE submission_id = ?",
+            [submission_id],
+        ),
+    )
+
+    assert checks["applied_verdicts_name_their_result"].context["verdicts"] == (
+        f"{verdict_id} (its submission is pending)"
+    )
+
+
+def test_the_lifecycle_checks_require_every_table_they_read(
+    speaking: PolishWorkspace,
+) -> None:
+    """`CHECK_REQUIREMENTS` is what keeps `db check` from raising on a database missing a
+    table: a check whose tables are not all there is skipped. So the requirement must name
+    every table the checks read -- the batch tables and the run's tasks included -- and
+    this reads the SQL they actually run rather than trusting a list kept by hand."""
+
+    import re
+
+    judged_run(speaking, seed=27)
+    pending_task(speaking, seed=28)
+
+    class Recording:
+        def __init__(self, database: Any) -> None:
+            self._database = database
+            self.statements: list[str] = []
+
+        def __getattr__(self, name: str) -> Any:
+            attribute = getattr(self._database, name)
+            if name not in ("query", "one", "scalar"):
+                return attribute
+
+            def recorded(sql: str, *args: Any, **kwargs: Any) -> Any:
+                self.statements.append(sql)
+                return attribute(sql, *args, **kwargs)
+
+            return recorded
+
+    with open_writer(speaking.paths, command="test.read", clock=speaking.clock) as database:
+        recording = Recording(database)
+        integrity._submission_lifecycle_checks(recording)
+
+    # A table, not a column: `IS DISTINCT FROM submission.artifact_id` names no table.
+    read = set(
+        re.findall(r"\b(?:FROM|JOIN)\s+([a-z_]+)(?![a-z_.])", " ".join(recording.statements))
+    )
+    required = dict(integrity.CHECK_REQUIREMENTS)["submission_lifecycle"]
+    assert {"assessment_batches", "assessment_batch_tasks", "assessment_run_tasks"} <= read
+    assert read <= set(required), read - set(required)

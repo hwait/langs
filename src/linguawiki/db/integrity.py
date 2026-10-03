@@ -1446,6 +1446,13 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             # recording would invalidate a judgement of writing.
             "  WHEN submission.kind = 'text' AND result.audio_artifact_id IS NOT NULL "
             "    THEN 'a written answer''s result rests on a recording' "
+            # The converse of `judged_submissions_have_an_applied_verdict`: applying a
+            # verdict judges its submission in the same transaction, and `judged` is
+            # terminal -- nothing supersedes or withdraws a submission once judged -- so an
+            # applied verdict on one in any other state credits an answer still waiting.
+            # After the mismatches above, which name the more specific fault.
+            "  WHEN submission.status IS DISTINCT FROM 'judged' "
+            "    THEN 'its submission is ' || coalesce(submission.status, 'missing a status') "
             "  WHEN (SELECT count(*) FROM assessment_verdict_outcomes other "
             "    WHERE other.outcome = 'applied' AND other.result_id = outcome.result_id) > 1 "
             "    THEN 'its result is claimed by another verdict too' "
@@ -1463,8 +1470,8 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "applied_verdicts_name_their_result",
             unmatched,
             failed="an applied verdict names a result that is missing, or that answers "
-            "something other than its submission",
-            ok="every applied verdict names its own submission's result",
+            "something other than its submission, or its submission is not judged",
+            ok="every applied verdict names its own judged submission's result",
             field="verdicts",
         )
     )
@@ -3466,6 +3473,10 @@ CHECK_REQUIREMENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "assessment_results",
             "assessment_runs",
             "schema_migrations",
+            # The batch check joins all three, and the lapse check reads the run's tasks.
+            "assessment_batches",
+            "assessment_batch_tasks",
+            "assessment_run_tasks",
         ),
     ),
     (

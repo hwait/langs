@@ -572,7 +572,9 @@ def _assessment_parser(subcommands: Any) -> None:
     record = actions.add_parser("record", help="score one served task")
     record.add_argument("--run")
     _add_track_selector(record)
-    record.add_argument("--content", required=True)
+    # Both spellings, on `record` and `submit` alike: a judge moving from handing in an
+    # answer to scoring it should not have to remember which command took which.
+    record.add_argument("--content", "--content-id", dest="content", required=True)
     # Optional now: a machine-scorable task is scored from the key the run snapshotted,
     # and a supplied score is the compatibility path rather than the default one.
     record.add_argument("--score", type=float)
@@ -616,7 +618,7 @@ def _assessment_parser(subcommands: Any) -> None:
     submit = actions.add_parser("submit", help="hand in a written answer for a judge to score")
     submit.add_argument("--run")
     _add_track_selector(submit)
-    submit.add_argument("--content-id", required=True)
+    submit.add_argument("--content-id", "--content", dest="content_id", required=True)
     submit.add_argument(
         "--submission-key",
         required=True,
@@ -2304,6 +2306,10 @@ def _progress_lines(
             on = "verdict held until the run resumes"
         elif entry.claim_state == "claimed":
             on = f"claimed by {entry.claimed_by} until {entry.claimed_until}"
+        elif entry.claim_state == "lapsed":
+            # Every attempt used and none live: nobody may claim it, and the next write to
+            # the run withdraws it. "Unclaimed since" would invite a judge to take it.
+            on = "lapsed, its judging attempts used up; the next write to the run withdraws it"
         else:
             on = f"unclaimed since {entry.unclaimed_since}"
         lines.append(

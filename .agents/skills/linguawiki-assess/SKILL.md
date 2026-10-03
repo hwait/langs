@@ -18,7 +18,7 @@ linguawiki assessment next     --workspace <path> [--run <id>] \
   [--batch --idempotency-key <key>] --format json
 linguawiki assessment submit   --workspace <path> [--run <id>] --content-id <id> \
   --submission-key <key> (--response "<answer>" | --response-file <path>) --format json
-linguawiki assessment record   --workspace <path> --content <id> \
+linguawiki assessment record   --workspace <path> --content-id <id> \
   [--response "<what the learner answered>" | --response-file <path>] [--score <0..1>] \
   [--response-visibility withheld|excerpt|full] [--rubric rubric.json] \
   [--audio-artifact <artifact-id>] [--submission <id> --claim <id>] \
@@ -101,7 +101,7 @@ hold no database connection while you do.
    The command returns before you judge. Entries the CLI could not hand out are listed under
    `withdrawn` (with why) and `waiting`.
 2. Judge it against the snapshotted rubric.
-3. `assessment record --content <id> --submission <submission_id> --claim <claim_id>
+3. `assessment record --content-id <id> --submission <submission_id> --claim <claim_id>
    --idempotency-key <claim_id> --score <0..1> --rubric <file> --assessor-kind ai
    --assessor <your name> --confidence low|medium`. The claim ID is the key, so a retry
    after a lost response replays rather than scoring twice. Pass no `--response` for a
@@ -143,7 +143,7 @@ without them: `finalize --exclude-outstanding`, which withdraws them as
 observations, so offer the choice; do not make it. `abandon` withdraws them the same way. A
 verdict arriving after the run closes is refused against it, never applied.
 
-Each claim is an attempt. After three attempts end with no verdict, the submission is
+Each claim is an attempt. After the attempts run out with no verdict, the submission is
 withdrawn as `assessment_judging_exhausted`: the learner loses that observation, and the
 dimension serves another task. Relay that; it is not a learner error.
 

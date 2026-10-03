@@ -2921,7 +2921,11 @@ def plan_verdict(
             request.submission_id,
             run_id=run_id,
             content_id=content_id,
-            track_id=request.track_id,
+            # The run's own track, never only the one a caller selected: a run belongs to
+            # one learner, and a submission from another learner's run is out of scope
+            # whether or not `--track` was passed. Keyed on the caller's selection, this
+            # fired only when one was, and otherwise refused as an answer to another task.
+            track_id=str(row[1]),
         )
     )
     held_row = (
@@ -4040,7 +4044,9 @@ def _apply_held_verdicts(
     purged recording's the purge. A `Settlement` (the recording can no longer be heard)
     is written as one, withdrawing the submission too. A refusal that leaves the
     submission pending -- its verdict was wrong, not its answer -- voids only the verdict,
-    and the answer goes back to waiting for a judge.
+    and the answer returns to the queue, claimable from the voiding; or, if its judging
+    attempts are already used up, it is `lapsed`, and the run's next writer withdraws it
+    as exhausted.
 
     Returns what was applied and every verdict voided.
     """

@@ -112,10 +112,17 @@ def claim_states(
 
     The clock is read only when there is a claim to compare it with, so a run nobody has
     claimed from costs no clock read.
+
+    A claim with no `lease_expires_at` -- the column is NOT NULL, so only a restore or a
+    hand repair leaves one -- is treated as expired, which is what SQL's `_LIVE` makes of
+    it too (`NULL > now` is not true). Having no recorded end, it ended no later than the
+    moment it was made, as far as anybody can tell. A reader that raised here would take
+    the run report and `db check` down with it.
     """
 
     rows = database.query(
         "SELECT claim.submission_id, claim.claim_id, claim.judge, claim.lease_expires_at, "
+        "claim.claimed_at, "
         "(SELECT min(release.released_at) FROM judging_releases release "
         "WHERE release.claim_id = claim.claim_id), "
         "(SELECT min(verdict.received_at) FROM assessment_verdicts verdict "
@@ -129,13 +136,19 @@ def claim_states(
         return {}
     moment = now if now is not None else database.now()
     states: dict[str, ClaimState] = {}
-    for submission_id, claim_id, judge, expires, released, judged in rows:
+    for submission_id, claim_id, judge, expires, claimed_at, released, judged in rows:
         before = states.get(str(submission_id), UNCLAIMED)
         # The Python face of `_LIVE`: a lease still running, no release, no verdict.
-        live = expires > moment and released is None and judged is None
+        live = expires is not None and expires > moment and released is None and judged is None
         # A claim released after its lease ran out ended when the lease did; the earliest
         # of the three is when the judge stopped holding it.
-        ended = None if live else min(at for at in (expires, released, judged) if at is not None)
+        ended = (
+            None
+            if live
+            else min(
+                (at for at in (expires, released, judged) if at is not None), default=claimed_at
+            )
+        )
         states[str(submission_id)] = ClaimState(
             attempts=before.attempts + 1,
             live_claim=str(claim_id) if live else before.live_claim,
