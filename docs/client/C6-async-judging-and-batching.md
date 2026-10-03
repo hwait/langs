@@ -152,7 +152,9 @@ from rows, never stored.
       `assessment_verdict_conflict` unless its content is identical (§5).
 - [x] **Retry.** `assessment release --claim <id> --reason …` returns a submission to the queue
       (judge crashed, timed out). An expired lease is the same thing, derived from time with no
-      write. Attempts = claims made for the submission.
+      write. Attempts = claims made for the submission. The reason is kept as the track's
+      retention allows; a repeat is compared by `(terminal, code, reason_hash)`, the SHA-256 of
+      the reason as it arrived, so neither a placeholder nor a consent change decides it.
 - [x] **Terminal failure.** `assessment release --claim … --terminal --code <code> --reason …`
       withdraws the submission through `withdrawal.withdraw_submission` (task skipped, dimension
       unblocked, reason on the submission). Exhausting `JUDGING_POLICY.max_attempts` (= 3; versioned

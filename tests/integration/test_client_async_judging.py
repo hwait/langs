@@ -8,6 +8,7 @@ the same commit that received it, and never credited twice however often it is d
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -433,7 +434,7 @@ def test_a_track_forbidding_retention_keeps_no_free_text_from_the_verdict(
             code="assessment_audio_unintelligible",
             reason=quoting,
         )
-        # A retry of the same release is compared in its retained form, and replays.
+        # A retry of the same release is compared by its digest, and replays.
         assert release(speaking, claims[submission_id], reason=quoting).replayed
         again = claimed_one(speaking, run_id)
         landed = verdict(
@@ -660,6 +661,59 @@ def test_a_claim_naming_another_learners_run_is_refused(speaking: PolishWorkspac
     assert failure.payload.code == "assessment_run_out_of_scope"
     assert _written(speaking) == before
     assert submission_state(speaking, theirs) == ("pending", None)
+
+
+def _declining(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Substitute a track that declined transcript retention, where `release` reads it."""
+
+    original = learner_service.track_context
+
+    def declining(database: Any, track_id: str) -> Any:
+        record = original(database, track_id)
+        preferences = {**record.preferences, "transcript_retention_consent": False}
+        return record.model_copy(update={"preferences": preferences})
+
+    monkeypatch.setattr(learner_service, "track_context", declining)
+
+
+def test_a_different_release_reason_on_a_declining_track_is_a_conflict(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both reasons are kept as the placeholder, so compared by what was kept they were
+    one release. Compared by the digest of what arrived, the second is a different
+    release, and is refused as one."""
+
+    run_id, _, _, _ = submitted(speaking, 251)
+    claim_id = claimed_one(speaking, run_id)
+    _declining(monkeypatch)
+    first = release(speaking, claim_id, reason="the learner said 'dzien dobry' and stopped")
+
+    failure = refusal(release, speaking, claim_id, reason="the recording cut out")
+
+    assert first.reason == judging.RELEASE_REASON_WITHHELD
+    assert failure.payload.code == "assessment_claim_released"
+    assert rows(speaking, "SELECT count(*) FROM judging_releases") == [(1,)]
+
+
+def test_the_same_release_reason_after_a_consent_change_replays(
+    speaking: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept as an excerpt, then retried after the track declined retention: the kept form
+    would now be the placeholder, but the reason that arrived is the same, so it replays."""
+
+    reason = "the learner said 'dzien dobry' and stopped"
+    run_id, _, _, _ = submitted(speaking, 252)
+    claim_id = claimed_one(speaking, run_id)
+    first = release(speaking, claim_id, reason=reason)
+    assert first.reason != judging.RELEASE_REASON_WITHHELD
+    _declining(monkeypatch)
+
+    again = release(speaking, claim_id, reason=reason)
+
+    assert again.replayed and again.reason == first.reason
+    assert rows(speaking, "SELECT reason_hash FROM judging_releases") == [
+        (hashlib.sha256(reason.encode("utf-8")).hexdigest(),)
+    ]
 
 
 def test_a_held_verdict_applies_through_plan_and_write_in_a_callers_transaction(

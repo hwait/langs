@@ -131,12 +131,19 @@ CREATE TABLE judging_claims (
 --
 -- One release per claim, so the claim is the key. A terminal release withdraws the
 -- submission, and the code it withdrew with is part of the contract, so it is required.
+--
+-- `reason` is the judge's prose as the track's retention keeps it, which can be a bounded
+-- excerpt or a placeholder; `reason_hash` is the SHA-256 of the reason as it *arrived*,
+-- and is what a retry is compared by. Compared by the retained text, two different
+-- reasons kept as the same placeholder replayed as one release, and the same reason
+-- after a consent change conflicted with itself.
 CREATE TABLE judging_releases (
     claim_id    VARCHAR   NOT NULL PRIMARY KEY CHECK (starts_with(claim_id, 'asm_')),
     released_at TIMESTAMP NOT NULL,
     terminal    BOOLEAN   NOT NULL,
     code        VARCHAR   CHECK (code IS NULL OR length(trim(code)) > 0),
     reason      VARCHAR   NOT NULL CHECK (length(trim(reason)) > 0),
+    reason_hash CHAR(64)  NOT NULL CHECK (length(reason_hash) = 64),
     CHECK (NOT terminal OR code IS NOT NULL)
 );
 

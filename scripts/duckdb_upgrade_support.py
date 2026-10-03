@@ -1021,10 +1021,11 @@ def _judging_rows(paths: object) -> None:
             "lease_expires_at) VALUES (?, ?, ?, ?, ?)",
             [claim_id, submission_id, "upgrade-fixture-judge", now, now + timedelta(minutes=10)],
         )
+        reason = "the judge restarted before it listened"
         tx.execute(
-            "INSERT INTO judging_releases (claim_id, released_at, terminal, code, reason) "
-            "VALUES (?, ?, FALSE, NULL, ?)",
-            [claim_id, now, "the judge restarted before it listened"],
+            "INSERT INTO judging_releases (claim_id, released_at, terminal, code, reason, "
+            "reason_hash) VALUES (?, ?, FALSE, NULL, ?, ?)",
+            [claim_id, now, reason, hashlib.sha256(reason.encode("utf-8")).hexdigest()],
         )
         batch_id = str(AssessmentId.new())
         tx.execute(
