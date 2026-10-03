@@ -401,12 +401,18 @@ def test_a_track_forbidding_retention_keeps_no_free_text_from_the_verdict(
     transcript retention -- so the consent the verdict is planned under is substituted,
     exactly where `plan_verdict` reads it. The rule under test is the rubric's: a judge's
     note quoting the learner is the learner's words, and a track that declined keeping
-    them keeps none of it, on the verdict or on the result it produces."""
+    them keeps none of it, on the verdict or on the result it produces.
 
-    run_id, content_id, submission_id, _ = submitted(speaking, 116 if paused else 121)
+    A release reason is the same prose by the same judge, so the rule covers it too: the
+    release row and a terminal release's `withdrawn_reason` keep the placeholder, and the
+    report echoes what was kept."""
+
+    run_id, answered = two_submitted(speaking, 116 if paused else 121)
+    (content_id, submission_id, _), (_, given_up, _) = answered
     if paused:
         pause(speaking, run_id)
     original = learner_service.track_context
+    quoting = "the learner only said 'dzien dobry, jak sie masz' and stopped"
 
     def declining(database: Any, track_id: str) -> Any:
         record = original(database, track_id)
@@ -415,8 +421,36 @@ def test_a_track_forbidding_retention_keeps_no_free_text_from_the_verdict(
 
     with monkeypatch.context() as patch:
         patch.setattr(learner_service, "track_context", declining)
-        landed = verdict(speaking, run_id, content_id, submission_id, rubric=RUBRIC_WITH_WORDS)
+        claims = {
+            entry.submission.submission_id: entry.claim_id
+            for entry in claim(speaking, run_id).claimed
+        }
+        returned = release(speaking, claims[submission_id], reason=quoting)
+        withdrawn = release(
+            speaking,
+            claims[given_up],
+            terminal=True,
+            code="assessment_audio_unintelligible",
+            reason=quoting,
+        )
+        # A retry of the same release is compared in its retained form, and replays.
+        assert release(speaking, claims[submission_id], reason=quoting).replayed
+        again = claimed_one(speaking, run_id)
+        landed = verdict(
+            speaking, run_id, content_id, submission_id, rubric=RUBRIC_WITH_WORDS, claim=again
+        )
 
+    assert returned.reason == withdrawn.reason == judging.RELEASE_REASON_WITHHELD
+    assert returned.returned_to_queue and withdrawn.submission_status == "withdrawn"
+    assert rows(speaking, "SELECT DISTINCT reason FROM judging_releases") == [
+        (judging.RELEASE_REASON_WITHHELD,)
+    ]
+    assert rows(
+        speaking,
+        "SELECT withdrawn_code, withdrawn_reason FROM assessment_submissions "
+        "WHERE submission_id = ?",
+        [given_up],
+    ) == [("assessment_audio_unintelligible", judging.RELEASE_REASON_WITHHELD)]
     assert landed.held is paused
     expected = (
         '{"dimensions": [{"name": "accuracy", "note": null, "score": 0.5}, '

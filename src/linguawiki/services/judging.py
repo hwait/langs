@@ -28,6 +28,7 @@ Every withdrawal here goes through `withdrawal.settle`, the one writer of settle
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -39,6 +40,7 @@ from linguawiki.ids import AssessmentId, EventId
 from linguawiki.models import ContractModel
 from linguawiki.paths import WorkspacePaths
 from linguawiki.services import assessment as assessment_service
+from linguawiki.services import evidence as evidence_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import recordings as recording_service
 from linguawiki.services.assessment import WithdrawnSubmission
@@ -833,6 +835,31 @@ def _release_report(
     )
 
 
+#: What a release keeps in place of a reason the track's consent keeps none of. The column
+#: is non-blank by CHECK, and an empty string would read as a judge who said nothing.
+RELEASE_REASON_WITHHELD = "reason withheld under the track's retention policy"
+
+
+def retained_release_reason(reason: str, *, preferences: Mapping[str, object]) -> str:
+    """A judge's release reason as the track's consent allows it to be kept.
+
+    The reason is the judge's prose, and a judge explaining why it gave up may quote the
+    learner ("they only said 'dzien dobry'"). It is therefore free text under the rule
+    `retain_rubric` applies to every invented prose field -- `evidence.retain_response` with
+    no request: a bounded excerpt by default and under consent, nothing where the track
+    declined transcript retention. Nothing is stored as `RELEASE_REASON_WITHHELD`, so the
+    row still satisfies its CHECK and says why it is silent. Applying it twice changes
+    nothing, so a retry is compared in this form.
+    """
+
+    _visibility, kept, _digest = evidence_service.retain_response(
+        reason, requested=None, preferences=preferences
+    )
+    if kept is None or not kept.strip():
+        return RELEASE_REASON_WITHHELD
+    return kept
+
+
 def release(
     paths: WorkspacePaths,
     *,
@@ -892,6 +919,15 @@ def release(
         )
     with open_writer(paths, command=command, clock=clock or SystemClock()) as database:
         submission_id, run_id, _judge = _claim_row(database, claim)
+        # Retained where it arrives, before it is compared, stored, or echoed: the release
+        # row and a terminal release's `withdrawn_reason` both carry it, and the report
+        # reads it back from the row.
+        track_id = str(
+            database.scalar("SELECT track_id FROM assessment_runs WHERE run_id = ?", [run_id])
+        )
+        reason = retained_release_reason(
+            reason, preferences=learner_service.track_context(database, track_id).preferences
+        )
         lapsed = sweep_lapsed(database, run_id, command=command, actor=actor, sparing_claim=claim)
         withdrawn = list(lapsed)
 
@@ -1014,6 +1050,7 @@ __all__ = [
     "JUDGING_POLICY",
     "MAXIMUM_LEASE_SECONDS",
     "RELEASE_COMMAND",
+    "RELEASE_REASON_WITHHELD",
     "RESERVED_RELEASE_CODES",
     "RESERVED_RELEASE_PREFIXES",
     "UNCLAIMED",
@@ -1034,6 +1071,7 @@ __all__ = [
     "release",
     "released_refusal",
     "reserved_code",
+    "retained_release_reason",
     "settled_warnings",
     "sweep_lapsed",
     "with_settled",
