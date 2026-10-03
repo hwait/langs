@@ -1,7 +1,7 @@
 ---
 title: "C6 — Submission lifecycle and round-batching"
 stage: C6
-status: ready
+status: shipped
 depends_on: [C4, C5]
 ---
 
@@ -417,7 +417,7 @@ Browser
 
 ## Gate
 
-- [ ] Release gate, because this stage adds a migration, routes, and CLI commands:
+- [x] Release gate, because this stage adds a migration, routes, and CLI commands:
       `./.tools/uv run python scripts/verify.py`. The OpenAPI document, CLI snapshots, and the
       schema-version snapshot move; regenerate them and review the diff rather than accepting it.
 
