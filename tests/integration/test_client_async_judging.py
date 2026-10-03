@@ -566,6 +566,102 @@ def test_a_verdict_naming_a_submission_from_another_learners_run_is_refused(
     assert submission_state(speaking, theirs) == ("pending", None)
 
 
+def _written(workspace: PolishWorkspace) -> tuple[Any, ...]:
+    return (
+        rows(workspace, "SELECT count(*) FROM assessment_verdicts")[0][0],
+        rows(workspace, "SELECT count(*) FROM assessment_results")[0][0],
+        rows(workspace, "SELECT count(*) FROM domain_events")[0][0],
+        rows(workspace, "SELECT count(*) FROM judging_claims")[0][0],
+    )
+
+
+def test_a_verdict_selecting_one_track_cannot_reach_another_learners_submission(
+    speaking: PolishWorkspace,
+) -> None:
+    """`--track A --submission <B's>` with no `--run`: the run is derived from the
+    submission, and is B's. The caller's track is compared with it before anything is
+    settled or written, so a verdict can never land in a learner the caller did not name."""
+
+    from tests.integration.test_artifact_refusals import second_track
+
+    _, content_id, theirs, _ = submitted(speaking, 242)
+    other = second_track(speaking)
+    before = _written(speaking)
+
+    failure = refusal(
+        assessment_service.record,
+        speaking.paths,
+        track=other.track_id,
+        content_id=content_id,
+        submission=theirs,
+        score=0.75,
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        idempotency_key="cross-learner",
+        clock=speaking.clock,
+    )
+
+    assert failure.payload.code == "assessment_submission_out_of_scope"
+    assert failure.payload.details[0].reason == "another track's run"
+    assert _written(speaking) == before
+    assert submission_state(speaking, theirs) == ("pending", None)
+
+
+def test_a_verdict_naming_another_learners_run_under_ones_own_track_is_refused(
+    speaking: PolishWorkspace,
+) -> None:
+    """The same, with B's run named as well: `resolve_run` refuses it by whose run it is."""
+
+    from tests.integration.test_artifact_refusals import second_track
+
+    run_id, content_id, theirs, _ = submitted(speaking, 243)
+    owner = rows(speaking, "SELECT track_id FROM assessment_runs WHERE run_id = ?", [run_id])
+    other = second_track(speaking)
+    before = _written(speaking)
+
+    failure = refusal(
+        assessment_service.record,
+        speaking.paths,
+        track=other.track_id,
+        run=run_id,
+        content_id=content_id,
+        submission=theirs,
+        score=0.75,
+        assessor_kind="ai",
+        assessor="synthetic-ai-judge",
+        clock=speaking.clock,
+    )
+
+    assert failure.payload.code == "assessment_run_out_of_scope"
+    assert failure.payload.details[0].context == {"track": owner[0][0]}
+    assert _written(speaking) == before
+    assert submission_state(speaking, theirs) == ("pending", None)
+
+
+def test_a_claim_naming_another_learners_run_is_refused(speaking: PolishWorkspace) -> None:
+    """Every command taking a track and a run goes through `resolve_run`, so the guard
+    holds for a command that never names a submission."""
+
+    from tests.integration.test_artifact_refusals import second_track
+
+    run_id, _, theirs, _ = submitted(speaking, 244)
+    other = second_track(speaking)
+    before = _written(speaking)
+
+    failure = refusal(
+        judging.claim,
+        speaking.paths,
+        judge="synthetic-ai-judge",
+        run=run_id,
+        track=other.track_id,
+        clock=speaking.clock,
+    )
+
+    assert failure.payload.code == "assessment_run_out_of_scope"
+    assert _written(speaking) == before
+    assert submission_state(speaking, theirs) == ("pending", None)
+
+
 def test_a_held_verdict_applies_through_plan_and_write_in_a_callers_transaction(
     speaking: PolishWorkspace,
 ) -> None:

@@ -435,8 +435,30 @@ def _run_row(database: Database, run_id: str) -> Sequence[Any]:
 
 
 def resolve_run(database: Database, run: str | None, *, track_id: str | None = None) -> str:
+    """The run a command acts on, refused unless it belongs to the track the caller named.
+
+    A run belongs to one learner. The ownership check lives here, the lowest entry point,
+    because every command that takes both a track and a run comes through it: checking only
+    that a named run exists let `--track A --run <B's run>` act on learner B, and a command
+    added later must not have to remember the check to be safe.
+    """
+
     if run is not None:
-        return str(_run_row(database, run)[0])
+        row = _run_row(database, run)
+        if track_id is not None and str(row[1]) != track_id:
+            raise LinguaWikiError(
+                "assessment_run_out_of_scope",
+                f"{run} is a run on track {row[1]}, not on track {track_id}; name a run "
+                "of this track, or select the track the run belongs to",
+                details=(
+                    ErrorDetail(
+                        field="run",
+                        reason="another track's run",
+                        context={"track": str(row[1])},
+                    ),
+                ),
+            )
+        return str(row[0])
     parameters: list[object] = []
     clause = "WHERE status IN ('in-progress', 'paused')"
     if track_id is not None:
@@ -2557,7 +2579,6 @@ class VerdictRequest:
     audio_artifact: str | None = None
     submission_id: str | None = None
     claim_id: str | None = None
-    track_id: str | None = None
     actor: str = DEFAULT_ACTOR
     keyed: bool = False
     applying: str | None = None
@@ -3602,6 +3623,23 @@ def record(
         # (`plan_verdict` refuses a mismatch by name).
         if submission is not None and run is None:
             run = _submission_run(database, submission)
+            # Derived, so the caller never named this run: a submission made in another
+            # learner's run is refused as the submission it is, before anything is settled
+            # or written. `resolve_run` would refuse it too, but naming a run the caller
+            # never mentioned would send them looking for where they passed it.
+            owner = str(_run_row(database, run)[1])
+            if track_id is not None and owner != track_id:
+                raise LinguaWikiError(
+                    "assessment_submission_out_of_scope",
+                    f"{submission} was made in another learner's run, not on track {track_id}",
+                    details=(
+                        ErrorDetail(
+                            field="submission",
+                            reason="another track's run",
+                            context={"track": owner},
+                        ),
+                    ),
+                )
         run_id = resolve_run(database, run, track_id=track_id)
         # Every writer touching the run settles what has lapsed before its own work. Not the
         # submission this verdict's own (unreleased) claim was for: an expired lease is
@@ -3682,7 +3720,6 @@ def record(
                     audio_artifact=audio_artifact,
                     submission_id=submission,
                     claim_id=claim,
-                    track_id=track_id,
                     actor=actor,
                     keyed=idempotency_key is not None,
                 ),
