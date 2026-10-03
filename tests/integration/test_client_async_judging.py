@@ -2672,6 +2672,88 @@ def test_a_batched_run_serves_what_one_at_a_time_serves(
     assert_clean(polish_workspace)
 
 
+def test_an_asynchronously_judged_run_estimates_what_a_synchronous_one_does(
+    polish_workspace: PolishWorkspace, twin: PolishWorkspace
+) -> None:
+    """The plan's "Done when": judging elsewhere and later changes when a verdict lands,
+    not what it is evidence of. One run is judged through the whole C6 lifecycle -- claimed,
+    one verdict applied as it arrives, the run paused, the other verdict held and applied
+    at resume -- and its twin records the same answers synchronously with `record`. The
+    posteriors, and so the next task each run serves, are the same."""
+
+    from tests.integration.test_client_audio import judge, permit_recording
+
+    def answered(workspace: PolishWorkspace) -> tuple[str, list[tuple[Any, str]]]:
+        permit_recording(workspace)
+        run_id = start_spoken(workspace)
+        taken = []
+        for seed in (501, 502):
+            task = serve(workspace, run_id)
+            capture = take(workspace, run_id, task.content_id, data=spoken_bytes(seed))
+            assert capture.artifact_id is not None
+            taken.append((task, capture.artifact_id))
+        return run_id, taken
+
+    asynchronous, async_tasks = answered(polish_workspace)
+    synchronous, sync_tasks = answered(twin)
+    assert [task.stable_key for task, _ in async_tasks] == [
+        task.stable_key for task, _ in sync_tasks
+    ]
+    assert len({task.dimension for task, _ in async_tasks}) == 2
+
+    claims = {
+        entry.submission.submission_id: entry.claim_id
+        for entry in claim(polish_workspace, asynchronous).claimed
+    }
+    submissions = {
+        str(content_id): str(submission_id)
+        for content_id, submission_id in rows(
+            polish_workspace,
+            "SELECT content_id, submission_id FROM assessment_submissions WHERE run_id = ?",
+            [asynchronous],
+        )
+    }
+    (first, _), (second, _) = async_tasks
+    immediate = verdict(
+        polish_workspace,
+        asynchronous,
+        first.content_id,
+        submissions[first.content_id],
+        score=fixed_score(first.stable_key),
+        claim=claims[submissions[first.content_id]],
+    )
+    assert not immediate.held
+    pause(polish_workspace, asynchronous)
+    held = verdict(
+        polish_workspace,
+        asynchronous,
+        second.content_id,
+        submissions[second.content_id],
+        score=fixed_score(second.stable_key),
+        claim=claims[submissions[second.content_id]],
+    )
+    assert held.held
+    resumed = resume(polish_workspace, asynchronous)
+    assert [entry.verdict_id for entry in resumed.applied_verdicts] == [held.verdict_id]
+
+    for task, artifact_id in sync_tasks:
+        judge(
+            twin,
+            synchronous,
+            task.content_id,
+            artifact_id,
+            score=fixed_score(task.stable_key),
+        )
+
+    estimated = run_estimates(polish_workspace, asynchronous)
+    # Both answers folded in, one per dimension -- not two runs that agree on nothing.
+    assert sum(int(row[2]) for row in estimated) == 2
+    assert estimated == run_estimates(twin, synchronous)
+    assert serve(polish_workspace, asynchronous).stable_key == serve(twin, synchronous).stable_key
+    assert_clean(polish_workspace)
+    assert_clean(twin)
+
+
 def test_two_dimensions_drawing_on_one_content_family_serve_what_the_sequential_path_would(
     polish_workspace: PolishWorkspace, twin: PolishWorkspace
 ) -> None:
