@@ -299,6 +299,14 @@
             "title": "Exhausted",
             "type": "array"
           },
+          "outstanding": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Outstanding",
+            "type": "array"
+          },
           "replayed": {
             "default": false,
             "title": "Replayed",
@@ -314,14 +322,6 @@
               "$ref": "#/components/schemas/BatchTask"
             },
             "title": "Tasks",
-            "type": "array"
-          },
-          "waiting": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Waiting",
             "type": "array"
           },
           "warnings": {
@@ -774,7 +774,8 @@
             "enum": [
               "unclaimed",
               "claimed",
-              "held"
+              "held",
+              "lapsed"
             ],
             "title": "Claim State",
             "type": "string"
@@ -820,10 +821,16 @@
             "title": "Dimension"
           },
           "kind": {
+            "enum": [
+              "recording",
+              "text"
+            ],
             "title": "Kind",
             "type": "string"
           },
           "status": {
+            "const": "pending",
+            "default": "pending",
             "title": "Status",
             "type": "string"
           },
@@ -853,7 +860,6 @@
           "submission_id",
           "content_id",
           "kind",
-          "status",
           "claim_state"
         ],
         "title": "OutstandingJudgement",

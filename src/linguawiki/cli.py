@@ -2526,11 +2526,11 @@ def _batch_lines(batch: assessment_service.BatchReport) -> str:
         f"({entry.task.modality}, {entry.task.level_code}) {entry.content_id}: {entry.state}"
         for entry in batch.tasks
     )
-    if batch.waiting:
-        lines.append(f"waiting: {', '.join(batch.waiting)}")
+    if batch.outstanding:
+        lines.append(f"holding a task already: {', '.join(batch.outstanding)}")
     if batch.exhausted:
         lines.append(f"exhausted: {', '.join(batch.exhausted)}")
-    if not batch.tasks and not batch.waiting:
+    if not batch.tasks and not batch.outstanding:
         lines.append("nothing to serve: no open dimension is free")
     return "\n".join(lines)
 

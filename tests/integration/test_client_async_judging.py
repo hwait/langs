@@ -2510,7 +2510,7 @@ def batched_sequence(workspace: PolishWorkspace, run_id: str) -> dict[str, list[
         report = batch(workspace, run_id, f"round-{round_number}")
         if not report.tasks:
             return served
-        assert not report.waiting
+        assert not report.outstanding
         for entry in report.tasks:
             served.setdefault(entry.dimension, []).append(entry.task.stable_key)
             answer(workspace, run_id, entry.task)
@@ -2612,7 +2612,7 @@ def test_two_dimensions_drawing_on_one_content_family_serve_what_the_sequential_
         assert first_two[0] != first_two[1], dimension
 
 
-def test_a_batch_serves_only_free_dimensions_and_reports_the_rest_waiting(
+def test_a_batch_serves_only_free_dimensions_and_reports_the_rest_outstanding(
     writing: PolishWorkspace,
 ) -> None:
     run_id = assessment_service.start(
@@ -2631,7 +2631,7 @@ def test_a_batch_serves_only_free_dimensions_and_reports_the_rest_waiting(
     second = batch(writing, run_id, "round-2")
 
     assert [entry.dimension for entry in second.tasks] == ["reading"]
-    assert second.waiting == ("writing",) and second.exhausted == ()
+    assert second.outstanding == ("writing",) and second.exhausted == ()
     assert second.batch_id != first.batch_id
 
 
@@ -2943,7 +2943,7 @@ def test_with_every_remaining_dimension_blocked_the_run_waits_and_serves_nothing
     )
     assert isinstance(rerun, assessment_service.AssessmentRunReport)
     empty = batch(writing, run_id, "round-while-waiting")
-    assert empty.tasks == () and empty.waiting == ("writing",)
+    assert empty.tasks == () and empty.outstanding == ("writing",)
     assert run_tasks(writing, run_id) == served_before
 
     verdict(writing, run_id, task.content_id, submission_id, score=0.6)
@@ -3158,3 +3158,95 @@ def test_the_screen_s_waiting_fields_satisfy_the_published_document(
         assessment_service.OutstandingJudgement.model_validate(
             {**minimal_judgement.model_dump(), "claim_state": "abandoned"}
         )
+
+
+# --- waiting: fix round 1 --------------------------------------------------------------------
+
+
+def test_a_lapsed_answer_blocks_nothing_and_the_next_serve_settles_it(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+    exhaust(writing, run_id)
+
+    # Nobody may claim it, and the next writer withdraws it: the read model must not say
+    # the run waits for a judgement no judge can now deliver.
+    screen = screen_of(writing, run_id)
+    (entry,) = screen.outstanding_judgements
+    assert (entry.submission_id, entry.claim_state) == (submission_id, "lapsed")
+    assert entry.attempts == judging.JUDGING_POLICY.max_attempts
+    assert entry.unclaimed_since is None and entry.claimed_by is None
+    assert [dimension.progress for dimension in screen.dimensions] == ["open"]
+    assert screen.progress == "working"
+    report = assessment_service.report(writing.paths, run=run_id, clock=writing.clock)
+    assert report.progress == "working"
+    assert [dimension.progress for dimension in report.dimensions] == ["open"]
+    assert report.outstanding_judgements == screen.outstanding_judgements
+    # A reader reports; it does not settle.
+    assert submission_state(writing, submission_id) == ("pending", None)
+
+    following = serve(writing, run_id)
+
+    assert following.content_id != content_id
+    assert submission_state(writing, submission_id) == ("withdrawn", judging.EXHAUSTED_CODE)
+    after = screen_of(writing, run_id)
+    assert after.outstanding_judgements == () and after.progress == "working"
+    assert_clean(writing)
+
+
+def test_an_answer_whose_held_verdict_was_voided_is_unclaimed_since_the_voiding(
+    writing: PolishWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+    pause(writing, run_id)
+    held = verdict(writing, run_id, content_id, submission_id, score=0.5)
+    writing.clock.advance(timedelta(hours=2))
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        # Any refusal that leaves the answer pending: the verdict was wrong, not the answer.
+        raise LinguaWikiError("assessment_rubric_invalid", "the held rubric no longer holds")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(assessment_service, "plan_verdict", refuse)
+        resumed = resume(writing, run_id)
+    assert [entry.verdict_id for entry in resumed.voided_verdicts] == [held.verdict_id]
+    assert submission_state(writing, submission_id) == ("pending", None)
+
+    (entry,) = screen_of(writing, run_id).outstanding_judgements
+    received, decided = rows(
+        writing,
+        "SELECT verdict.received_at, outcome.decided_at FROM assessment_verdicts verdict "
+        "JOIN assessment_verdict_outcomes outcome USING (verdict_id) WHERE verdict_id = ?",
+        [held.verdict_id],
+    )[0]
+    assert decided > received
+    assert entry.claim_state == "unclaimed" and not entry.verdict_held
+    # Held until the resume voided it -- claimable from then, not from when it arrived.
+    assert when(entry.unclaimed_since).replace(tzinfo=None) == decided
+    assert screen_of(writing, run_id).progress == "waiting"
+
+
+def test_the_published_judgement_vocabularies_are_the_runtime_ones() -> None:
+    """One place for each vocabulary: the type. The document and the model agree because
+    both are read off it, and the runtime refuses what the document does not list."""
+
+    from linguawiki.openapi import DOCUMENT_RELATIVE_PATH
+
+    document = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas" / DOCUMENT_RELATIVE_PATH).read_text(
+            encoding="utf-8"
+        )
+    )
+    published = document["components"]["schemas"]["OutstandingJudgement"]["properties"]
+    assert published["kind"]["enum"] == ["recording", "text"]
+    assert published["status"]["const"] == "pending"
+    assert published["claim_state"]["enum"] == ["unclaimed", "claimed", "held", "lapsed"]
+    base = {
+        "submission_id": "asm_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "content_id": "cnt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "kind": "text",
+        "claim_state": "unclaimed",
+    }
+    for field, value in (("kind", "video"), ("status", "judged"), ("claim_state", "gone")):
+        with pytest.raises(ValueError):
+            assessment_service.OutstandingJudgement.model_validate({**base, field: value})

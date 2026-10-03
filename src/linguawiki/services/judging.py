@@ -183,9 +183,14 @@ def outstanding_judgements(
     rubric, nothing a learner wrote.
     """
 
+    # The latest voiding of a verdict held for the submission: until then it was held, not
+    # claimable, so "unclaimed since" cannot start earlier than that.
     rows = database.query(
         "SELECT submission.submission_id, submission.content_id, task.dimension, "
-        "submission.kind, submission.status, submission.created_at "
+        "submission.kind, submission.created_at, "
+        "(SELECT max(outcome.decided_at) FROM assessment_verdicts verdict "
+        "JOIN assessment_verdict_outcomes outcome ON outcome.verdict_id = verdict.verdict_id "
+        "WHERE verdict.submission_id = submission.submission_id AND outcome.outcome = 'void') "
         "FROM assessment_submissions submission LEFT JOIN assessment_run_tasks task "
         "ON task.run_id = submission.run_id AND task.content_id = submission.content_id "
         "WHERE submission.run_id = ? AND submission.status = 'pending' "
@@ -196,13 +201,20 @@ def outstanding_judgements(
         return ()
     states = claim_states(database, run_id)
     held = held_submissions(database, run_id)
+    # The writers' own predicate, read rather than restated: what `sweep_lapsed` would
+    # withdraw is exactly what is listed `lapsed` here.
+    lapsed = {entry.submission_id for entry in lapsed_submissions(database, run_id=run_id)}
     entries: list[assessment_service.OutstandingJudgement] = []
-    for submission_id, content_id, dimension, kind, status, created_at in rows:
+    for submission_id, content_id, dimension, kind, created_at, voided_at in rows:
         state = states.get(str(submission_id), UNCLAIMED)
         is_held = str(submission_id) in held
         stage: assessment_service.ClaimStage
         since = claimed_by = until = None
-        if is_held:
+        if str(submission_id) in lapsed:
+            # Every attempt used and none live: no judge may claim it, and the next writer
+            # touching the run withdraws it. Not waiting on anybody.
+            stage = "lapsed"
+        elif is_held:
             # Judged, and waiting only for the resume: not handed to another judge, so no
             # lease and no "since" -- the run's own status says what it is waiting for.
             stage = "held"
@@ -212,17 +224,15 @@ def outstanding_judgements(
             until = aware_utc(state.lease_expires_at).isoformat()
         else:
             stage = "unclaimed"
-            began = (
-                created_at if state.last_ended_at is None else max(created_at, state.last_ended_at)
-            )
-            since = aware_utc(began).isoformat()
+            since = aware_utc(
+                max(at for at in (created_at, state.last_ended_at, voided_at) if at is not None)
+            ).isoformat()
         entries.append(
             assessment_service.OutstandingJudgement(
                 submission_id=str(submission_id),
                 content_id=str(content_id),
                 dimension=None if dimension is None else str(dimension),
-                kind=str(kind),
-                status=str(status),
+                kind=kind,
                 claim_state=stage,
                 unclaimed_since=since,
                 claimed_by=claimed_by,
