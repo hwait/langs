@@ -1678,6 +1678,69 @@ def test_a_held_verdict_applied_after_transcript_consent_was_withdrawn_copies_no
     )
 
 
+def test_a_recording_verdict_keeps_an_excerpt_only_while_it_is_the_only_copy(
+    speaking: PolishWorkspace,
+) -> None:
+    """Ruling R19. Applied when it arrives, the verdict keeps no excerpt -- the result holds
+    the retained form -- and keeps the hash that names the answer. Held, it keeps the
+    excerpt, because until resume nothing else does, and the resume writes the result from
+    it."""
+
+    words = "the learner said something about the weather"
+    run_id, content_id, submission_id, _ = submitted(speaking, 431)
+
+    def deliver(run: str, content: str, submission: str) -> assessment_service.AssessmentRunReport:
+        return assessment_service.record(
+            speaking.paths,
+            run=run,
+            content_id=content,
+            score=0.5,
+            submission=submission,
+            response_excerpt=words,
+            assessor_kind="ai",
+            assessor="synthetic-ai-judge",
+            clock=speaking.clock,
+        )
+
+    immediate = deliver(run_id, content_id, submission_id)
+    assert not immediate.held
+    assert rows(
+        speaking,
+        "SELECT verdict.response_visibility, verdict.response_excerpt, "
+        "verdict.response_hash IS NOT DISTINCT FROM result.response_hash, "
+        "result.response_visibility, result.response_excerpt "
+        "FROM assessment_verdicts verdict "
+        "JOIN assessment_verdict_outcomes outcome USING (verdict_id) "
+        "JOIN assessment_results result ON result.result_id = outcome.result_id "
+        "WHERE verdict.verdict_id = ?",
+        [immediate.verdict_id],
+    ) == [("withheld", None, True, "excerpt", words)]
+
+    held_run, held_content, held_submission, _ = submitted(speaking, 432)
+    pause(speaking, held_run)
+    held = deliver(held_run, held_content, held_submission)
+    assert held.held
+    kept = (
+        "SELECT response_visibility, response_excerpt FROM assessment_verdicts WHERE verdict_id = ?"
+    )
+    assert rows(speaking, kept, [held.verdict_id]) == [("excerpt", words)]
+    assert_clean(speaking)
+
+    resumed = resume(speaking, held_run)
+
+    assert [entry.verdict_id for entry in resumed.applied_verdicts] == [held.verdict_id]
+    assert rows(
+        speaking,
+        "SELECT response_visibility, response_excerpt, raw_score FROM assessment_results "
+        "WHERE run_id = ?",
+        [held_run],
+    ) == [("excerpt", words, 0.5)]
+    # Insert-only, so the held row keeps what it held (the deferred C1 gap) -- and the
+    # check allows exactly that: an applied verdict that was received before it was applied.
+    assert rows(speaking, kept, [held.verdict_id]) == [("excerpt", words)]
+    assert_clean(speaking)
+
+
 def test_narrowed_retention_only_ever_narrows() -> None:
     narrowed = assessment_service._narrowed_retention
     long = "x" * 500

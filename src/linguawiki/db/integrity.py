@@ -1471,6 +1471,16 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
     # 0035's single-column CHECK on `requested_visibility`, re-asserted for a restore that
     # predates it, and R10's rule that a written answer's verdict keeps none of its words:
     # the row is insert-only, so a copy there is one no consent withdrawal can reach.
+    #
+    # R19 widens that to every kind: a verdict keeps a learner excerpt only while it is the
+    # excerpt's sole copy, which is a held recording verdict before resume. One applied in
+    # the transaction that received it keeps none -- its result holds the retained form.
+    # The insert-only row cannot drop an excerpt later, so a held verdict applied at resume,
+    # or voided, still has one, and is allowed it. The rule that tells the two apart: an
+    # immediate apply writes `received_at` and the outcome's `decided_at` from the one
+    # write-time instant, so they are equal; a resume is a later transaction, so a verdict
+    # that was held has `received_at` strictly before `decided_at`. An excerpt on an applied
+    # verdict whose times are equal (or reversed) is therefore one nobody needed to keep.
     misshapen_verdicts = [
         f"{verdict_id} ({reason})"
         for verdict_id, reason in database.query(
@@ -1481,10 +1491,15 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
             "  WHEN submission.kind = 'text' AND (verdict.response_excerpt IS NOT NULL "
             "    OR verdict.response_visibility IS DISTINCT FROM 'withheld') "
             "    THEN 'a written answer''s verdict keeps some of its words' "
+            "  WHEN verdict.response_excerpt IS NOT NULL AND outcome.outcome = 'applied' "
+            "    AND NOT (verdict.received_at < outcome.decided_at) "
+            "    THEN 'applied when it arrived, and keeps an excerpt its result already holds' "
             "  END AS problem "
             "FROM assessment_verdicts verdict "
             "LEFT JOIN assessment_submissions submission "
             "  ON submission.submission_id = verdict.submission_id "
+            "LEFT JOIN assessment_verdict_outcomes outcome "
+            "  ON outcome.verdict_id = verdict.verdict_id "
             "WHERE problem IS NOT NULL ORDER BY 1"
         )
     ]
@@ -1492,10 +1507,12 @@ def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
         _named(
             "verdict_response_shape",
             misshapen_verdicts,
-            failed="a verdict asks for a visibility outside the vocabulary, or a verdict on a "
-            "written answer keeps some of the learner's words, which only the submission may",
-            ok="every verdict's request is known, and no verdict on a written answer keeps its "
-            "words",
+            failed="a verdict asks for a visibility outside the vocabulary, or keeps some of "
+            "the learner's words where it is not their only copy: a written answer's verdict "
+            "never may (the submission holds them), and a verdict applied when it arrived "
+            "never may (its result holds them); only a recording verdict that was held may",
+            ok="every verdict's request is known, and only a verdict that was held keeps the "
+            "learner's words",
             field="verdicts",
         )
     )

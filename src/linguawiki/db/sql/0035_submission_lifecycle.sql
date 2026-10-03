@@ -236,10 +236,13 @@ ALTER TABLE assessment_results ADD COLUMN observed_at TIMESTAMP;
 -- the rule "a judged submission has an applied outcome" would hold only for data written
 -- after it, and a validation that runs only when the data is present is not one.
 --
--- Everything but the rubric. A result's rubric never went through retention (the
--- deferred C1 gap), and copying it here would make an insert-only second copy that no
--- later scrub of the result could reach; the verdict's outcome names the result that
--- still holds it.
+-- Everything but the rubric and the learner's words. A result's rubric never went through
+-- retention (the deferred C1 gap), and copying it here would make an insert-only second
+-- copy that no later scrub of the result could reach; the verdict's outcome names the
+-- result that still holds it. The excerpt is left behind for the same reason (R19): a
+-- verdict row keeps a learner excerpt only while it is the excerpt's sole copy -- a held
+-- verdict, before resume -- and these were applied when they arrived, so the result holds
+-- the retained form. The response hash stays: it names the answer without quoting it.
 --
 -- The identifiers are derived rather than generated: DuckDB has no ULID, and a hex digest
 -- of the submission is a valid opaque identifier (hex digits are Crockford digits) that a
@@ -248,7 +251,7 @@ INSERT INTO assessment_verdicts
 SELECT 'asm_' || upper(substr(sha256('lingua.0035.verdict' || submission.submission_id), 1, 26)),
        submission.submission_id, NULL, result.raw_score, '{}',
        result.assessor_kind, result.assessor, result.confidence,
-       result.response_visibility, result.response_excerpt, result.response_hash,
+       'withheld', NULL, result.response_hash,
        result.recorded_at, NULL
 FROM assessment_submissions submission
 JOIN assessment_results result

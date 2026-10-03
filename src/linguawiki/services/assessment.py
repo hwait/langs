@@ -3318,6 +3318,24 @@ def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
         # result's unretained rubric was not duplicated into an insert-only row -- and never
         # "the judge gave no rubric". The applied outcome names the result that holds it.
         verdict_id = str(AssessmentId.new())
+        # R19: the row keeps a learner excerpt only while it is the excerpt's sole copy.
+        # A written answer's verdict keeps none (R10: the submission holds the text). A
+        # recording's verdict applied in this transaction keeps none either -- the result
+        # written below holds the retained form, and a second copy on an insert-only row is
+        # one no later scrub of the result could reach. Its hash stays: it names the answer
+        # without quoting it.
+        #
+        # A *held* recording verdict keeps its retained excerpt, because until resume it is
+        # the only account of the answer the result will be written from. It stays after
+        # the resume applies it (the row is insert-only), which is the deferred C1 gap of a
+        # stored excerpt nobody can withdraw; `verdict_response_shape` allows exactly that
+        # case and no other.
+        if plan.verdict_response is not None:
+            kept_visibility, kept_excerpt = plan.verdict_response
+        elif plan.action == APPLY:
+            kept_visibility, kept_excerpt = "withheld", None
+        else:
+            kept_visibility, kept_excerpt = plan.response_visibility, plan.response_excerpt
         database.execute(
             "INSERT INTO assessment_verdicts (verdict_id, submission_id, claim_id, raw_score, "
             "rubric_json, assessor_kind, assessor, confidence, response_visibility, "
@@ -3332,12 +3350,8 @@ def write_verdict(database: Database, plan: VerdictPlan) -> VerdictWrite:
                 plan.request.assessor_kind,
                 plan.request.assessor,
                 plan.request.confidence,
-                plan.response_visibility
-                if plan.verdict_response is None
-                else plan.verdict_response[0],
-                plan.response_excerpt
-                if plan.verdict_response is None
-                else plan.verdict_response[1],
+                kept_visibility,
+                kept_excerpt,
                 plan.response_hash,
                 now,
                 # What the judge asked to keep, apart from what this row kept: the only

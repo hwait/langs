@@ -165,10 +165,19 @@ def _seed_c5_submissions(database: Any) -> dict[str, str]:
         transaction.execute(
             "INSERT INTO assessment_results (result_id, run_id, content_id, dimension, "
             "raw_score, rubric_json, assessor_kind, assessor, confidence, difficulty, "
-            "recorded_at, response_visibility, audio_artifact_id, judgement_policy_version) "
+            "recorded_at, response_visibility, response_excerpt, response_hash, "
+            "audio_artifact_id, judgement_policy_version) "
             "VALUES (?, ?, ?, 'pronunciation', 0.75, '{\"accuracy\": 0.75}', 'ai', "
-            "'synthetic-ai-judge', 'medium', 0.0, ?, 'withheld', ?, 'judgement.v1')",
-            [ids["result"], ids["run"], ids["task_judged"], now, ids["artifact_judged"]],
+            "'synthetic-ai-judge', 'medium', 0.0, ?, 'excerpt', 'Powiedz to', ?, ?, "
+            "'judgement.v1')",
+            [
+                ids["result"],
+                ids["run"],
+                ids["task_judged"],
+                now,
+                "c" * 64,
+                ids["artifact_judged"],
+            ],
         )
     return ids
 
@@ -201,7 +210,8 @@ def test_c5_submissions_migrate_to_recordings_and_judged_ones_gain_their_verdict
             "SELECT verdict.submission_id, verdict.claim_id, verdict.raw_score, "
             "verdict.rubric_json, "
             "verdict.assessor_kind, verdict.assessor, verdict.confidence, "
-            "verdict.response_visibility, verdict.received_at, outcome.outcome, "
+            "verdict.response_visibility, verdict.response_excerpt, verdict.response_hash, "
+            "verdict.received_at, outcome.outcome, "
             "outcome.result_id, outcome.code, outcome.decided_at "
             "FROM assessment_verdicts verdict "
             "LEFT JOIN assessment_verdict_outcomes outcome USING (verdict_id)"
@@ -217,7 +227,11 @@ def test_c5_submissions_migrate_to_recordings_and_judged_ones_gain_their_verdict
                 "ai",
                 "synthetic-ai-judge",
                 "medium",
+                # R19: the result kept an excerpt, and the verdict -- applied when it
+                # arrived -- does not copy it; the hash names the answer without quoting it.
                 "withheld",
+                None,
+                "c" * 64,
                 recorded_at,
                 "applied",
                 ids["result"],
@@ -931,3 +945,37 @@ def test_a_written_answers_verdict_that_keeps_its_words_is_reported(
         "a written answer's verdict keeps some of its words"
         in (checks["verdict_response_shape"].context["verdicts"])
     )
+
+
+def test_a_verdict_applied_when_it_arrived_that_keeps_an_excerpt_is_reported(
+    speaking: PolishWorkspace,
+) -> None:
+    """R19: an applied verdict keeps an excerpt only if it was held first. Applied in the
+    transaction that received it, its `received_at` is its outcome's `decided_at`."""
+
+    _, _, verdict_id = _judged(speaking)
+    checks = _tamper(
+        speaking,
+        (
+            "UPDATE assessment_verdicts SET response_visibility = 'excerpt', "
+            "response_excerpt = 'Powiedz to' WHERE verdict_id = ?",
+            [verdict_id],
+        ),
+    )
+
+    assert checks["verdict_response_shape"].context["verdicts"] == (
+        f"{verdict_id} (applied when it arrived, and keeps an excerpt its result already holds)"
+    )
+
+    # Received before it was applied -- held, then resumed -- the same excerpt is allowed.
+    allowed = _tamper(
+        speaking,
+        (
+            "UPDATE assessment_verdicts SET received_at = received_at - INTERVAL 1 MINUTE "
+            "WHERE verdict_id = ?",
+            [verdict_id],
+        ),
+    )
+
+    assert allowed["verdict_response_shape"].status == "ok"
+
