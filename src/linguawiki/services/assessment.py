@@ -98,10 +98,64 @@ BASELINE_MODALITIES = ("text", "writing", "audio")
 ESTIMATE_CALCULATION_VERSION = "estimate.v1"
 
 
+#: Where a dimension stands for the learner, beside its stored `status`. `open` has work in
+#: it: a task can be served, or the learner is holding one unanswered. `waiting` is open and
+#: every task it holds has an answer handed in that nobody has marked -- `select_task` must
+#: not probe a posterior no answer has moved, so there is nothing sound to serve in it until
+#: a judge delivers. `closed` is `stopped` or `not-tested`: nothing more is served in it.
+DimensionProgress = Literal["open", "waiting", "closed"]
+
+#: Where a run's remaining work stands, beside its stored `status`, so a client can tell
+#: "wait for a judge" from "finished, finalize now" without inferring it from a batch that
+#: served nothing. `working`: some dimension is open, or a task is in the learner's hands.
+#: `waiting`: none is, and a judgement is outstanding -- an answer nobody has marked, or a
+#: verdict held for the resume. `complete`: nothing is left, so finalizing is what remains.
+#: `closed`: the run was finalized or abandoned. A paused run reports what resuming finds.
+RunProgress = Literal["working", "waiting", "complete", "closed"]
+
+#: Where judging one outstanding submission stands: nobody holds it, a judge holds a live
+#: lease on it, or its verdict has arrived and is held until the run resumes.
+ClaimStage = Literal["unclaimed", "claimed", "held"]
+
+
+class OutstandingJudgement(ContractModel):
+    """One answer waiting on a judgement, and what it is waiting on.
+
+    Never the learner's words: this reaches the screen, which has no consent parameter to
+    check them against. A judge reads an answer through `pending` and `claim`. Derived from
+    the claim and verdict rows and the clock -- `judging.claim_states` and
+    `judging.held_submissions` -- never stored, so it cannot disagree with them.
+    """
+
+    submission_id: str
+    content_id: str
+    #: The dimension the task was served in, from the run's record of serving it. `None`
+    #: only when that record is missing, which is damage `db check` names; absence is not
+    #: guessed into a dimension.
+    dimension: str | None = None
+    #: `recording` or `text`.
+    kind: str
+    #: The submission's own status: `pending` for everything listed here.
+    status: str
+    claim_state: ClaimStage
+    #: For `unclaimed`: since when nobody has held it -- the answer's arrival, or the end
+    #: of the last claim, whichever is later.
+    unclaimed_since: str | None = None
+    #: For `claimed`: the judge holding the live lease, and when the lease runs out.
+    claimed_by: str | None = None
+    claimed_until: str | None = None
+    #: Whether a verdict for it is held until the run resumes.
+    verdict_held: bool = False
+    #: Claims made for it so far; judging stops after `judging.JUDGING_POLICY.max_attempts`.
+    attempts: int = 0
+
+
 class DimensionReport(ContractModel):
     dimension: str
     dimension_kind: str
     status: str
+    #: `status` as the learner meets it: `open`, `waiting`, or `closed` (`DimensionProgress`).
+    progress: DimensionProgress = "open"
     tasks_used: int
     minimum_tasks: int
     maximum_tasks: int
@@ -220,6 +274,14 @@ class AssessmentRunReport(ContractModel):
     started_at: str | None = None
     finalized_at: str | None = None
     untested_dimensions: tuple[str, ...] = ()
+    #: What is left to do in the run (`RunProgress`): `working`, `waiting`, `complete`, or
+    #: `closed`. Waiting is never hidden: it is a state of its own, and
+    #: `outstanding_judgements` says what it is waiting on.
+    progress: RunProgress = "working"
+    #: Every answer in the run waiting on a judgement -- pending, claimed, or with a verdict
+    #: held -- in the order the answers arrived. Bounded by the one-outstanding-task-per-
+    #: dimension guard, as the screen's outstanding tasks are.
+    outstanding_judgements: tuple[OutstandingJudgement, ...] = ()
     warnings: tuple[str, ...] = ()
     #: True when the verdict this call delivered (or replayed) is *held*: stored against a
     #: paused run, not yet applied, and revalidated when the run resumes. Nothing about the
@@ -1446,7 +1508,8 @@ def next_task(
     actor: str = DEFAULT_ACTOR,
     idempotency_key: str | None = None,
 ) -> NextTaskReport | AssessmentRunReport:
-    """Serve the next task, or report the run when no dimension is still open.
+    """Serve the next task, or report the run when no dimension is still open -- or when
+    every open one is waiting on a judge, which the report's `progress` says.
 
     Plan and write in one transaction. Until C6 a dimension the bank had run out of was
     closed in a transaction of its own and the serve committed in another, so a refusal
@@ -1533,7 +1596,23 @@ def next_task(
                 # task has work on it, so the run is not finished and must not report as though
                 # it were: hand that task back instead. The states are already sorted, so this
                 # is the least-progressed one.
-                held = [state for state in open_states if state.dimension in outstanding]
+                #
+                # Only a task still awaiting the learner. One whose answer is handed in and
+                # waiting for a judge is not work for the learner, and handing it back as a
+                # task to answer invited a second answer to a question already answered. When
+                # every open dimension is waiting on a judge, nothing is served and the run
+                # report says `waiting`, naming what it waits on.
+                from linguawiki.services import recordings as recording_service
+
+                held = [
+                    state
+                    for state in open_states
+                    if state.dimension in outstanding
+                    and recording_service.live_submission(
+                        transaction, run_id, outstanding[state.dimension]
+                    )
+                    is None
+                ]
                 handed_content_id = outstanding[held[0].dimension] if held else None
                 # Read and validated *before* the key is claimed. `_hand_back` refuses a
                 # damaged snapshot, and a refusal has to leave nothing behind -- which, now
@@ -4891,12 +4970,15 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
     connection to report what it did without deadlocking on its own writer lock.
     """
 
+    from linguawiki.services import judging
+
     row = _run_row(database, run_id)
     conditions = json.loads(str(row[6]))
     kinds = {str(k): str(v) for k, v in conditions["dimension_kinds"].items()}
     record_track = learner_service.track_context(database, str(row[1]))
     levels = _pinned_levels(conditions, fallback=record_track.framework_levels)
     states = _dimension_states(database, run_id, kinds)
+    in_hand, judged_only = _held_work(database, run_id)
     reports: list[DimensionReport] = []
     for state in states:
         level, low, high = estimated_level(state, levels)
@@ -4906,6 +4988,9 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
                 dimension=state.dimension,
                 dimension_kind=state.dimension_kind,
                 status=state.status,
+                progress=_dimension_progress(
+                    state.status, dimension=state.dimension, judged=judged_only
+                ),
                 tasks_used=state.tasks_used,
                 minimum_tasks=minimum,
                 maximum_tasks=maximum,
@@ -4943,6 +5028,7 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
         )
         or (0, 0)
     )
+    judgements = judging.outstanding_judgements(database, run_id)
     return AssessmentRunReport(
         run_id=run_id,
         track_id=str(row[1]),
@@ -4968,7 +5054,70 @@ def run_report(database: Database, run_id: str) -> AssessmentRunReport:
         untested_dimensions=tuple(
             entry.dimension for entry in reports if entry.status == "not-tested"
         ),
+        progress=_run_progress(str(row[4]), reports, in_hand=in_hand, judgements=judgements),
+        outstanding_judgements=judgements,
     )
+
+
+def _held_work(database: Database, run_id: str) -> tuple[frozenset[str], frozenset[str]]:
+    """The dimensions holding a served task by whose move it is: `(in hand, judged only)`.
+
+    A dimension is *in hand* while any task it holds still awaits the learner's answer, and
+    *judged only* when every task it holds has an answer handed in that nobody has marked.
+    "Handed in" is the screen's own derivation -- a `served` task with a live submission
+    (`recordings.live_submission`, as `_batch_task_state` reads it) -- because a second
+    account of "is this waiting for a judge" is a second thing to drift.
+    """
+
+    from linguawiki.services import recordings as recording_service
+
+    in_hand: set[str] = set()
+    judged: set[str] = set()
+    for dimension, content_id in database.query(
+        "SELECT dimension, content_id FROM assessment_run_tasks "
+        "WHERE run_id = ? AND status = 'served' ORDER BY sequence",
+        [run_id],
+    ):
+        if recording_service.live_submission(database, run_id, str(content_id)) is None:
+            in_hand.add(str(dimension))
+        else:
+            judged.add(str(dimension))
+    return frozenset(in_hand), frozenset(judged - in_hand)
+
+
+def _dimension_progress(
+    status: str, *, dimension: str, judged: frozenset[str]
+) -> DimensionProgress:
+    if status != "open":
+        return "closed"
+    if dimension in judged:
+        return "waiting"
+    return "open"
+
+
+def _run_progress(
+    status: str,
+    dimensions: Sequence[DimensionReport],
+    *,
+    in_hand: frozenset[str],
+    judgements: Sequence[OutstandingJudgement],
+) -> RunProgress:
+    """What is left in the run, read from what the dimensions and the judgements say.
+
+    A task in the learner's hands counts as work even in a dimension that has closed:
+    `record` still accepts it, so a run holding one is not waiting and not complete. A
+    pending submission counts as waiting whatever its dimension's state, because finalizing
+    refuses while one is outstanding -- "complete" is never said of a run that finalizing
+    would refuse for a judgement it is still owed.
+    """
+
+    if status in {"finalized", "abandoned"}:
+        return "closed"
+    if in_hand or any(entry.progress == "open" for entry in dimensions):
+        return "working"
+    if judgements:
+        return "waiting"
+    return "complete"
 
 
 __all__ = [
@@ -4977,10 +5126,14 @@ __all__ = [
     "BatchReport",
     "BatchTask",
     "BatchTaskState",
+    "ClaimStage",
+    "DimensionProgress",
     "DimensionReport",
     "NextTaskReport",
+    "OutstandingJudgement",
     "PlayReport",
     "RunListReport",
+    "RunProgress",
     "ServeContext",
     "ServePlan",
     "VerdictPlan",

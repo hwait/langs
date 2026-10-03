@@ -83,6 +83,11 @@ class ClaimState:
     live_claim: str | None = None
     claimed_by: str | None = None
     lease_expires_at: datetime | None = None
+    #: When the most recent claim that is no longer live ended: released, delivered its
+    #: verdict, or ran out of lease -- whichever came first. `None` when none has ended.
+    #: It is what "unclaimed since" is measured from once a submission has been claimed: a
+    #: queue a judge gave back an hour ago has not been waiting since the answer arrived.
+    last_ended_at: datetime | None = None
 
 
 UNCLAIMED = ClaimState(attempts=0)
@@ -109,9 +114,9 @@ def claim_states(
 
     rows = database.query(
         "SELECT claim.submission_id, claim.claim_id, claim.judge, claim.lease_expires_at, "
-        "EXISTS (SELECT 1 FROM judging_releases release "
+        "(SELECT min(release.released_at) FROM judging_releases release "
         "WHERE release.claim_id = claim.claim_id), "
-        "EXISTS (SELECT 1 FROM assessment_verdicts verdict "
+        "(SELECT min(verdict.received_at) FROM assessment_verdicts verdict "
         "WHERE verdict.claim_id = claim.claim_id) "
         "FROM judging_claims claim JOIN assessment_submissions submission "
         "ON submission.submission_id = claim.submission_id "
@@ -124,12 +129,23 @@ def claim_states(
     states: dict[str, ClaimState] = {}
     for submission_id, claim_id, judge, expires, released, judged in rows:
         before = states.get(str(submission_id), UNCLAIMED)
-        live = expires > moment and not released and not judged
+        # The Python face of `_LIVE`: a lease still running, no release, no verdict.
+        live = expires > moment and released is None and judged is None
+        # A claim released after its lease ran out ended when the lease did; the earliest
+        # of the three is when the judge stopped holding it.
+        ended = None if live else min(at for at in (expires, released, judged) if at is not None)
         states[str(submission_id)] = ClaimState(
             attempts=before.attempts + 1,
             live_claim=str(claim_id) if live else before.live_claim,
             claimed_by=str(judge) if live else before.claimed_by,
             lease_expires_at=expires if live else before.lease_expires_at,
+            last_ended_at=(
+                before.last_ended_at
+                if ended is None
+                else ended
+                if before.last_ended_at is None
+                else max(ended, before.last_ended_at)
+            ),
         )
     return states
 
@@ -149,6 +165,73 @@ def held_submissions(database: Database, run_id: str) -> frozenset[str]:
             [run_id],
         )
     )
+
+
+def outstanding_judgements(
+    database: Database, run_id: str
+) -> tuple[assessment_service.OutstandingJudgement, ...]:
+    """Every answer in a run waiting on a judgement, and what each is waiting on.
+
+    A reader, through the caller's connection: the run report and `/screen` both read it,
+    and `/screen` is served from a read-only connection, so nothing here writes or sweeps.
+    A submission that has used every attempt is listed as it stands until a writer settles
+    it -- reporting it withdrawn before anything withdrew it would be a report of a write
+    nobody made.
+
+    Claimed, held, and the lease are `claim_states` and `held_submissions` -- the one
+    derivation the writers, `pending`, and `db check` share. No text: not the answer, not a
+    rubric, nothing a learner wrote.
+    """
+
+    rows = database.query(
+        "SELECT submission.submission_id, submission.content_id, task.dimension, "
+        "submission.kind, submission.status, submission.created_at "
+        "FROM assessment_submissions submission LEFT JOIN assessment_run_tasks task "
+        "ON task.run_id = submission.run_id AND task.content_id = submission.content_id "
+        "WHERE submission.run_id = ? AND submission.status = 'pending' "
+        "ORDER BY submission.created_at, submission.submission_id",
+        [run_id],
+    )
+    if not rows:
+        return ()
+    states = claim_states(database, run_id)
+    held = held_submissions(database, run_id)
+    entries: list[assessment_service.OutstandingJudgement] = []
+    for submission_id, content_id, dimension, kind, status, created_at in rows:
+        state = states.get(str(submission_id), UNCLAIMED)
+        is_held = str(submission_id) in held
+        stage: assessment_service.ClaimStage
+        since = claimed_by = until = None
+        if is_held:
+            # Judged, and waiting only for the resume: not handed to another judge, so no
+            # lease and no "since" -- the run's own status says what it is waiting for.
+            stage = "held"
+        elif state.live_claim is not None and state.lease_expires_at is not None:
+            stage = "claimed"
+            claimed_by = state.claimed_by
+            until = aware_utc(state.lease_expires_at).isoformat()
+        else:
+            stage = "unclaimed"
+            began = (
+                created_at if state.last_ended_at is None else max(created_at, state.last_ended_at)
+            )
+            since = aware_utc(began).isoformat()
+        entries.append(
+            assessment_service.OutstandingJudgement(
+                submission_id=str(submission_id),
+                content_id=str(content_id),
+                dimension=None if dimension is None else str(dimension),
+                kind=str(kind),
+                status=str(status),
+                claim_state=stage,
+                unclaimed_since=since,
+                claimed_by=claimed_by,
+                claimed_until=until,
+                verdict_held=is_held,
+                attempts=state.attempts,
+            )
+        )
+    return tuple(entries)
 
 
 @dataclass(frozen=True, slots=True)
@@ -937,6 +1020,7 @@ __all__ = [
     "exhausted_reason",
     "held_submissions",
     "lapsed_submissions",
+    "outstanding_judgements",
     "release",
     "released_refusal",
     "reserved_code",

@@ -2877,3 +2877,284 @@ def test_a_batch_member_its_run_never_served_is_found_and_refused_on_replay(
     assert stranger in str(check.context)
     failure = refusal(batch, polish_workspace, run_id, "round-1")
     assert failure.payload.code == "assessment_batch_unrecorded"
+
+
+# --- waiting ---------------------------------------------------------------------------------
+#
+# Waiting is a state, not a gap. A dimension whose only outstanding task has an answer handed
+# in that nobody has marked is `waiting`; a run with nothing open and a judgement outstanding
+# is `waiting`; and the screen lists each answer it waits on, by submission, without a word of
+# what the learner wrote.
+
+
+def screen_of(workspace: PolishWorkspace, run_id: str) -> Any:
+    from linguawiki.services import assessment_view as view_service
+
+    return view_service.run_screen(workspace.paths, run=run_id, clock=workspace.clock)
+
+
+def run_tasks(workspace: PolishWorkspace, run_id: str) -> int:
+    return int(
+        rows(workspace, "SELECT count(*) FROM assessment_run_tasks WHERE run_id = ?", [run_id])[0][
+            0
+        ]
+    )
+
+
+def when(stamp: str | None) -> Any:
+    from datetime import datetime
+
+    assert stamp is not None
+    return datetime.fromisoformat(stamp)
+
+
+def test_with_every_remaining_dimension_blocked_the_run_waits_and_serves_nothing(
+    writing: PolishWorkspace,
+) -> None:
+    run_id = start_written(writing).run_id
+    task = serve(writing, run_id)
+    in_hand = assessment_service.report(writing.paths, run=run_id, clock=writing.clock)
+    # The learner holds the task: that is work, not waiting.
+    assert in_hand.progress == "working"
+    assert [entry.progress for entry in in_hand.dimensions] == ["open"]
+
+    handed = hand_in(writing, run_id, task.content_id)
+    submission_id = handed.submission.submission_id
+    report = assessment_service.report(writing.paths, run=run_id, clock=writing.clock)
+    screen = screen_of(writing, run_id)
+
+    assert report.progress == screen.progress == "waiting"
+    assert [(entry.status, entry.progress) for entry in report.dimensions] == [("open", "waiting")]
+    assert [entry.progress for entry in screen.dimensions] == ["waiting"]
+    assert [entry.submission_id for entry in screen.outstanding_judgements] == [submission_id]
+    assert screen.outstanding_judgements == report.outstanding_judgements
+
+    # Nothing sound to serve: no task is handed back as though the learner still had to
+    # answer it, and nothing is written about the learner.
+    served_before = run_tasks(writing, run_id)
+    again = assessment_service.next_task(
+        writing.paths, run=run_id, clock=writing.clock, idempotency_key="serve-while-waiting"
+    )
+    assert isinstance(again, assessment_service.AssessmentRunReport)
+    assert again.progress == "waiting"
+    assert [entry.submission_id for entry in again.outstanding_judgements] == [submission_id]
+    rerun = assessment_service.next_task(
+        writing.paths, run=run_id, clock=writing.clock, idempotency_key="serve-while-waiting"
+    )
+    assert isinstance(rerun, assessment_service.AssessmentRunReport)
+    empty = batch(writing, run_id, "round-while-waiting")
+    assert empty.tasks == () and empty.waiting == ("writing",)
+    assert run_tasks(writing, run_id) == served_before
+
+    verdict(writing, run_id, task.content_id, submission_id, score=0.6)
+    after = screen_of(writing, run_id)
+    assert after.progress == "working" and after.outstanding_judgements == ()
+    assert [entry.progress for entry in after.dimensions] == ["open"]
+    assert serve(writing, run_id).content_id != task.content_id
+    assert_clean(writing)
+
+
+def test_a_dimension_waiting_on_a_judge_does_not_stop_the_learner_working_in_another(
+    writing: PolishWorkspace,
+) -> None:
+    run_id = assessment_service.start(
+        writing.paths,
+        dimensions=["reading", "writing"],
+        scoring="machine+judged",
+        clock=writing.clock,
+    ).run_id
+    first = {entry.dimension: entry for entry in batch(writing, run_id, "round-1").tasks}
+    hand_in(writing, run_id, first["writing"].content_id)
+    answer(writing, run_id, first["reading"].task)
+
+    screen = screen_of(writing, run_id)
+
+    by_dimension = {entry.dimension: entry.progress for entry in screen.dimensions}
+    assert by_dimension == {"reading": "open", "writing": "waiting"}
+    assert screen.progress == "working"
+    assert [entry.dimension for entry in screen.outstanding_judgements] == ["writing"]
+
+
+def test_a_run_with_nothing_left_is_complete_and_a_finalized_one_is_closed(
+    polish_workspace: PolishWorkspace,
+) -> None:
+    run_id = start_machine(polish_workspace, ("reading",))
+    sequential_sequence(polish_workspace, run_id)
+
+    finished = screen_of(polish_workspace, run_id)
+    assert finished.status == "in-progress"
+    assert finished.progress == "complete" and finished.outstanding_judgements == ()
+    assert [entry.progress for entry in finished.dimensions] == ["closed"]
+
+    closed = assessment_service.finalize(
+        polish_workspace.paths, run=run_id, clock=polish_workspace.clock
+    )
+    assert closed.progress == "closed"
+
+
+def test_outstanding_judgements_follow_unclaimed_claimed_and_held_and_carry_no_text(
+    writing: PolishWorkspace,
+) -> None:
+    run_id, content_id, submission_id = written(writing)
+    arrived = rows(
+        writing,
+        "SELECT created_at FROM assessment_submissions WHERE submission_id = ?",
+        [submission_id],
+    )[0][0]
+
+    def judgement() -> Any:
+        screen = screen_of(writing, run_id)
+        assert ANSWER[:30] not in screen.model_dump_json()
+        (entry,) = screen.outstanding_judgements
+        assert (entry.submission_id, entry.content_id, entry.dimension, entry.kind) == (
+            submission_id,
+            content_id,
+            "writing",
+            "text",
+        )
+        assert entry.status == "pending"
+        return entry
+
+    queued = judgement()
+    assert queued.claim_state == "unclaimed" and queued.attempts == 0
+    assert when(queued.unclaimed_since).replace(tzinfo=None) == arrived
+    assert queued.claimed_by is None and queued.claimed_until is None
+
+    report = claim(writing, run_id, judge="synthetic-judge-a")
+    (first,) = report.claimed
+    held_by = judgement()
+    assert held_by.claim_state == "claimed" and held_by.attempts == 1
+    assert held_by.claimed_by == "synthetic-judge-a"
+    assert when(held_by.claimed_until) == when(first.lease_expires_at)
+    assert held_by.unclaimed_since is None and not held_by.verdict_held
+
+    # A lease that ran out puts it back in the queue -- unclaimed since the lease ended,
+    # not since the answer arrived: a queue a judge just dropped has not waited that long.
+    lapse(writing)
+    dropped = judgement()
+    assert dropped.claim_state == "unclaimed" and dropped.attempts == 1
+    assert when(dropped.unclaimed_since) == when(first.lease_expires_at)
+
+    second = claimed_one(writing, run_id, judge="synthetic-judge-b")
+    assert judgement().claimed_by == "synthetic-judge-b"
+    pause(writing, run_id)
+    verdict(writing, run_id, content_id, submission_id, score=0.5, claim=second)
+
+    held = judgement()
+    assert held.claim_state == "held" and held.verdict_held and held.attempts == 2
+    assert held.claimed_by is None and held.unclaimed_since is None
+    assert screen_of(writing, run_id).progress == "waiting"
+
+    resume(writing, run_id)
+    assert screen_of(writing, run_id).outstanding_judgements == ()
+    assert_clean(writing)
+
+
+def test_the_cli_names_the_submissions_a_waiting_run_waits_on(
+    writing: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from linguawiki.cli import run as run_cli
+
+    run_id, content_id, submission_id = written(writing)
+
+    for action in ("report", "screen"):
+        capsys.readouterr()
+        code = run_cli(
+            ["assessment", action, "--run", run_id, "--workspace", str(writing.root)],
+            clock=writing.clock,
+        )
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "progress: waiting" in out, out
+        assert f"text submission {submission_id} for {content_id} (writing)" in out, out
+        assert "unclaimed since" in out
+        assert ANSWER[:30] not in out
+    code, payload = _cli(writing, capsys, "assessment", "report", "--run", run_id)
+    assert code == 0 and payload["data"]["progress"] == "waiting"
+    assert payload["data"]["outstanding_judgements"][0]["submission_id"] == submission_id
+
+
+def test_the_screen_s_waiting_fields_satisfy_the_published_document(
+    writing: PolishWorkspace,
+) -> None:
+    """The model and the OpenAPI document must agree on real output -- with only the
+    required fields, so the defaults are what is under test, and with every one set."""
+
+    from jsonschema import Draft202012Validator
+
+    from linguawiki.openapi import DOCUMENT_RELATIVE_PATH
+    from linguawiki.services import assessment_view as view_service
+
+    document = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas" / DOCUMENT_RELATIVE_PATH).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    def validator(name: str) -> Draft202012Validator:
+        return Draft202012Validator(
+            {"components": document["components"], "$ref": f"#/components/schemas/{name}"}
+        )
+
+    minimal_judgement = assessment_service.OutstandingJudgement(
+        submission_id="asm_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        content_id="cnt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        kind="text",
+        status="pending",
+        claim_state="unclaimed",
+    )
+    full_judgement = minimal_judgement.model_copy(
+        update={
+            "dimension": "writing",
+            "unclaimed_since": "2026-01-01T09:00:00+00:00",
+            "claimed_by": "synthetic-judge",
+            "claimed_until": "2026-01-01T09:10:00+00:00",
+            "verdict_held": True,
+            "attempts": 2,
+        }
+    )
+    minimal_dimension = assessment_service.DimensionReport(
+        dimension="writing",
+        dimension_kind="written-production",
+        status="open",
+        tasks_used=0,
+        minimum_tasks=1,
+        maximum_tasks=2,
+    )
+    minimal = view_service.RunScreen(
+        run_id="asm_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        track_id="trk_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        run_type="placement",
+        calibration_label="provisional",
+        status="in-progress",
+        pack_key="pl-pilot",
+        pack_version="0.1.0",
+        framework_id="cefr",
+        dimensions=(minimal_dimension,),
+        outstanding_judgements=(minimal_judgement,),
+    )
+    validator("RunScreen").validate(minimal.model_dump(mode="json"))
+    validator("OutstandingJudgement").validate(full_judgement.model_dump(mode="json"))
+
+    run_id, _content_id, _submission_id = written(writing)
+    real = screen_of(writing, run_id)
+    assert real.outstanding_judgements and real.progress == "waiting"
+    full = real.model_copy(
+        update={
+            "outstanding_judgements": (*real.outstanding_judgements, full_judgement),
+            "dimensions": tuple(
+                entry.model_copy(update={"progress": "waiting"}) for entry in real.dimensions
+            ),
+        }
+    )
+    validator("RunScreen").validate(full.model_dump(mode="json"))
+    validator("AssessmentRunReport").validate(
+        assessment_service.report(writing.paths, run=run_id, clock=writing.clock).model_dump(
+            mode="json"
+        )
+    )
+    # And the runtime refuses what the document refuses: a stage outside the vocabulary.
+    with pytest.raises(ValueError):
+        assessment_service.OutstandingJudgement.model_validate(
+            {**minimal_judgement.model_dump(), "claim_state": "abandoned"}
+        )

@@ -2269,21 +2269,49 @@ def _screen_lines(screen: view_service.RunScreen) -> str:
         f"{screen.tasks_recorded} of {screen.tasks_served} served task(s) scored"
     ]
     lines.extend(
-        f"  {dimension.dimension} ({dimension.dimension_kind}): {dimension.status}, "
-        f"{dimension.tasks_used}/{dimension.maximum_tasks} task(s), "
+        f"  {dimension.dimension} ({dimension.dimension_kind}): {dimension.status}"
+        + (f" ({dimension.progress})" if dimension.progress == "waiting" else "")
+        + f", {dimension.tasks_used}/{dimension.maximum_tasks} task(s), "
         f"{dimension.estimated_level or 'no estimate'} ({dimension.confidence})"
         for dimension in screen.dimensions
     )
     # The tasks by name, not a count: an operator comparing this against the browser needs
     # to know which task is waiting, not how many are.
     lines.extend(
-        f"  awaiting {task.content_id} in {task.dimension}: answer by {task.answer_with}"
-        + (" with audio" if task.plays_audio else "")
+        (
+            f"  awaiting a judge for {task.content_id} in {task.dimension}"
+            if task.state == "awaiting-judge"
+            else f"  awaiting {task.content_id} in {task.dimension}: answer by "
+            f"{task.answer_with}" + (" with audio" if task.plays_audio else "")
+        )
         for task in screen.outstanding
     )
     if not screen.outstanding:
         lines.append("  nothing is awaiting an answer")
+    lines.extend(_progress_lines(screen.progress, screen.outstanding_judgements))
     return "\n".join(lines)
+
+
+def _progress_lines(
+    progress: str, judgements: tuple[assessment_service.OutstandingJudgement, ...]
+) -> list[str]:
+    """The run's remaining work, and each judgement it waits on by submission -- a count
+    is not something an operator can go and look at."""
+
+    lines = [f"progress: {progress}"]
+    for entry in judgements:
+        if entry.claim_state == "held":
+            on = "verdict held until the run resumes"
+        elif entry.claim_state == "claimed":
+            on = f"claimed by {entry.claimed_by} until {entry.claimed_until}"
+        else:
+            on = f"unclaimed since {entry.unclaimed_since}"
+        lines.append(
+            f"  waiting on {entry.kind} submission {entry.submission_id} for "
+            f"{entry.content_id} ({entry.dimension or 'dimension unrecorded'}): {on}; "
+            f"{entry.attempts} claim(s) so far"
+        )
+    return lines
 
 
 def _pending_lines(report: recording_service.PendingReport) -> str:
@@ -2380,7 +2408,9 @@ def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
         f"{report.tasks_recorded} of {report.tasks_served} served task(s) scored"
     ]
     lines.extend(
-        f"  {entry.dimension}: {entry.status} n={entry.tasks_used}/"
+        f"  {entry.dimension}: {entry.status}"
+        + (f" ({entry.progress})" if entry.progress == "waiting" else "")
+        + f" n={entry.tasks_used}/"
         f"{entry.minimum_tasks}-{entry.maximum_tasks} confidence={entry.confidence} "
         f"estimate={entry.estimated_level} [{entry.credible_low}..{entry.credible_high}]"
         + (f" stop={entry.stop_reason}" if entry.stop_reason else "")
@@ -2388,6 +2418,7 @@ def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
     )
     if report.untested_dimensions:
         lines.append(f"not tested: {list(report.untested_dimensions)}")
+    lines.extend(_progress_lines(report.progress, report.outstanding_judgements))
     lines.extend(
         f"applied held verdict {entry.verdict_id} to {entry.content_id} at {entry.score}"
         for entry in report.applied_verdicts

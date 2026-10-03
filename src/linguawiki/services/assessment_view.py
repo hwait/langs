@@ -119,6 +119,17 @@ class RunScreen(ContractModel):
     #: per dimension that closed while holding a task -- which `record` still accepts, so a
     #: screen that hid it would leave answerable work with no surface that mentions it.
     outstanding: tuple[OutstandingTask, ...] = ()
+    #: What is left in the run: `working`, `waiting`, `complete`, or `closed`
+    #: (`assessment.RunProgress`). `waiting` is every remaining dimension blocked on a
+    #: judgement; `complete` is nothing left, so finalizing is what remains. A client reads
+    #: this rather than inferring "finished" from a batch that served nothing.
+    progress: assessment_service.RunProgress = "working"
+    #: Every answer waiting on a judgement and what it waits on: unclaimed since a time,
+    #: claimed by a judge until a time, or held until the run resumes. The list a page
+    #: polls and compares: claim changes are in-place updates, so there is nothing to count.
+    #: Named apart from `outstanding`, which has always meant the *tasks* outstanding, and
+    #: which a page already reads. No learner text, ever.
+    outstanding_judgements: tuple[assessment_service.OutstandingJudgement, ...] = ()
     tasks_served: int = 0
     tasks_recorded: int = 0
     results_invalidated: int = 0
@@ -205,6 +216,8 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
         scoring=run.scoring,
         dimensions=run.dimensions,
         outstanding=tuple(outstanding),
+        progress=run.progress,
+        outstanding_judgements=run.outstanding_judgements,
         tasks_served=run.tasks_served,
         tasks_recorded=run.tasks_recorded,
         results_invalidated=run.results_invalidated,

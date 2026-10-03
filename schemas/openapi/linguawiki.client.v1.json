@@ -116,6 +116,14 @@
             "title": "Held",
             "type": "boolean"
           },
+          "outstanding_judgements": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OutstandingJudgement"
+            },
+            "title": "Outstanding Judgements",
+            "type": "array"
+          },
           "pack_key": {
             "title": "Pack Key",
             "type": "string"
@@ -126,6 +134,17 @@
           },
           "pack_version": {
             "title": "Pack Version",
+            "type": "string"
+          },
+          "progress": {
+            "default": "working",
+            "enum": [
+              "working",
+              "waiting",
+              "complete",
+              "closed"
+            ],
+            "title": "Progress",
             "type": "string"
           },
           "results_invalidated": {
@@ -529,6 +548,16 @@
             "default": null,
             "title": "Posterior Mean"
           },
+          "progress": {
+            "default": "open",
+            "enum": [
+              "open",
+              "waiting",
+              "closed"
+            ],
+            "title": "Progress",
+            "type": "string"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -730,6 +759,104 @@
           "prompt"
         ],
         "title": "NextTaskReport",
+        "type": "object"
+      },
+      "OutstandingJudgement": {
+        "additionalProperties": false,
+        "description": "One answer waiting on a judgement, and what it is waiting on.\n\nNever the learner's words: this reaches the screen, which has no consent parameter to\ncheck them against. A judge reads an answer through `pending` and `claim`. Derived from\nthe claim and verdict rows and the clock -- `judging.claim_states` and\n`judging.held_submissions` -- never stored, so it cannot disagree with them.",
+        "properties": {
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "claim_state": {
+            "enum": [
+              "unclaimed",
+              "claimed",
+              "held"
+            ],
+            "title": "Claim State",
+            "type": "string"
+          },
+          "claimed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimed By"
+          },
+          "claimed_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimed Until"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "dimension": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Dimension"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "unclaimed_since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unclaimed Since"
+          },
+          "verdict_held": {
+            "default": false,
+            "title": "Verdict Held",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "submission_id",
+          "content_id",
+          "kind",
+          "status",
+          "claim_state"
+        ],
+        "title": "OutstandingJudgement",
         "type": "object"
       },
       "OutstandingTask": {
@@ -1115,12 +1242,31 @@
             "title": "Outstanding",
             "type": "array"
           },
+          "outstanding_judgements": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OutstandingJudgement"
+            },
+            "title": "Outstanding Judgements",
+            "type": "array"
+          },
           "pack_key": {
             "title": "Pack Key",
             "type": "string"
           },
           "pack_version": {
             "title": "Pack Version",
+            "type": "string"
+          },
+          "progress": {
+            "default": "working",
+            "enum": [
+              "working",
+              "waiting",
+              "complete",
+              "closed"
+            ],
+            "title": "Progress",
             "type": "string"
           },
           "recording": {
