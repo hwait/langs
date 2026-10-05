@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator, model_validator
 
@@ -642,12 +642,29 @@ def resolve_track(database: Database, track: str | None) -> str:
             "track_selection_required",
             f"name a track explicitly: the workspace has no active track and "
             f"{len(all_tracks)} track(s) in total",
-            details=(ErrorDetail(field="track", reason="ambiguous track selection"),),
+            details=_track_choices(all_tracks),
         )
     raise LinguaWikiError(
         "track_selection_required",
         f"name a track explicitly: the workspace has {len(active)} active tracks",
-        details=(ErrorDetail(field="track", reason="ambiguous track selection"),),
+        details=_track_choices(active),
+    )
+
+
+def _track_choices(rows: Sequence[Sequence[Any]]) -> tuple[ErrorDetail, ...]:
+    """One detail per track the caller could have meant, so the refusal is a way forward.
+
+    "Name a track" with no names in it sends a caller off to find them; a page that has
+    to draw a picker would otherwise need a second request to learn what to put in it.
+    """
+
+    return tuple(
+        ErrorDetail(
+            field="track",
+            reason="ambiguous track selection",
+            context={"track_id": str(row[0])},
+        )
+        for row in rows
     )
 
 
@@ -1048,6 +1065,64 @@ def list_tracks(paths: WorkspacePaths, *, clock: Clock | None = None) -> tuple[T
         )
 
 
+class TrackListEntry(ContractModel):
+    """One track as a picker shows it: whose it is and what it is, never how it is set up.
+
+    The preferences are left out on purpose. They hold consent decisions and goals, and a
+    page choosing which track to draw needs a name, not a profile.
+    """
+
+    track_id: str
+    display_name: str
+    target_language: str
+    proficiency_framework: str
+    pack_key: str | None = None
+    status: str
+    is_primary: bool
+    #: Whether a caller may work on it without naming another first: `active`, or the
+    #: workspace's only track -- the same rule `resolve_track` applies.
+    selectable: bool
+
+
+class TrackListReport(ContractModel):
+    tracks: tuple[TrackListEntry, ...] = ()
+    #: What `resolve_track(None)` would choose, or `None` where it would refuse.
+    default_track_id: str | None = None
+
+
+def discover_tracks(paths: WorkspacePaths, *, clock: Clock | None = None) -> TrackListReport:
+    """The tracks a page can offer, and the one it may take without asking."""
+
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        rows = database.query(
+            "SELECT track.track_id, learner.display_name, track.target_language, "
+            "track.proficiency_framework, track.status, track.is_primary "
+            "FROM learning_tracks track JOIN users learner ON learner.user_id = track.user_id "
+            "ORDER BY track.created_at"
+        )
+        try:
+            default: str | None = resolve_track(database, None)
+        except LinguaWikiError:
+            default = None
+        only = len(rows) == 1
+        return TrackListReport(
+            tracks=tuple(
+                TrackListEntry(
+                    track_id=str(row[0]),
+                    display_name=str(row[1]),
+                    target_language=str(row[2]),
+                    proficiency_framework=str(row[3]),
+                    pack_key=_read_track(database, str(row[0])).pack_key,
+                    status=str(row[4]),
+                    is_primary=bool(row[5]),
+                    selectable=str(row[4]) == "active" or only,
+                )
+                for row in rows
+            ),
+            default_track_id=default,
+        )
+
+
 def track_context(database: Database, track_id: str) -> TrackRecord:
     """A track record read inside a caller's connection."""
 
@@ -1105,11 +1180,14 @@ def track_recording_policy(database: Database, track_id: str) -> RecordingPolicy
 __all__ = [
     "CORRECTION_MODES",
     "RecordingPolicy",
+    "TrackListEntry",
+    "TrackListReport",
     "TrackPreferences",
     "TrackRecord",
     "UserRecord",
     "create_track",
     "create_user",
+    "discover_tracks",
     "list_tracks",
     "list_users",
     "recording_policy",

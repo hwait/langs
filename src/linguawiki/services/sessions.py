@@ -34,6 +34,7 @@ from typing import Any
 
 from pydantic import Field, ValidationError
 
+from linguawiki import idempotency
 from linguawiki import planner as planner_policy
 from linguawiki import session as session_policy
 from linguawiki import sources as source_policy
@@ -211,6 +212,9 @@ class SessionReport(ContractModel):
     started_at: str | None = None
     closed_at: str | None = None
     next_actions: tuple[str, ...] = ()
+    #: True when a keyed command found its own earlier call and answered with the session
+    #: as it stands, rather than doing the work again.
+    replayed: bool = False
     warnings: tuple[str, ...] = ()
 
 
@@ -291,13 +295,80 @@ class IngestReport(ContractModel):
     warnings: tuple[str, ...] = ()
 
 
+class RecoveredEvent(ContractModel):
+    """One staged event moved by a recovery: where it was, and the row it became."""
+
+    source_staged_event_id: str
+    staged_event_id: str
+
+
 class RecoverReport(ContractModel):
     source_session_id: str
     target_session_id: str
     batch_id: str | None = None
     recovered: int = 0
     skipped: int = 0
+    recovered_events: tuple[RecoveredEvent, ...] = ()
+    #: True when this key already recovered and the report is rebuilt from what it
+    #: recorded. A retry after the events moved is answered with where they went.
+    replayed: bool = False
     warnings: tuple[str, ...] = ()
+
+
+class SessionListEntry(ContractModel):
+    """One session as a page deciding what to draw needs it."""
+
+    session_id: str
+    status: str
+    mode: str
+    planned_minutes: int
+    planned_at: str
+    staged_events: int = 0
+    batches: int = 0
+    finalized: bool = False
+    open: bool = False
+    recoverable: bool = False
+
+
+class SessionListReport(ContractModel):
+    track_id: str
+    sessions: tuple[SessionListEntry, ...] = ()
+
+
+class BatchSummary(ContractModel):
+    """A flush as identifiers: never its events, which can hold the learner's words."""
+
+    sequence: int
+    idempotency_key: str
+    content_hash: str
+    event_count: int
+    created_at: str
+
+
+class StagingState(ContractModel):
+    """What a close of this session would consume now, and its fingerprint."""
+
+    digest: str
+    count: int
+
+
+class SessionScreen(ContractModel):
+    """Everything a page needs to draw one session, read on one connection."""
+
+    session: SessionReport
+    staged: StagedListing
+    #: Staged (not yet credited) events per block. Events with no block -- every
+    #: recovered one among them -- are counted in `unattributed`, because a partial close
+    #: excludes by block and cannot reach them.
+    staged_by_block: dict[str, int] = Field(default_factory=dict)
+    unattributed: int = 0
+    batches: tuple[BatchSummary, ...] = ()
+    missing_batch_sequences: tuple[int, ...] = ()
+    staging: StagingState
+    #: The operations legal now, by route operation ID. Derived from the same table as
+    #: the CLI's `next_actions`, so a page and a terminal never disagree about it.
+    actions: tuple[str, ...] = ()
+    closing_interrupted: bool = False
 
 
 def _json_list(raw: object) -> tuple[str, ...]:
@@ -1236,6 +1307,31 @@ def resolve_session(database: Database, session: str | None, *, track_id: str | 
     return str(rows[0][0])
 
 
+def resolve_session_and_track(
+    database: Database, session: str | None, track: str | None
+) -> tuple[str, str]:
+    """`(track_id, session_id)`, resolving the track *from the session* when one is named.
+
+    Resolving the track first and the session second refused every named session on a
+    workspace with two active tracks: `resolve_track(None)` cannot choose, and the
+    session that would have told it was never read. A named session belongs to one track,
+    so that track is the answer, and a track given beside it must agree.
+    """
+
+    if session is not None:
+        row = _session_row(database, session)
+        track_id = str(row[1])
+        if track is not None and learner_service.resolve_track(database, track) != track_id:
+            raise LinguaWikiError(
+                "session_track_mismatch",
+                f"session {session} belongs to another track on this workspace",
+                details=(ErrorDetail(field="session", reason="different track"),),
+            )
+        return track_id, str(row[0])
+    track_id = learner_service.resolve_track(database, track)
+    return track_id, resolve_session(database, None, track_id=track_id)
+
+
 def _read_blocks(database: Database, *, session_id: str) -> tuple[SessionBlockReport, ...]:
     blocks: list[SessionBlockReport] = []
     for row in database.query(
@@ -1324,20 +1420,56 @@ def _resume_point(blocks: Sequence[SessionBlockReport], *, status: str) -> Resum
     return None
 
 
+#: What may happen to a session next: `(operation ID, the CLI's words for it)`. One table
+#: for both readers, so a page drawing buttons and a terminal printing advice cannot
+#: disagree. Words are `None` where the CLI has never advertised the move.
+_ACTIONS: Mapping[str, tuple[tuple[str, str | None], ...]] = {
+    "planned": (("session.start", "session start"), ("session.abandon", None)),
+    "active": (
+        ("session.import", "session log"),
+        ("session.close", "session close --outcome completed"),
+        ("session.partial-close", "session partial-close"),
+        ("session.abandon", None),
+    ),
+    "closing": (
+        ("session.close", "session close (retry: the previous close did not finish)"),
+        ("session.abandon", "session abandon"),
+    ),
+    "recoverable": (("session.recover", "session recover (staged work is still on record)"),),
+}
+
+
+def is_recoverable(*, status: str, staged: int) -> bool:
+    """Whether `recover` would accept this session as a source. One predicate for both."""
+
+    return status in session_policy.TERMINAL_STATUSES and staged > 0
+
+
+def _action_rows(
+    *, status: str, staged: int, finalized: bool
+) -> tuple[tuple[str, str | None], ...]:
+    if status == "closing":
+        return () if finalized else _ACTIONS["closing"]
+    if is_recoverable(status=status, staged=staged):
+        return _ACTIONS["recoverable"]
+    return _ACTIONS.get(status, ())
+
+
+def _actions(*, status: str, staged: int, finalized: bool) -> tuple[str, ...]:
+    return tuple(
+        operation
+        for operation, _ in _action_rows(status=status, staged=staged, finalized=finalized)
+    )
+
+
 def _next_actions(*, status: str, staged: int, finalized: bool) -> tuple[str, ...]:
     """What the reader can do next, in the words of the commands that do it."""
 
-    if status == "planned":
-        return ("session start",)
-    if status == "active":
-        return ("session log", "session close --outcome completed", "session partial-close")
-    if status == "closing":
-        if finalized:
-            return ()
-        return ("session close (retry: the previous close did not finish)", "session abandon")
-    if status in session_policy.TERMINAL_STATUSES and staged:
-        return ("session recover (staged work is still on record)",)
-    return ()
+    return tuple(
+        words
+        for _, words in _action_rows(status=status, staged=staged, finalized=finalized)
+        if words is not None
+    )
 
 
 def _read_finalization(database: Database, *, session_id: str) -> CloseReport | None:
@@ -1419,8 +1551,7 @@ def show(
     """Read one session: its plan, what it is holding, and what it became."""
 
     with open_reader(paths, clock=clock or SystemClock()) as database:
-        track_id = None if session is not None else learner_service.resolve_track(database, track)
-        session_id = resolve_session(database, session, track_id=track_id)
+        _, session_id = resolve_session_and_track(database, session, track)
         return _read_session(database, session_id=session_id)
 
 
@@ -1435,9 +1566,185 @@ def staged(
     """The provisional events a session is holding, in the order they were flushed."""
 
     with open_reader(paths, clock=clock or SystemClock()) as database:
-        track_id = None if session is not None else learner_service.resolve_track(database, track)
-        session_id = resolve_session(database, session, track_id=track_id)
+        _, session_id = resolve_session_and_track(database, session, track)
         return _read_staged(database, session_id=session_id, limit=limit)
+
+
+def _staged_listing(
+    database: Database,
+    *,
+    session_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    status: str | None = None,
+) -> StagedListing:
+    """A page of staged rows and how many the filter matches in all.
+
+    `total` counts the *filtered* set, so a caller paging through "what can still be
+    recovered" can tell when it has seen all of it -- half a list looks exactly like a
+    short one otherwise.
+    """
+
+    if limit < 1 or offset < 0:
+        raise LinguaWikiError(
+            "invalid_page",
+            "a listing page needs a positive limit and a non-negative offset",
+            details=(
+                ErrorDetail(field="limit", reason=str(limit)),
+                ErrorDetail(field="offset", reason=str(offset)),
+            ),
+        )
+    clause, parameters = _staged_filter(status)
+    total = int(
+        database.scalar(
+            "SELECT count(*) FROM session_staged_events staged WHERE staged.session_id = ?"
+            + clause,
+            [session_id, *parameters],
+        )
+    )
+    events = _read_staged(
+        database, session_id=session_id, limit=limit, offset=offset, status=status
+    )
+    warnings = (
+        (f"{total - offset - len(events)} more event(s) follow this page",)
+        if offset + len(events) < total
+        else ()
+    )
+    return StagedListing(events=events, total=total, warnings=warnings)
+
+
+def staged_listing(
+    paths: WorkspacePaths,
+    *,
+    session: str | None = None,
+    track: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    status: str | None = None,
+    clock: Clock | None = None,
+) -> StagedListing:
+    """The staged rows of a session, filtered by status, with the filtered total."""
+
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        _, session_id = resolve_session_and_track(database, session, track)
+        return _staged_listing(
+            database, session_id=session_id, limit=limit, offset=offset, status=status
+        )
+
+
+def discover(
+    paths: WorkspacePaths,
+    *,
+    track: str | None = None,
+    states: Sequence[str] = ("open", "recoverable"),
+    clock: Clock | None = None,
+) -> SessionListReport:
+    """The sessions of one track a page can carry on with or recover from, newest first.
+
+    Per track and never across tracks: a session belongs to one learner, and a list that
+    mixed two would invite recovering one learner's work into another's plan.
+    """
+
+    for state in states:
+        assert_known(
+            state, vocabulary=("open", "recoverable"), field="state", code="unknown_session_state"
+        )
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        track_id = learner_service.resolve_track(database, track)
+        rows = database.query(
+            "SELECT session.session_id, session.status, session.mode, session.planned_minutes, "
+            "session.planned_at, "
+            "(SELECT count(*) FROM session_staged_events staged "
+            " WHERE staged.session_id = session.session_id AND staged.status = 'staged'), "
+            "(SELECT count(*) FROM session_event_batches batch "
+            " WHERE batch.session_id = session.session_id), "
+            "(SELECT count(*) FROM session_finalizations final "
+            " WHERE final.session_id = session.session_id) "
+            "FROM sessions session WHERE session.track_id = ? "
+            "ORDER BY session.planned_at DESC, session.session_id DESC",
+            [track_id],
+        )
+        entries = []
+        for row in rows:
+            status, staged = str(row[1]), int(row[5])
+            entry = SessionListEntry(
+                session_id=str(row[0]),
+                status=status,
+                mode=str(row[2]),
+                planned_minutes=int(row[3]),
+                planned_at=aware_utc(row[4]).isoformat(),
+                staged_events=staged,
+                batches=int(row[6]),
+                finalized=int(row[7]) > 0,
+                open=status in ("planned", "active", "closing"),
+                recoverable=is_recoverable(status=status, staged=staged),
+            )
+            if ("open" in states and entry.open) or ("recoverable" in states and entry.recoverable):
+                entries.append(entry)
+        return SessionListReport(track_id=track_id, sessions=tuple(entries))
+
+
+def _staging_state(database: Database, *, session_id: str) -> StagingState:
+    """The fingerprint of what a close would consume now: the set `_staged_rows` reads."""
+
+    identifiers = sorted(
+        row.staged_event_id
+        for row in _staged_rows(database, session_id=session_id, discard_blocks=())
+    )
+    return StagingState(digest=canonical_hash(identifiers), count=len(identifiers))
+
+
+def screen(
+    paths: WorkspacePaths,
+    *,
+    session: str,
+    track: str | None = None,
+    clock: Clock | None = None,
+) -> SessionScreen:
+    """One read for a page: the plan, the staging, the batches, and the legal next moves."""
+
+    with open_reader(paths, clock=clock or SystemClock()) as database:
+        _, session_id = resolve_session_and_track(database, session, track)
+        report = _read_session(database, session_id=session_id)
+        by_block: dict[str, int] = {}
+        unattributed = 0
+        for block_id, number in database.query(
+            "SELECT block_id, count(*) FROM session_staged_events "
+            "WHERE session_id = ? AND status = 'staged' GROUP BY block_id ORDER BY block_id",
+            [session_id],
+        ):
+            if block_id is None:
+                unattributed = int(number)
+            else:
+                by_block[str(block_id)] = int(number)
+        batches = tuple(
+            BatchSummary(
+                sequence=int(row[0]),
+                idempotency_key=str(row[1]),
+                content_hash=str(row[2]),
+                event_count=int(row[3]),
+                created_at=aware_utc(row[4]).isoformat(),
+            )
+            for row in database.query(
+                "SELECT sequence, idempotency_key, content_hash, event_count, created_at "
+                "FROM session_event_batches WHERE session_id = ? ORDER BY sequence",
+                [session_id],
+            )
+        )
+        finalized = report.finalization is not None
+        return SessionScreen(
+            session=report,
+            staged=_staged_listing(database, session_id=session_id),
+            staged_by_block=by_block,
+            unattributed=unattributed,
+            batches=batches,
+            missing_batch_sequences=_missing_batch_sequences(database, session_id=session_id),
+            staging=_staging_state(database, session_id=session_id),
+            actions=_actions(
+                status=report.status, staged=report.staged_events, finalized=finalized
+            ),
+            closing_interrupted=report.status == "closing" and not finalized,
+        )
 
 
 def _staged_summary(kind: str, payload: Mapping[str, Any]) -> str:
@@ -1467,17 +1774,35 @@ def _staged_summary(kind: str, payload: Mapping[str, Any]) -> str:
     return kind
 
 
+#: The statuses a staged row can hold, as the schema's CHECK lists them.
+STAGED_STATUSES: tuple[str, ...] = ("staged", "materialized", "discarded", "rejected")
+
+
+def _staged_filter(status: str | None) -> tuple[str, list[Any]]:
+    if status is None:
+        return "", []
+    assert_known(status, vocabulary=STAGED_STATUSES, field="status", code="unknown_staged_status")
+    return " AND staged.status = ?", [status]
+
+
 def _read_staged(
-    database: Database, *, session_id: str, limit: int = 100
+    database: Database,
+    *,
+    session_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    status: str | None = None,
 ) -> tuple[StagedEventReport, ...]:
+    clause, parameters = _staged_filter(status)
     rows = database.query(
         "SELECT staged.staged_event_id, batch.sequence, staged.sequence, staged.kind, "
         "staged.status, staged.evidence_basis, staged.block_id, staged.payload_json, "
         "staged.materialized_kind, staged.materialized_id, staged.discard_reason "
         "FROM session_staged_events staged "
         "JOIN session_event_batches batch ON batch.batch_id = staged.batch_id "
-        "WHERE staged.session_id = ? ORDER BY batch.sequence, staged.sequence LIMIT ?",
-        [session_id, limit],
+        "WHERE staged.session_id = ?" + clause + " "
+        "ORDER BY batch.sequence, staged.sequence LIMIT ? OFFSET ?",
+        [session_id, *parameters, limit, offset],
     )
     return tuple(
         StagedEventReport(
@@ -1556,8 +1881,7 @@ def start(
 
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
-        track_id = learner_service.resolve_track(database, track)
-        session_id = resolve_session(database, session, track_id=track_id)
+        track_id, session_id = resolve_session_and_track(database, session, track)
         row = _session_row(database, session_id)
         status = str(row[2])
         if status == "active":
@@ -1605,8 +1929,7 @@ def resume(
 
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
-        track_id = learner_service.resolve_track(database, track)
-        session_id = resolve_session(database, session, track_id=track_id)
+        track_id, session_id = resolve_session_and_track(database, session, track)
         row = _session_row(database, session_id)
         status = str(row[2])
         if status == "planned":
@@ -1655,6 +1978,7 @@ def abandon(
     session: str | None = None,
     track: str | None = None,
     reason: str | None = None,
+    idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "session.abandon",
 ) -> SessionReport:
@@ -1667,8 +1991,31 @@ def abandon(
 
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
-        track_id = learner_service.resolve_track(database, track)
-        session_id = resolve_session(database, session, track_id=track_id)
+        track_id, session_id = resolve_session_and_track(database, session, track)
+        request = idempotency.request_hash(
+            operation="session.abandon",
+            session_id=session_id,
+            reason=None if reason is None else canonical_hash(reason),
+        )
+        # Before the transition, which would refuse an abandoned session: a retry whose
+        # first call landed is answered as the retry it is, not as an illegal move.
+        if (
+            idempotency.resolve(
+                database, key=idempotency_key, event_type="session.abandoned", request_hash=request
+            )
+            is not None
+        ):
+            replayed = _read_session(database, session_id=session_id)
+            return replayed.model_copy(
+                update={
+                    "replayed": True,
+                    "warnings": (
+                        *replayed.warnings,
+                        "this session was already abandoned under this key; nothing was "
+                        "written again",
+                    ),
+                }
+            )
         row = _session_row(database, session_id)
         status = str(row[2])
         staged_count = int(
@@ -1715,9 +2062,10 @@ def abandon(
                 aggregate_type="session",
                 aggregate_id=session_id,
                 correlation_id=EventId.new(),
-                payload_json=json.dumps(
-                    {"staged_events": staged_count, "reason": reason}, sort_keys=True
+                payload_json=idempotency.payload(
+                    request, staged_events=staged_count, reason=reason
                 ),
+                idempotency_key=idempotency_key,
             )
         report = _read_session(database, session_id=session_id)
     if staged_count:
@@ -1767,18 +2115,13 @@ def _own_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     package's own `details`.
     """
 
-    return {
-        key: value
-        for key, value in payload.items()
-        if key
-        not in (
-            "source",
-            "package_id",
-            "external_session_id",
-            "utterance_id",
-            "transcript_layer",
-        )
-    }
+    return {key: value for key, value in payload.items() if key not in _CLAIMED_PROVENANCE}
+
+
+#: What `_own_payload` removes from a skill flush or an import.
+_CLAIMED_PROVENANCE: frozenset[str] = frozenset(
+    {"source", "package_id", "external_session_id", "utterance_id", "transcript_layer"}
+)
 
 
 def _retained_payload(
@@ -1978,6 +2321,7 @@ def log(
     track: str | None = None,
     clock: Clock | None = None,
     command: str = "session.log",
+    require_declared_assessor: bool = False,
 ) -> BatchReport:
     """Store one flush durably, and change nothing about the learner.
 
@@ -1990,6 +2334,11 @@ def log(
       gap is visible at close instead of being closed over;
     - the content hash: when the caller sends one and it disagrees with the events, the
       batch is refused, because something was lost between the skill and here.
+
+    `require_declared_assessor` is for a file of unknown origin. An attempt's
+    `assessor_kind` defaults to `ai`, which is right for the skill's own flush and a
+    guess about anything else; an import has to say who judged each attempt, and the
+    question is answered from the fields the payload *set*, before any default fills in.
     """
 
     validated = (
@@ -2005,6 +2354,36 @@ def log(
             f"a batch carries at most {MAXIMUM_BATCH_EVENTS} events; flush at block boundaries",
             details=(ErrorDetail(field="events", reason=str(len(validated.events))),),
         )
+    declared_session = None if validated.session_id is None else str(validated.session_id)
+    if session is not None and declared_session is not None and declared_session != session:
+        raise LinguaWikiError(
+            "session_batch_wrong_session",
+            f"this batch names session {declared_session} and was sent to session {session}; "
+            "a batch is staged on the session it was written for",
+            details=(
+                ErrorDetail(field="session_id", reason=declared_session),
+                ErrorDetail(field="session", reason=session),
+            ),
+        )
+    if require_declared_assessor:
+        undeclared = [
+            str(event.event_id)
+            for event in validated.events
+            if event.kind == "attempt.observed"
+            and "assessor_kind" not in event.payload.model_fields_set
+        ]
+        if undeclared:
+            raise LinguaWikiError(
+                "session_import_assessor_required",
+                "an imported attempt must say who assessed it; these do not: "
+                + ", ".join(undeclared),
+                details=tuple(
+                    ErrorDetail(
+                        field="assessor_kind", reason="not declared", context={"event_id": event}
+                    )
+                    for event in undeclared
+                ),
+            )
     payload = _batch_payload(validated)
     content_hash = canonical_hash(payload)
     if validated.content_hash is not None and validated.content_hash != content_hash:
@@ -2019,11 +2398,8 @@ def log(
         )
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
-        track_id = learner_service.resolve_track(database, track)
-        session_id = resolve_session(
-            database,
-            session or (str(validated.session_id) if validated.session_id else None),
-            track_id=track_id,
+        track_id, session_id = resolve_session_and_track(
+            database, session or declared_session, track
         )
         existing = database.one(
             "SELECT batch_id, session_id, sequence, content_hash, event_count FROM "
@@ -2109,6 +2485,18 @@ def log(
         # the one that has to be materializable -- and it is checked here rather than at
         # close, where a refusal would leave the session holding work nobody can credit.
         retained_payloads = []
+        stripped_warnings = []
+        for event in validated.events:
+            stripped = sorted(
+                field
+                for field in event.payload.model_fields_set
+                if field in _CLAIMED_PROVENANCE and getattr(event.payload, field, None) is not None
+            )
+            if stripped:
+                stripped_warnings.append(
+                    f"event {event.event_id}: removed provenance a flush may not claim "
+                    f"({', '.join(stripped)})"
+                )
         for event, entry in zip(validated.events, payload, strict=True):
             retained = _retained_payload(
                 _own_payload(entry["payload"]), preferences=_preferences(record)
@@ -2209,6 +2597,7 @@ def log(
             content_hash=content_hash,
             event_count=len(validated.events),
             staged_events=len(validated.events),
+            warnings=tuple(stripped_warnings),
         )
 
 
@@ -2223,7 +2612,105 @@ def _calculation_versions() -> dict[str, str]:
         "planner": planner_policy.PLANNER_VERSION,
         "lifecycle": session_policy.LIFECYCLE_VERSION,
         "strength": STRENGTH_VERSION,
+        CLOSE_REQUEST_VERSION_KEY: CLOSE_REQUEST_VERSION,
     }
+
+
+#: Marks a finalization whose close event carries a request hash. Its absence, together
+#: with an event payload in exactly the shape below, is what identifies a close recorded
+#: before requests were hashed -- two markers, so damage to one is not read as age.
+CLOSE_REQUEST_VERSION_KEY = "close_request"
+CLOSE_REQUEST_VERSION = "1"
+_LEGACY_CLOSE_PAYLOAD_KEYS = frozenset(
+    {"attempts", "errors", "evidence", "outcome", "staged_consumed"}
+)
+
+
+def _close_request_hash(
+    *,
+    session_id: str,
+    outcome: str,
+    actual_minutes: int | None,
+    fatigue: str | None,
+    summary: str | None,
+    discard_blocks: Sequence[str],
+    expected_staging: str | None,
+) -> str:
+    """Everything a close turns on. The summary goes in as a hash: it is learner text,
+    and the hash is stored in an event that is never edited."""
+
+    return idempotency.request_hash(
+        operation="session.close",
+        session_id=session_id,
+        outcome=outcome,
+        actual_minutes=actual_minutes,
+        fatigue=fatigue,
+        summary=None if summary is None else canonical_hash(summary),
+        discard_blocks=sorted(set(discard_blocks)),
+        expected_staging=expected_staging,
+    )
+
+
+def _unvouched(key: str, session_id: str) -> LinguaWikiError:
+    return LinguaWikiError(
+        "idempotency_conflict",
+        f"close key {key} closed session {session_id}, but what that close was asked for "
+        "cannot be read back, so this call cannot be shown to be a retry of it; "
+        "`session show` reports what it recorded",
+        details=(
+            ErrorDetail(
+                field="idempotency_key",
+                reason="recorded request is unknown",
+                context={"idempotency_key": key},
+            ),
+        ),
+    )
+
+
+def _vouch_for_keyed_close(
+    database: Database,
+    *,
+    session_id: str,
+    key: str,
+    request: str,
+) -> tuple[str, ...]:
+    """Decide whether a keyed close of a finalized session is a retry, before replaying it.
+
+    Returns the warnings the replay should carry. Raises when the stored close cannot be
+    shown to be the same request. Three cases, told apart by what the finalization row
+    says about itself *and* what its event says -- never by one of them alone:
+
+    - a C7 close: the request hash decides, through `idempotency.resolve`;
+    - a close from before request hashing: its outcome alone decides, as it always did;
+    - anything else -- a missing event, a payload that will not parse, markers that
+      disagree -- is a record nobody can vouch for, and is refused.
+    """
+
+    raw_versions = database.scalar(
+        "SELECT calculation_versions_json FROM session_finalizations WHERE session_id = ?",
+        [session_id],
+    )
+    versions = _json_object(raw_versions)
+    event = database.one(
+        "SELECT event_type, payload_json FROM domain_events WHERE idempotency_key = ?",
+        [key],
+    )
+    if CLOSE_REQUEST_VERSION_KEY in versions:
+        if event is None:
+            raise _unvouched(key, session_id)
+        idempotency.resolve(database, key=key, event_type="session.closed", request_hash=request)
+        return ()
+    if event is None or str(event[0]) != "session.closed":
+        raise _unvouched(key, session_id)
+    try:
+        stored = json.loads(str(event[1]))
+    except (ValueError, RecursionError):
+        raise _unvouched(key, session_id) from None
+    if not isinstance(stored, dict) or set(stored) != _LEGACY_CLOSE_PAYLOAD_KEYS:
+        raise _unvouched(key, session_id)
+    return (
+        "this close predates request hashing, so only its outcome was compared with this retry",
+    )
 
 
 def _missing_batch_sequences(database: Database, *, session_id: str) -> tuple[int, ...]:
@@ -2847,6 +3334,7 @@ def close(
     summary: str | None = None,
     discard_blocks: Sequence[str] = (),
     idempotency_key: str | None = None,
+    expected_staging: str | None = None,
     clock: Clock | None = None,
     command: str = "session.close",
 ) -> CloseReport:
@@ -2865,6 +3353,12 @@ def close(
        block statuses, the session's own status, the projection's staleness, and the
        finalization row holding this report. Either all of that is true afterwards or
        none of it is.
+
+    A keyed close is bound to a hash of its whole request, so a retry with other
+    arguments is a conflict rather than a replay that pretends to honour them.
+    `expected_staging` is the digest of the staged set the caller confirmed: when the set
+    has changed since, the close is refused before `closing` is written, so a close
+    never credits work its caller did not see.
     """
 
     if outcome not in session_policy.CLOSE_OUTCOMES:
@@ -2893,18 +3387,40 @@ def close(
         )
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
-        track_id = learner_service.resolve_track(database, track)
-        session_id = resolve_session(database, session, track_id=track_id)
+        track_id, session_id = resolve_session_and_track(database, session, track)
         row = _session_row(database, session_id)
         status = str(row[2])
         # Before the replay, not after it. A finalized session returned its stored result
         # without ever comparing the key, so one key could successfully identify two
         # different closes -- which is the opposite of what an idempotency key is for.
+        request = _close_request_hash(
+            session_id=session_id,
+            outcome=outcome,
+            actual_minutes=actual_minutes,
+            fatigue=fatigue,
+            summary=summary,
+            discard_blocks=discard_blocks,
+            expected_staging=expected_staging,
+        )
         if idempotency_key is not None:
             _assert_close_key_belongs(
                 database, session_id=session_id, idempotency_key=idempotency_key
             )
         stored = _read_finalization(database, session_id=session_id)
+        replay_warnings: tuple[str, ...] = ()
+        if stored is not None and idempotency_key is not None:
+            replay_warnings = _vouch_for_keyed_close(
+                database, session_id=session_id, key=idempotency_key, request=request
+            )
+        elif idempotency_key is not None and (
+            idempotency.resolve(
+                database, key=idempotency_key, event_type="session.closed", request_hash=request
+            )
+            is not None
+        ):
+            # An event under this key with no finalization behind it: the record is
+            # damaged, and replaying nothing as if it were a close would be a lie.
+            raise _unvouched(idempotency_key, session_id)
         if stored is not None:
             if stored.outcome != outcome:
                 raise LinguaWikiError(
@@ -2921,6 +3437,7 @@ def close(
                     "replayed": True,
                     "warnings": (
                         *stored.warnings,
+                        *replay_warnings,
                         "this session was already closed; the original result is returned "
                         "and nothing was written again",
                     ),
@@ -2947,6 +3464,23 @@ def close(
             )
         for block in discard_blocks:
             _resolve_block(database, session_id=session_id, block=block)
+        if expected_staging is not None:
+            current = _staging_state(database, session_id=session_id)
+            if current.digest != expected_staging:
+                raise LinguaWikiError(
+                    "session_staging_changed",
+                    f"session {session_id} holds different staged work from what this close "
+                    f"was confirmed against: {current.count} event(s) are staged now. Review "
+                    "them and confirm the close again.",
+                    details=(
+                        ErrorDetail(field="expected_staging", reason=expected_staging),
+                        ErrorDetail(
+                            field="staging",
+                            reason=current.digest,
+                            context={"count": current.count},
+                        ),
+                    ),
+                )
         now = aware_utc(database.now())
         if status != "closing":
             # Its own transaction: the durable `closing` marker has to survive a failure
@@ -3077,15 +3611,13 @@ def close(
                 aggregate_type="session",
                 aggregate_id=session_id,
                 correlation_id=EventId.new(),
-                payload_json=json.dumps(
-                    {
-                        "outcome": outcome,
-                        "attempts": report.attempts_written,
-                        "evidence": report.evidence_written,
-                        "errors": report.errors_written,
-                        "staged_consumed": report.staged_consumed,
-                    },
-                    sort_keys=True,
+                payload_json=idempotency.payload(
+                    request,
+                    outcome=outcome,
+                    attempts=report.attempts_written,
+                    evidence=report.evidence_written,
+                    errors=report.errors_written,
+                    staged_consumed=report.staged_consumed,
                 ),
                 idempotency_key=idempotency_key or finalization_id,
             )
@@ -3163,6 +3695,7 @@ def partial_close(
     summary: str | None = None,
     discard_blocks: Sequence[str] = (),
     idempotency_key: str | None = None,
+    expected_staging: str | None = None,
     clock: Clock | None = None,
     command: str = "session.partial-close",
 ) -> CloseReport:
@@ -3183,6 +3716,7 @@ def partial_close(
         summary=summary,
         discard_blocks=discard_blocks,
         idempotency_key=idempotency_key,
+        expected_staging=expected_staging,
         clock=clock,
         command=command,
     )
@@ -3900,6 +4434,7 @@ def recover(
     target: str | None = None,
     events: Sequence[str] = (),
     track: str | None = None,
+    idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "session.recover",
 ) -> RecoverReport:
@@ -3910,12 +4445,33 @@ def recover(
     copied into a new batch on the target session and the originals are marked
     `discarded` naming where they went, so the same observation cannot be credited
     twice and the audit trail says what happened.
+
+    A keyed recovery is bound to the request *as asked* -- the source, the target or "the
+    open session", and the selection -- never to what that selection resolved to, because
+    a retry after the events moved resolves to nothing. What it resolved to is kept as a
+    snapshot on the event, and a retry is answered from it before the source, the target,
+    or the events are looked at again.
     """
 
     active_clock = clock or SystemClock()
     with open_writer(paths, command=command, clock=active_clock) as database:
-        track_id = learner_service.resolve_track(database, track)
-        source_id = resolve_session(database, source, track_id=track_id)
+        track_id, source_id = resolve_session_and_track(database, source, track)
+        selected = tuple(events)
+        request = idempotency.request_hash(
+            operation="session.recover",
+            source_session_id=source_id,
+            target=target,
+            selection="explicit" if selected else "all",
+            events=sorted(selected),
+        )
+        recorded = idempotency.resolve(
+            database,
+            key=idempotency_key,
+            event_type="session.staged_recovered",
+            request_hash=request,
+        )
+        if recorded is not None:
+            return _replayed_recovery(recorded, source_id=source_id)
         source_row = _session_row(database, source_id)
         if str(source_row[2]) not in session_policy.TERMINAL_STATUSES:
             raise LinguaWikiError(
@@ -3933,7 +4489,6 @@ def recover(
             )
         target_row = _session_row(database, target_id)
         _assert_loggable(session_id=target_id, status=str(target_row[2]))
-        selected = tuple(events)
         rows = database.query(
             "SELECT staged_event_id, kind, schema_version, payload_json, evidence_basis, "
             "occurred_at, source_event_id FROM session_staged_events "
@@ -3975,6 +4530,11 @@ def recover(
         )
         batch_id = str(BatchId.new())
         now = aware_utc(database.now())
+        moved: list[RecoveredEvent] = []
+        warnings = (
+            "the recovered events are staged on the target session and credited to "
+            "nothing until it is closed",
+        )
         with database.transaction() as transaction:
             transaction.execute(
                 "INSERT INTO session_event_batches (batch_id, session_id, sequence, "
@@ -3984,20 +4544,29 @@ def recover(
                     batch_id,
                     target_id,
                     sequence,
-                    f"recovery:{source_id}:{sequence}",
+                    # Prefixed rather than the caller's key itself: batch keys share one
+                    # namespace with every flush, and a recovery key must not collide
+                    # with a skill's batch key.
+                    f"recovery:{idempotency_key}"
+                    if idempotency_key is not None
+                    else f"recovery:{source_id}:{sequence}",
                     canonical_hash(payloads),
                     len(chosen),
                     naive_utc(now),
                 ],
             )
             for position, (row, payload) in enumerate(zip(chosen, payloads, strict=True), start=1):
+                new_id = str(StagedEventId.new())
+                moved.append(
+                    RecoveredEvent(source_staged_event_id=str(row[0]), staged_event_id=new_id)
+                )
                 transaction.execute(
                     "INSERT INTO session_staged_events (staged_event_id, session_id, batch_id, "
                     "sequence, kind, schema_version, payload_json, evidence_basis, status, "
                     "occurred_at, source_event_id, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?)",
                     [
-                        str(StagedEventId.new()),
+                        new_id,
                         target_id,
                         batch_id,
                         position,
@@ -4033,9 +4602,17 @@ def recover(
                 aggregate_type="session",
                 aggregate_id=target_id,
                 correlation_id=EventId.new(),
-                payload_json=json.dumps(
-                    {"source_session_id": source_id, "recovered": len(chosen)}, sort_keys=True
+                payload_json=idempotency.payload(
+                    request,
+                    source_session_id=source_id,
+                    target_session_id=target_id,
+                    batch_id=batch_id,
+                    recovered=len(chosen),
+                    skipped=len(rows) - len(chosen),
+                    recovered_events=[event.model_dump(mode="json") for event in moved],
+                    warnings=list(warnings),
                 ),
+                idempotency_key=idempotency_key,
             )
         return RecoverReport(
             source_session_id=source_id,
@@ -4043,11 +4620,37 @@ def recover(
             batch_id=batch_id,
             recovered=len(chosen),
             skipped=len(rows) - len(chosen),
+            recovered_events=tuple(moved),
+            warnings=warnings,
+        )
+
+
+def _replayed_recovery(recorded: Mapping[str, Any], *, source_id: str) -> RecoverReport:
+    """The report a keyed recovery returned, rebuilt from the snapshot its event kept."""
+
+    try:
+        return RecoverReport(
+            source_session_id=str(recorded["source_session_id"]),
+            target_session_id=str(recorded["target_session_id"]),
+            batch_id=None if recorded.get("batch_id") is None else str(recorded["batch_id"]),
+            recovered=int(recorded["recovered"]),
+            skipped=int(recorded.get("skipped", 0)),
+            recovered_events=tuple(
+                RecoveredEvent.model_validate(entry) for entry in recorded["recovered_events"]
+            ),
+            replayed=True,
             warnings=(
-                "the recovered events are staged on the target session and credited to "
-                "nothing until it is closed",
+                *(str(warning) for warning in recorded.get("warnings", ())),
+                "this recovery already happened under this key; nothing was moved again",
             ),
         )
+    except (KeyError, TypeError, ValueError, ValidationError):
+        raise LinguaWikiError(
+            "idempotency_conflict",
+            f"this key recovered staged work from session {source_id}, but what it moved "
+            "can no longer be read back; use a new key",
+            details=(ErrorDetail(field="idempotency_key", reason="recorded result is unreadable"),),
+        ) from None
 
 
 __all__ = [
@@ -4057,23 +4660,32 @@ __all__ = [
     "CloseReport",
     "IngestReport",
     "RecoverReport",
+    "RecoveredEvent",
     "ResumePoint",
     "SessionBlockReport",
+    "SessionListReport",
     "SessionReport",
+    "SessionScreen",
     "StagedEventReport",
     "StagedListing",
+    "StagingState",
     "abandon",
     "canonical_hash",
     "close",
     "create",
+    "discover",
     "ingest_package",
+    "is_recoverable",
     "log",
     "partial_close",
     "recover",
     "resolve_session",
+    "resolve_session_and_track",
     "resume",
+    "screen",
     "show",
     "staged",
+    "staged_listing",
     "start",
     "weekly_deficits",
 ]
