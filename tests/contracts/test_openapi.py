@@ -263,7 +263,7 @@ def test_the_token_is_required_by_the_document_not_only_by_the_server() -> None:
         for operation in path.values()
         if operation.get("security") == []
     )
-    assert public == ["/", "/app.css", "/app.js"]
+    assert public == ["/", "/app.css", "/app.js", "/sessions.html", "/sessions.js", "/transport.js"]
 
 
 def test_the_document_says_it_describes_shapes_rather_than_sequences() -> None:

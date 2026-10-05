@@ -197,6 +197,9 @@ def test_a_status_filtered_listing_counts_only_the_rows_it_could_return(
 
     assert remaining.total == 2
     assert len(remaining.events) == 1
+    # Who judged each staged attempt, so a page never presents an import as assessed by
+    # anyone in particular.
+    assert remaining.events[0].assessor_kind == "ai"
     assert {event.status for event in remaining.events} == {"staged"}
     assert everything.total == 3
     assert second_page.events[0].staged_event_id != remaining.events[0].staged_event_id
@@ -242,6 +245,9 @@ def test_discovery_separates_open_from_recoverable_and_skips_the_empty(
     assert by_id[source].recoverable and not by_id[source].open
     assert by_id[open_one.session_id].open and not by_id[open_one.session_id].recoverable
     assert empty.session_id not in by_id
+    # The planner's own vocabularies, so a page draws its choices without a copy of them.
+    assert "mixed" in listing.modes
+    assert listing.energy_levels == ("low", "normal", "high")
     only_open = session_service.discover(
         onboarded.paths, track=onboarded.track_id, states=("open",), clock=onboarded.clock
     )

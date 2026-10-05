@@ -1985,6 +1985,22 @@
       "SessionListReport": {
         "additionalProperties": false,
         "properties": {
+          "energy_levels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Energy Levels",
+            "type": "array"
+          },
+          "modes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Modes",
+            "type": "array"
+          },
           "sessions": {
             "default": [],
             "items": {
@@ -2391,6 +2407,18 @@
       "StagedEventReport": {
         "additionalProperties": false,
         "properties": {
+          "assessor_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Assessor Kind"
+          },
           "batch_sequence": {
             "title": "Batch Sequence",
             "type": "integer"
@@ -5709,6 +5737,64 @@
         "summary": "Plan one session for a track, recording why each block is there"
       }
     },
+    "/sessions.html": {
+      "get": {
+        "operationId": "shell_sessions_html",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
+      }
+    },
+    "/sessions.js": {
+      "get": {
+        "operationId": "shell_sessions_js",
+        "responses": {
+          "200": {
+            "content": {
+              "text/javascript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
+      }
+    },
     "/sessions/{session_id}/abandon": {
       "post": {
         "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
@@ -7145,6 +7231,35 @@
           }
         },
         "summary": "The tracks a page can offer, and the one it may take without asking"
+      }
+    },
+    "/transport.js": {
+      "get": {
+        "operationId": "shell_transport_js",
+        "responses": {
+          "200": {
+            "content": {
+              "text/javascript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A static file of the page shell."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          }
+        },
+        "security": [],
+        "summary": "The page shell, served from the installed package"
       }
     }
   },

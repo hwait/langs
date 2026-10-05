@@ -373,6 +373,9 @@ SHELL = {
     "/": "text/html; charset=utf-8",
     "/app.js": "text/javascript; charset=utf-8",
     "/app.css": "text/css; charset=utf-8",
+    "/transport.js": "text/javascript; charset=utf-8",
+    "/sessions.html": "text/html; charset=utf-8",
+    "/sessions.js": "text/javascript; charset=utf-8",
 }
 
 
@@ -398,6 +401,23 @@ def test_the_shell_loads_its_script_as_a_module_and_inlines_nothing(plain: Clien
     assert '<script type="module" src="/app.js"></script>' in page
     assert "<script>" not in page
     assert "style=" not in page
+
+
+def test_the_session_page_loads_its_script_as_a_module_and_inlines_nothing(plain: Client) -> None:
+    page = plain.get("/sessions.html", token=None).body.decode()
+
+    assert '<script type="module" src="/sessions.js"></script>' in page
+    assert "<script>" not in page
+    assert "style=" not in page
+
+
+def test_the_session_page_shell_does_not_shadow_the_session_route(plain: Client) -> None:
+    """`/sessions` is the discovery route, so the page lives at `/sessions.html`."""
+
+    answer = plain.get("/sessions", token=None)
+
+    assert answer.status == 403
+    assert answer.code == "client_token_required"
 
 
 def test_the_shell_is_still_behind_the_host_allowlist(plain: Client) -> None:
@@ -445,7 +465,7 @@ def test_the_shell_ships_in_the_package_not_the_workspace(
     from importlib.resources import files
 
     static = files("linguawiki.client") / "static"
-    for name in ("index.html", "app.js", "app.css"):
+    for name in ("index.html", "app.js", "app.css", "transport.js", "sessions.html", "sessions.js"):
         assert (static / name).is_file(), name
     assert not (polish_workspace.root / "static").exists()
 

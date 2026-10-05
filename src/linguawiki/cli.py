@@ -2756,6 +2756,7 @@ def _run_client(args: argparse.Namespace, clock: Clock, command: str) -> int:
         print(f"warning: {finding}", file=sys.stderr)
     print(f"LinguaWiki client listening on {client.origin}", file=sys.stderr)
     print(f"open {client.launch_url}", file=sys.stderr)
+    print(f"sessions {client.sessions_url}", file=sys.stderr)
     if not args.no_open:
         import webbrowser
 

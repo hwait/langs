@@ -151,6 +151,9 @@ class StagedEventReport(ContractModel):
     status: str
     evidence_basis: str
     block_id: str | None = None
+    #: Who the producer says judged an attempt. A page shows it as the producer's claim:
+    #: an imported file cannot be authenticated, so nothing here certifies it.
+    assessor_kind: str | None = None
     summary: str
     materialized_kind: str | None = None
     materialized_id: str | None = None
@@ -341,6 +344,10 @@ class SessionListEntry(ContractModel):
 class SessionListReport(ContractModel):
     track_id: str
     sessions: tuple[SessionListEntry, ...] = ()
+    #: The planner's vocabularies, so a page offers the modes and energy levels the planner
+    #: accepts without keeping a copy of them that could drift.
+    modes: tuple[str, ...] = ()
+    energy_levels: tuple[str, ...] = ()
 
 
 class BatchSummary(ContractModel):
@@ -1694,7 +1701,12 @@ def discover(
             )
             if ("open" in states and entry.open) or ("recoverable" in states and entry.recoverable):
                 entries.append(entry)
-        return SessionListReport(track_id=track_id, sessions=tuple(entries))
+        return SessionListReport(
+            track_id=track_id,
+            sessions=tuple(entries),
+            modes=tuple(session_policy.MODES),
+            energy_levels=session_policy.ENERGY_LEVELS,
+        )
 
 
 def _staging_state(database: Database, *, session_id: str) -> StagingState:
@@ -1758,6 +1770,13 @@ def screen(
             ),
             closing_interrupted=report.status == "closing" and not finalized,
         )
+
+
+def _staged_assessor(kind: str, payload: Mapping[str, Any]) -> str | None:
+    if kind != "attempt.observed":
+        return None
+    value = payload.get("assessor_kind")
+    return None if value is None else str(value)
 
 
 def _staged_summary(kind: str, payload: Mapping[str, Any]) -> str:
@@ -1826,6 +1845,7 @@ def _read_staged(
             status=str(row[4]),
             evidence_basis=str(row[5]),
             block_id=None if row[6] is None else str(row[6]),
+            assessor_kind=_staged_assessor(str(row[3]), _json_object(row[7])),
             summary=_staged_summary(str(row[3]), _json_object(row[7])),
             materialized_kind=None if row[8] is None else str(row[8]),
             materialized_id=None if row[9] is None else str(row[9]),
