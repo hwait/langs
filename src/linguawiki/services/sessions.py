@@ -218,7 +218,7 @@ class SessionReport(ContractModel):
     warnings: tuple[str, ...] = ()
 
 
-class BatchReport(ContractModel):
+class SessionBatchReport(ContractModel):
     """What one flush did, including doing nothing because it had already landed."""
 
     batch_id: str
@@ -232,6 +232,11 @@ class BatchReport(ContractModel):
     #: record did not change twice.
     duplicate: bool = False
     warnings: tuple[str, ...] = ()
+
+
+#: The name callers have always imported. The model is named for what it reports so the
+#: published contract does not confuse it with an assessment batch.
+BatchReport = SessionBatchReport
 
 
 class StageChangeReport(ContractModel):
@@ -954,6 +959,7 @@ def _write_plan(
     idempotency_key: str | None,
     request_hash: str,
     now: datetime,
+    actor: str = "cli",
 ) -> str:
     """Persist a plan: the session, its blocks, their targets, and the ranking."""
 
@@ -1071,6 +1077,7 @@ def _write_plan(
     migration_module.record_audit_entry(
         transaction,
         command="plan.create",
+        actor=actor,
         correlation_id=EventId.new(),
         outcome="succeeded",
         affected_records_json=json.dumps([session_id]),
@@ -1111,6 +1118,7 @@ def create(
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "plan.create",
+    actor: str = "cli",
 ) -> SessionReport:
     """Plan one session: choose its blocks, and record why each of them is there."""
 
@@ -1178,6 +1186,7 @@ def create(
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
                 now=now,
+                actor=actor,
             )
         return _read_session(database, session_id=session_id)
 
@@ -1981,6 +1990,7 @@ def abandon(
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "session.abandon",
+    actor: str = "cli",
 ) -> SessionReport:
     """Abandon a session: keep every staged event for audit, credit none of it.
 
@@ -2047,6 +2057,7 @@ def abandon(
             migration_module.record_audit_entry(
                 transaction,
                 command=command,
+                actor=actor,
                 correlation_id=EventId.new(),
                 outcome="succeeded",
                 affected_records_json=json.dumps([session_id]),
@@ -2321,8 +2332,9 @@ def log(
     track: str | None = None,
     clock: Clock | None = None,
     command: str = "session.log",
+    actor: str = "cli",
     require_declared_assessor: bool = False,
-) -> BatchReport:
+) -> SessionBatchReport:
     """Store one flush durably, and change nothing about the learner.
 
     Three things make a retry safe, and each of them refuses a *different* mistake:
@@ -2424,7 +2436,7 @@ def log(
                     [existing[0]],
                 )
             )
-            return BatchReport(
+            return SessionBatchReport(
                 batch_id=str(existing[0]),
                 session_id=session_id,
                 sequence=int(existing[2]),
@@ -2565,6 +2577,7 @@ def log(
             migration_module.record_audit_entry(
                 transaction,
                 command=command,
+                actor=actor,
                 correlation_id=EventId.new(),
                 outcome="succeeded",
                 affected_records_json=json.dumps([batch_id]),
@@ -2589,7 +2602,7 @@ def log(
                 ),
                 idempotency_key=validated.idempotency_key,
             )
-        return BatchReport(
+        return SessionBatchReport(
             batch_id=batch_id,
             session_id=session_id,
             sequence=validated.sequence,
@@ -3337,6 +3350,7 @@ def close(
     expected_staging: str | None = None,
     clock: Clock | None = None,
     command: str = "session.close",
+    actor: str = "cli",
 ) -> CloseReport:
     """Finalize a session: materialize its staged work exactly once, in one transaction.
 
@@ -3595,6 +3609,7 @@ def close(
             migration_module.record_audit_entry(
                 transaction,
                 command=command,
+                actor=actor,
                 correlation_id=EventId.new(),
                 outcome="succeeded",
                 affected_records_json=json.dumps([session_id, finalization_id]),
@@ -3698,6 +3713,7 @@ def partial_close(
     expected_staging: str | None = None,
     clock: Clock | None = None,
     command: str = "session.partial-close",
+    actor: str = "cli",
 ) -> CloseReport:
     """Close a deliberately shortened session, crediting only the work that happened.
 
@@ -3719,6 +3735,7 @@ def partial_close(
         expected_staging=expected_staging,
         clock=clock,
         command=command,
+        actor=actor,
     )
 
 
@@ -4437,6 +4454,7 @@ def recover(
     idempotency_key: str | None = None,
     clock: Clock | None = None,
     command: str = "session.recover",
+    actor: str = "cli",
 ) -> RecoverReport:
     """Move staged events from a finished session into an open one, after review.
 
@@ -4590,6 +4608,7 @@ def recover(
             migration_module.record_audit_entry(
                 transaction,
                 command=command,
+                actor=actor,
                 correlation_id=EventId.new(),
                 outcome="succeeded",
                 affected_records_json=json.dumps([source_id, target_id, batch_id]),
@@ -4662,6 +4681,7 @@ __all__ = [
     "RecoverReport",
     "RecoveredEvent",
     "ResumePoint",
+    "SessionBatchReport",
     "SessionBlockReport",
     "SessionListReport",
     "SessionReport",

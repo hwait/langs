@@ -340,6 +340,41 @@
         "title": "BatchReport",
         "type": "object"
       },
+      "BatchSummary": {
+        "additionalProperties": false,
+        "description": "A flush as identifiers: never its events, which can hold the learner's words.",
+        "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "event_count": {
+            "title": "Event Count",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sequence",
+          "idempotency_key",
+          "content_hash",
+          "event_count",
+          "created_at"
+        ],
+        "title": "BatchSummary",
+        "type": "object"
+      },
       "BatchTask": {
         "additionalProperties": false,
         "description": "One task a batch served, in the position the batch served it.",
@@ -461,6 +496,174 @@
           "recording"
         ],
         "title": "CaptureReport",
+        "type": "object"
+      },
+      "CloseReport": {
+        "additionalProperties": false,
+        "description": "The one report a close returns, and the one a repeat returns again.",
+        "properties": {
+          "attempts_written": {
+            "default": 0,
+            "title": "Attempts Written",
+            "type": "integer"
+          },
+          "calculation_versions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Calculation Versions",
+            "type": "object"
+          },
+          "closed_at": {
+            "title": "Closed At",
+            "type": "string"
+          },
+          "comprehension_written": {
+            "default": 0,
+            "title": "Comprehension Written",
+            "type": "integer"
+          },
+          "dimensions_recomputed": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Dimensions Recomputed",
+            "type": "array"
+          },
+          "errors_touched": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors Touched",
+            "type": "array"
+          },
+          "errors_written": {
+            "default": 0,
+            "title": "Errors Written",
+            "type": "integer"
+          },
+          "evidence_written": {
+            "default": 0,
+            "title": "Evidence Written",
+            "type": "integer"
+          },
+          "finalization_id": {
+            "title": "Finalization Id",
+            "type": "string"
+          },
+          "first_batch_sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "First Batch Sequence"
+          },
+          "followups_written": {
+            "default": 0,
+            "title": "Followups Written",
+            "type": "integer"
+          },
+          "last_batch_sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Last Batch Sequence"
+          },
+          "observations_written": {
+            "default": 0,
+            "title": "Observations Written",
+            "type": "integer"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "projection_stale": {
+            "default": true,
+            "title": "Projection Stale",
+            "type": "boolean"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "sources_worked": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Sources Worked",
+            "type": "array"
+          },
+          "stage_changes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/StageChangeReport"
+            },
+            "title": "Stage Changes",
+            "type": "array"
+          },
+          "staged_consumed": {
+            "default": 0,
+            "title": "Staged Consumed",
+            "type": "integer"
+          },
+          "staged_discarded": {
+            "default": 0,
+            "title": "Staged Discarded",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Summary"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_id",
+          "finalization_id",
+          "outcome",
+          "status",
+          "closed_at"
+        ],
+        "title": "CloseReport",
         "type": "object"
       },
       "DimensionReport": {
@@ -1165,6 +1368,142 @@
         "title": "RecordingPolicy",
         "type": "object"
       },
+      "RecoverReport": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Batch Id"
+          },
+          "recovered": {
+            "default": 0,
+            "title": "Recovered",
+            "type": "integer"
+          },
+          "recovered_events": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RecoveredEvent"
+            },
+            "title": "Recovered Events",
+            "type": "array"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "skipped": {
+            "default": 0,
+            "title": "Skipped",
+            "type": "integer"
+          },
+          "source_session_id": {
+            "title": "Source Session Id",
+            "type": "string"
+          },
+          "target_session_id": {
+            "title": "Target Session Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "source_session_id",
+          "target_session_id"
+        ],
+        "title": "RecoverReport",
+        "type": "object"
+      },
+      "RecoveredEvent": {
+        "additionalProperties": false,
+        "description": "One staged event moved by a recovery: where it was, and the row it became.",
+        "properties": {
+          "source_staged_event_id": {
+            "title": "Source Staged Event Id",
+            "type": "string"
+          },
+          "staged_event_id": {
+            "title": "Staged Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_staged_event_id",
+          "staged_event_id"
+        ],
+        "title": "RecoveredEvent",
+        "type": "object"
+      },
+      "ResumePoint": {
+        "additionalProperties": false,
+        "description": "Where a session should be picked up: the first block and activity not finished.\n\nReported rather than inferred by the caller, because inferring it needs the block\nand activity statuses to be right -- which is the whole reason `session log` advances\nthem and the close settles them.",
+        "properties": {
+          "activity_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Activity Id"
+          },
+          "activity_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Activity Kind"
+          },
+          "block_id": {
+            "title": "Block Id",
+            "type": "string"
+          },
+          "block_type": {
+            "title": "Block Type",
+            "type": "string"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "block_id",
+          "sequence",
+          "block_type",
+          "objective"
+        ],
+        "title": "ResumePoint",
+        "type": "object"
+      },
       "RunListReport": {
         "additionalProperties": false,
         "description": "The runs a fresh page could resume, newest first, for one track.",
@@ -1376,6 +1715,815 @@
         "title": "ServedAsset",
         "type": "object"
       },
+      "SessionActivityReport": {
+        "additionalProperties": false,
+        "properties": {
+          "activity_id": {
+            "title": "Activity Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "title": "Settings",
+            "type": "object"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "activity_id",
+          "sequence",
+          "kind",
+          "prompt",
+          "status"
+        ],
+        "title": "SessionActivityReport",
+        "type": "object"
+      },
+      "SessionBatchReport": {
+        "additionalProperties": false,
+        "description": "What one flush did, including doing nothing because it had already landed.",
+        "properties": {
+          "batch_id": {
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "duplicate": {
+            "default": false,
+            "title": "Duplicate",
+            "type": "boolean"
+          },
+          "event_count": {
+            "title": "Event Count",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "staged_events": {
+            "title": "Staged Events",
+            "type": "integer"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "batch_id",
+          "session_id",
+          "sequence",
+          "idempotency_key",
+          "content_hash",
+          "event_count",
+          "staged_events"
+        ],
+        "title": "SessionBatchReport",
+        "type": "object"
+      },
+      "SessionBlockReport": {
+        "additionalProperties": false,
+        "properties": {
+          "activities": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SessionActivityReport"
+            },
+            "title": "Activities",
+            "type": "array"
+          },
+          "area": {
+            "title": "Area",
+            "type": "string"
+          },
+          "block_id": {
+            "title": "Block Id",
+            "type": "string"
+          },
+          "block_type": {
+            "title": "Block Type",
+            "type": "string"
+          },
+          "difficulty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Difficulty"
+          },
+          "dimension": {
+            "title": "Dimension",
+            "type": "string"
+          },
+          "modality": {
+            "title": "Modality",
+            "type": "string"
+          },
+          "novel_targets": {
+            "default": 0,
+            "title": "Novel Targets",
+            "type": "integer"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "planned_minutes": {
+            "title": "Planned Minutes",
+            "type": "integer"
+          },
+          "rationale": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Rationale",
+            "type": "array"
+          },
+          "repeated": {
+            "default": false,
+            "title": "Repeated",
+            "type": "boolean"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "score": {
+            "default": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SessionTargetReport"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "block_id",
+          "sequence",
+          "role",
+          "block_type",
+          "area",
+          "dimension",
+          "modality",
+          "planned_minutes",
+          "objective",
+          "status"
+        ],
+        "title": "SessionBlockReport",
+        "type": "object"
+      },
+      "SessionListEntry": {
+        "additionalProperties": false,
+        "description": "One session as a page deciding what to draw needs it.",
+        "properties": {
+          "batches": {
+            "default": 0,
+            "title": "Batches",
+            "type": "integer"
+          },
+          "finalized": {
+            "default": false,
+            "title": "Finalized",
+            "type": "boolean"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "open": {
+            "default": false,
+            "title": "Open",
+            "type": "boolean"
+          },
+          "planned_at": {
+            "title": "Planned At",
+            "type": "string"
+          },
+          "planned_minutes": {
+            "title": "Planned Minutes",
+            "type": "integer"
+          },
+          "recoverable": {
+            "default": false,
+            "title": "Recoverable",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "staged_events": {
+            "default": 0,
+            "title": "Staged Events",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "mode",
+          "planned_minutes",
+          "planned_at"
+        ],
+        "title": "SessionListEntry",
+        "type": "object"
+      },
+      "SessionListReport": {
+        "additionalProperties": false,
+        "properties": {
+          "sessions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SessionListEntry"
+            },
+            "title": "Sessions",
+            "type": "array"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track_id"
+        ],
+        "title": "SessionListReport",
+        "type": "object"
+      },
+      "SessionOmissionReport": {
+        "additionalProperties": false,
+        "description": "A candidate the planner ranked highly and did not schedule.",
+        "properties": {
+          "block_type": {
+            "title": "Block Type",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "block_type",
+          "score",
+          "reason"
+        ],
+        "title": "SessionOmissionReport",
+        "type": "object"
+      },
+      "SessionReport": {
+        "additionalProperties": false,
+        "properties": {
+          "actual_minutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Actual Minutes"
+          },
+          "batches": {
+            "default": 0,
+            "title": "Batches",
+            "type": "integer"
+          },
+          "blocks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SessionBlockReport"
+            },
+            "title": "Blocks",
+            "type": "array"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Closed At"
+          },
+          "correction_mode": {
+            "title": "Correction Mode",
+            "type": "string"
+          },
+          "energy": {
+            "title": "Energy",
+            "type": "string"
+          },
+          "finalization": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CloseReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Intent"
+          },
+          "last_batch_sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Last Batch Sequence"
+          },
+          "lifecycle_version": {
+            "title": "Lifecycle Version",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "next_actions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Next Actions",
+            "type": "array"
+          },
+          "novel_target_cap": {
+            "title": "Novel Target Cap",
+            "type": "integer"
+          },
+          "novel_targets": {
+            "title": "Novel Targets",
+            "type": "integer"
+          },
+          "omissions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SessionOmissionReport"
+            },
+            "title": "Omissions",
+            "type": "array"
+          },
+          "planned_at": {
+            "title": "Planned At",
+            "type": "string"
+          },
+          "planned_minutes": {
+            "title": "Planned Minutes",
+            "type": "integer"
+          },
+          "planner_version": {
+            "title": "Planner Version",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "requested_minutes": {
+            "title": "Requested Minutes",
+            "type": "integer"
+          },
+          "resume_from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResumePoint"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "staged_events": {
+            "default": 0,
+            "title": "Staged Events",
+            "type": "integer"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_id",
+          "track_id",
+          "status",
+          "mode",
+          "energy",
+          "correction_mode",
+          "requested_minutes",
+          "planned_minutes",
+          "timezone",
+          "novel_target_cap",
+          "novel_targets",
+          "planner_version",
+          "lifecycle_version",
+          "planned_at"
+        ],
+        "title": "SessionReport",
+        "type": "object"
+      },
+      "SessionScreen": {
+        "additionalProperties": false,
+        "description": "Everything a page needs to draw one session, read on one connection.",
+        "properties": {
+          "actions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "batches": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/BatchSummary"
+            },
+            "title": "Batches",
+            "type": "array"
+          },
+          "closing_interrupted": {
+            "default": false,
+            "title": "Closing Interrupted",
+            "type": "boolean"
+          },
+          "missing_batch_sequences": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Missing Batch Sequences",
+            "type": "array"
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionReport"
+          },
+          "staged": {
+            "$ref": "#/components/schemas/StagedListing"
+          },
+          "staged_by_block": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Staged By Block",
+            "type": "object"
+          },
+          "staging": {
+            "$ref": "#/components/schemas/StagingState"
+          },
+          "unattributed": {
+            "default": 0,
+            "title": "Unattributed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session",
+          "staged",
+          "staging"
+        ],
+        "title": "SessionScreen",
+        "type": "object"
+      },
+      "SessionTargetReport": {
+        "additionalProperties": false,
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "due": {
+            "title": "Due",
+            "type": "boolean"
+          },
+          "novel": {
+            "title": "Novel",
+            "type": "boolean"
+          },
+          "priority": {
+            "default": 0,
+            "title": "Priority",
+            "type": "integer"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content_id",
+          "title",
+          "stage",
+          "novel",
+          "due"
+        ],
+        "title": "SessionTargetReport",
+        "type": "object"
+      },
+      "StageChangeReport": {
+        "additionalProperties": false,
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "explanation": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Explanation",
+            "type": "array"
+          },
+          "stage_after": {
+            "title": "Stage After",
+            "type": "string"
+          },
+          "stage_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Stage Before"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content_id",
+          "title",
+          "stage_after"
+        ],
+        "title": "StageChangeReport",
+        "type": "object"
+      },
+      "StagedEventReport": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_sequence": {
+            "title": "Batch Sequence",
+            "type": "integer"
+          },
+          "block_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Block Id"
+          },
+          "discard_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Discard Reason"
+          },
+          "evidence_basis": {
+            "title": "Evidence Basis",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "materialized_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Materialized Id"
+          },
+          "materialized_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Materialized Kind"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "staged_event_id": {
+            "title": "Staged Event Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "staged_event_id",
+          "batch_sequence",
+          "sequence",
+          "kind",
+          "status",
+          "evidence_basis",
+          "summary"
+        ],
+        "title": "StagedEventReport",
+        "type": "object"
+      },
+      "StagedListing": {
+        "additionalProperties": false,
+        "description": "The provisional events a session is holding, for a caller that asked for them.",
+        "properties": {
+          "events": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/StagedEventReport"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "title": "StagedListing",
+        "type": "object"
+      },
+      "StagingState": {
+        "additionalProperties": false,
+        "description": "What a close of this session would consume now, and its fingerprint.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "digest",
+          "count"
+        ],
+        "title": "StagingState",
+        "type": "object"
+      },
       "SubmissionReport": {
         "additionalProperties": false,
         "description": "Which answer -- a recording, or a written answer -- answers which served task, and\nwhere its judgement stands.\n\nNever the learner's words. A written answer's text is handed to the judge by `pending`\nand `claim` and to nobody else; this report reaches the screen, and the read model does\nnot carry what a learner wrote. The digest says which answer it is without saying what\nit says.",
@@ -1574,6 +2722,90 @@
           "kind"
         ],
         "title": "TaskPresentation",
+        "type": "object"
+      },
+      "TrackListEntry": {
+        "additionalProperties": false,
+        "description": "One track as a picker shows it: whose it is and what it is, never how it is set up.\n\nThe preferences are left out on purpose. They hold consent decisions and goals, and a\npage choosing which track to draw needs a name, not a profile.",
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "is_primary": {
+            "title": "Is Primary",
+            "type": "boolean"
+          },
+          "pack_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pack Key"
+          },
+          "proficiency_framework": {
+            "title": "Proficiency Framework",
+            "type": "string"
+          },
+          "selectable": {
+            "title": "Selectable",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_language": {
+            "title": "Target Language",
+            "type": "string"
+          },
+          "track_id": {
+            "title": "Track Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track_id",
+          "display_name",
+          "target_language",
+          "proficiency_framework",
+          "status",
+          "is_primary",
+          "selectable"
+        ],
+        "title": "TrackListEntry",
+        "type": "object"
+      },
+      "TrackListReport": {
+        "additionalProperties": false,
+        "properties": {
+          "default_track_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default Track Id"
+          },
+          "tracks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TrackListEntry"
+            },
+            "title": "Tracks",
+            "type": "array"
+          }
+        },
+        "title": "TrackListReport",
         "type": "object"
       },
       "VoidedVerdict": {
@@ -4153,6 +5385,1761 @@
           }
         },
         "summary": "Hand in the learner's written answer to an outstanding written task, for a judge"
+      }
+    },
+    "/sessions": {
+      "get": {
+        "operationId": "session_discover",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "track",
+            "required": false,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "description": "Comma-separated; both when absent.",
+              "pattern": "^(open|recoverable)(,(open|recoverable))*$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SessionListReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "One track's open and recoverable sessions, newest first"
+      },
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "plan_create",
+        "parameters": [
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "correction_mode": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "energy": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "intent": {
+                    "type": "string"
+                  },
+                  "minutes": {
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "track": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "minutes"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SessionReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Plan one session for a track, recording why each block is there"
+      }
+    },
+    "/sessions/{session_id}/abandon": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "session_abandon",
+        "parameters": [
+          {
+            "description": "The session this operation acts on. Its track is resolved from the session, so a workspace with more than one active track needs no track beside it.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SessionReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Abandon a session, keeping its staged work for review and crediting none"
+      }
+    },
+    "/sessions/{session_id}/batches": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "session_import",
+        "parameters": [
+          {
+            "description": "The session this operation acts on. Its track is resolved from the session, so a workspace with more than one active track needs no track beside it.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "batch": {
+                    "description": "A lingua.session.events.v1 batch. Its idempotency_key is this operation's key: the same batch under it replays, a different one is refused with idempotency_conflict. Every attempt must declare its assessor_kind.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "batch"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SessionBatchReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Stage a batch another producer wrote, under the producer's own key, sequence, and event identifiers; nothing is credited until the session closes"
+      }
+    },
+    "/sessions/{session_id}/close": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "session_close",
+        "parameters": [
+          {
+            "description": "The session this operation acts on. Its track is resolved from the session, so a workspace with more than one active track needs no track beside it.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "actual_minutes": {
+                    "type": "integer"
+                  },
+                  "discard_blocks": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "expected_staging": {
+                    "description": "The staging digest from the screen the caller confirmed. A close is refused with session_staging_changed when the staged set differs, before anything is written.",
+                    "type": "string"
+                  },
+                  "fatigue": {
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "enum": [
+                      "completed",
+                      "partial"
+                    ]
+                  },
+                  "summary": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/CloseReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Finalize a session, crediting its staged work exactly once, and only the staged set the caller confirmed"
+      }
+    },
+    "/sessions/{session_id}/recover": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "session_recover",
+        "parameters": [
+          {
+            "description": "The session this operation acts on. Its track is resolved from the session, so a workspace with more than one active track needs no track beside it.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "events": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "into": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "into",
+                  "events"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/RecoverReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Move reviewed staged events from this finished session into an open one; a retry under the same key replays what it moved"
+      }
+    },
+    "/sessions/{session_id}/resume": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "session_resume",
+        "parameters": [
+          {
+            "description": "The session this operation acts on. Its track is resolved from the session, so a workspace with more than one active track needs no track beside it.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {},
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SessionReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Pick a session back up and say what state it is in"
+      }
+    },
+    "/sessions/{session_id}/screen": {
+      "get": {
+        "operationId": "session_screen",
+        "parameters": [
+          {
+            "description": "The session this operation acts on. Its track is resolved from the session, so a workspace with more than one active track needs no track beside it.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SessionScreen"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Everything a page needs to draw a session, in one read"
+      }
+    },
+    "/sessions/{session_id}/staged": {
+      "get": {
+        "operationId": "session_staged",
+        "parameters": [
+          {
+            "description": "The session this operation acts on. Its track is resolved from the session, so a workspace with more than one active track needs no track beside it.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "enum": [
+                "staged",
+                "materialized",
+                "discarded",
+                "rejected"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "pattern": "^[0-9]{1,6}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "pattern": "^[0-9]{1,6}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/StagedListing"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "A page of a session's staged events, filtered by status, with the filtered total"
+      }
+    },
+    "/sessions/{session_id}/start": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "session_start",
+        "parameters": [
+          {
+            "description": "The session this operation acts on. Its track is resolved from the session, so a workspace with more than one active track needs no track beside it.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {},
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SessionReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Begin a planned session; starting an active one returns it unchanged"
+      }
+    },
+    "/tracks": {
+      "get": {
+        "operationId": "track_discover",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/TrackListReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The tracks a page can offer, and the one it may take without asking"
       }
     }
   },

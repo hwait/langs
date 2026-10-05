@@ -227,7 +227,7 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 attempts = (
                     DEFAULT_ATTEMPTS
                     if route.upload is None
-                    and (not route.mutates or request.optional(route.key_field, str) is not None)
+                    and (not route.mutates or request.key(route.key_field) is not None)
                     else 1
                 )
                 report = with_retry(lambda: route.handler(request), attempts=attempts)

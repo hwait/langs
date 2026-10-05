@@ -10,17 +10,25 @@ resolves through.
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
+from linguawiki import retrying
+from linguawiki.client import server as server_module
 from linguawiki.db.connection import open_writer
+from linguawiki.openapi import DOCUMENT_RELATIVE_PATH
 from linguawiki.errors import LinguaWikiError
 from linguawiki.services import database as database_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import onboarding as onboarding_service
 from linguawiki.services import sessions as session_service
 from tests.conftest import PolishWorkspace
+from tests.integration.test_client_server import RunningServer
 
 EVENT_IDS = [f"evt_01ARZ3NDEKTSV4RRFFQ69G5F{suffix}" for suffix in ("B0", "B1", "B2", "B3", "B4")]
 
@@ -822,3 +830,270 @@ def test_the_cli_words_and_the_operation_ids_come_from_one_table(
 
     assert screen.actions == ("session.start", "session.abandon")
     assert screen.session.next_actions == ("session start",)
+
+
+# --- Over HTTP -----------------------------------------------------------------------
+
+
+@pytest.fixture
+def server(onboarded: PolishWorkspace) -> Iterator[RunningServer]:
+    client = server_module.build_server(onboarded.paths, clock=onboarded.clock)
+    thread = threading.Thread(target=client.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield RunningServer(client)
+    finally:
+        client.close()
+        thread.join(timeout=5)
+
+
+def data(answer: Any) -> Any:
+    assert answer.status == 200, answer.payload
+    return answer.payload["data"]
+
+
+def published(name: str) -> Draft202012Validator:
+    document = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas" / DOCUMENT_RELATIVE_PATH).read_text(
+            encoding="utf-8"
+        )
+    )
+    return Draft202012Validator(
+        {"components": document["components"], "$ref": f"#/components/schemas/{name}"}
+    )
+
+
+def test_a_session_planned_staged_and_closed_over_http_credits_once(
+    onboarded: PolishWorkspace, server: RunningServer
+) -> None:
+    planned = data(
+        server.request(
+            "POST",
+            "/sessions",
+            body={"track": onboarded.track_id, "minutes": 60, "idempotency_key": "plan-1"},
+        )
+    )
+    session_id = planned["session_id"]
+    report = session_service.SessionReport.model_validate(planned)
+    data(server.request("POST", f"/sessions/{session_id}/start", body={}))
+    imported = data(
+        server.request(
+            "POST", f"/sessions/{session_id}/batches", body={"batch": batch(core_blocks(report)[0])}
+        )
+    )
+    screen = data(server.request("GET", f"/sessions/{session_id}/screen"))
+    close_body = {"expected_staging": screen["staging"]["digest"], "idempotency_key": "close-1"}
+    closed = data(server.request("POST", f"/sessions/{session_id}/close", body=close_body))
+    again = data(server.request("POST", f"/sessions/{session_id}/close", body=close_body))
+    replanned = data(
+        server.request(
+            "POST",
+            "/sessions",
+            body={"track": onboarded.track_id, "minutes": 60, "idempotency_key": "plan-1"},
+        )
+    )
+
+    assert imported["staged_events"] == 1
+    assert screen["staging"]["count"] == 1
+    assert closed["attempts_written"] == 1 and not closed["replayed"]
+    assert again["replayed"] and again["finalization_id"] == closed["finalization_id"]
+    assert replanned["session_id"] == session_id
+    assert count(onboarded, "SELECT count(*) FROM attempts") == 1
+    with open_writer(onboarded.paths, command="test", clock=onboarded.clock) as database:
+        actors = {
+            str(command): str(actor)
+            for command, actor in database.query(
+                "SELECT command, actor FROM audit_log WHERE command IN "
+                "('plan.create', 'session.log', 'session.close')"
+            )
+        }
+    assert actors == {"plan.create": "client", "session.log": "client", "session.close": "client"}
+    for name, payload in (
+        ("SessionReport", planned),
+        ("SessionBatchReport", imported),
+        ("SessionScreen", screen),
+        ("CloseReport", closed),
+    ):
+        assert not list(published(name).iter_errors(payload)), name
+
+
+def test_the_published_session_reports_accept_minimal_and_complete_instances() -> None:
+    minimal = {
+        "SessionListReport": session_service.SessionListReport(track_id="trk_x"),
+        "StagingState": session_service.StagingState(digest="0" * 64, count=0),
+        "RecoverReport": session_service.RecoverReport(
+            source_session_id="ses_a", target_session_id="ses_b"
+        ),
+        "TrackListReport": learner_service.TrackListReport(),
+    }
+    complete = {
+        "SessionListReport": session_service.SessionListReport(
+            track_id="trk_x",
+            sessions=(
+                session_service.SessionListEntry(
+                    session_id="ses_a",
+                    status="abandoned",
+                    mode="mixed",
+                    planned_minutes=60,
+                    planned_at="2026-01-01T09:00:00+00:00",
+                    staged_events=2,
+                    batches=1,
+                    finalized=False,
+                    open=False,
+                    recoverable=True,
+                ),
+            ),
+        ),
+        "RecoverReport": session_service.RecoverReport(
+            source_session_id="ses_a",
+            target_session_id="ses_b",
+            batch_id="bat_x",
+            recovered=1,
+            skipped=1,
+            recovered_events=(
+                session_service.RecoveredEvent(source_staged_event_id="a", staged_event_id="b"),
+            ),
+            replayed=True,
+            warnings=("w",),
+        ),
+        "TrackListReport": learner_service.TrackListReport(
+            tracks=(
+                learner_service.TrackListEntry(
+                    track_id="trk_x",
+                    display_name="Ktoś",
+                    target_language="pl",
+                    proficiency_framework="cefr",
+                    pack_key="pl-pilot",
+                    status="active",
+                    is_primary=True,
+                    selectable=True,
+                ),
+            ),
+            default_track_id="trk_x",
+        ),
+    }
+    for name, model in (*minimal.items(), *complete.items()):
+        assert not list(published(name).iter_errors(model.model_dump(mode="json"))), name
+
+
+def test_a_named_session_is_served_on_a_workspace_with_two_active_tracks(
+    onboarded: PolishWorkspace, server: RunningServer
+) -> None:
+    report = plan(onboarded, idempotency_key="plan-1")
+    other = second_track(onboarded)
+
+    started = data(server.request("POST", f"/sessions/{report.session_id}/start", body={}))
+    unnamed = server.request("GET", "/sessions")
+    named = data(server.request("GET", f"/sessions?track={onboarded.track_id}&state=open"))
+    tracks = data(server.request("GET", "/tracks"))
+
+    assert started["status"] == "active"
+    assert unnamed.payload["error"]["code"] == "track_selection_required"
+    assert {detail["context"]["track_id"] for detail in unnamed.payload["error"]["details"]} == {
+        onboarded.track_id,
+        other,
+    }
+    assert [entry["session_id"] for entry in named["sessions"]] == [report.session_id]
+    assert tracks["default_track_id"] is None
+    assert not list(published("TrackListReport").iter_errors(tracks))
+
+
+def test_an_imported_batch_is_retried_on_its_producers_nested_key(
+    onboarded: PolishWorkspace, server: RunningServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = running(onboarded)
+    block = core_blocks(report)[0]
+    granted: list[int] = []
+    original = server_module.with_retry
+
+    def recording(work: Any, *, attempts: int) -> Any:
+        granted.append(attempts)
+        return original(work, attempts=attempts)
+
+    monkeypatch.setattr(server_module, "with_retry", recording)
+    keyed = server.request(
+        "POST", f"/sessions/{report.session_id}/batches", body={"batch": batch(block)}
+    )
+    keyless_body = batch(block, key="batch-2", sequence=2)
+    keyless_body["idempotency_key"] = "   "
+    server.request("POST", f"/sessions/{report.session_id}/batches", body={"batch": keyless_body})
+
+    assert keyed.status == 200
+    assert granted == [retrying.DEFAULT_ATTEMPTS, 1]
+
+
+def test_an_import_meeting_a_held_writer_is_answered_busy_and_lands_on_retry(
+    onboarded: PolishWorkspace, server: RunningServer
+) -> None:
+    report = running(onboarded)
+    body = {"batch": batch(core_blocks(report)[0])}
+
+    with open_writer(onboarded.paths, command="test.hold", clock=onboarded.clock):
+        busy = server.request("POST", f"/sessions/{report.session_id}/batches", body=body)
+    landed = data(server.request("POST", f"/sessions/{report.session_id}/batches", body=body))
+    replayed = data(server.request("POST", f"/sessions/{report.session_id}/batches", body=body))
+
+    assert busy.status == 503 and busy.payload["error"]["retryable"]
+    assert busy.headers["Retry-After"] == "1"
+    assert not landed["duplicate"] and replayed["duplicate"]
+    assert count(onboarded, "SELECT count(*) FROM session_staged_events") == 1
+
+
+def test_an_import_with_an_undeclared_assessor_is_refused_over_http(
+    onboarded: PolishWorkspace, server: RunningServer
+) -> None:
+    report = running(onboarded)
+    block = core_blocks(report)[0]
+    event = attempt_event(block)
+    del event["payload"]["assessor_kind"]
+
+    refused = server.request(
+        "POST",
+        f"/sessions/{report.session_id}/batches",
+        body={"batch": batch(block, events=[event])},
+    )
+
+    assert refused.payload["error"]["code"] == "session_import_assessor_required"
+
+
+def test_recovery_over_http_requires_an_explicit_selection_and_replays(
+    onboarded: PolishWorkspace, server: RunningServer
+) -> None:
+    source = abandoned_with(onboarded, 2)
+    target = running(onboarded, "plan-target")
+    listing = data(server.request("GET", f"/sessions/{source}/staged?status=staged&limit=1"))
+    second = data(
+        server.request("GET", f"/sessions/{source}/staged?status=staged&limit=1&offset=1")
+    )
+    events = [listing["events"][0]["staged_event_id"], second["events"][0]["staged_event_id"]]
+    empty = server.request(
+        "POST",
+        f"/sessions/{source}/recover",
+        body={"into": target.session_id, "events": [], "idempotency_key": "r-1"},
+    )
+    body = {"into": target.session_id, "events": events, "idempotency_key": "r-1"}
+    first = data(server.request("POST", f"/sessions/{source}/recover", body=body))
+    again = data(server.request("POST", f"/sessions/{source}/recover", body=body))
+
+    assert listing["total"] == 2
+    assert empty.status == 400
+    assert first["recovered"] == 2 and again["replayed"]
+    assert not list(published("RecoverReport").iter_errors(again))
+    assert (
+        data(server.request("GET", "/sessions?track=" + onboarded.track_id + "&state=recoverable"))[
+            "sessions"
+        ]
+        == []
+    )
+
+
+def test_a_keyed_abandon_over_http_replays(
+    onboarded: PolishWorkspace, server: RunningServer
+) -> None:
+    report = running(onboarded)
+    body = {"reason": "had to go", "idempotency_key": "abandon-1"}
+
+    first = data(server.request("POST", f"/sessions/{report.session_id}/abandon", body=body))
+    again = data(server.request("POST", f"/sessions/{report.session_id}/abandon", body=body))
+
+    assert first["status"] == "abandoned" and again["replayed"]
