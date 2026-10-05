@@ -371,7 +371,13 @@ function abandonSession(reason) {
 // --- recovery --------------------------------------------------------------------------
 
 function reviewRecovery(sourceId) {
-  return act(async () => {
+  return act(() => loadReview(sourceId));
+}
+
+// Not wrapped in `act`: a refusal mid-recovery reloads the review while the recovery's own
+// `act` still holds the page busy, and a nested `act` would return without reading.
+async function loadReview(sourceId) {
+  {
     const events = [];
     let total = null;
     // Every still-recoverable event, page by page, before anything can be selected: a
@@ -399,7 +405,7 @@ function reviewRecovery(sourceId) {
       energies: listing.energy_levels,
     };
     state.view = "review";
-  });
+  }
 }
 
 function beginRecovery() {
@@ -468,7 +474,10 @@ async function runRecovery() {
       });
     } catch (refusal) {
       if (refusal.code === "staged_event_not_recoverable") {
-        throw await recoveryNeeds("selection", "Some of those events have already moved elsewhere. Review what is left and choose again.");
+        throw await recoveryNeeds(
+          "selection",
+          `Some of those events have already moved elsewhere (${refusal.message}). Review what is left and choose again.`,
+        );
       }
       if (["session_not_active", "session_not_started", "session_not_found"].includes(refusal.code)) {
         throw await recoveryNeeds("destination", refusal.message);
@@ -492,7 +501,7 @@ async function runRecovery() {
 async function recoveryNeeds(what, message) {
   const record = storedJson(RECOVERY_KEY);
   store(RECOVERY_KEY, null);
-  await reviewRecovery(record.source_session_id);
+  await loadReview(record.source_session_id);
   if (state.review) {
     if (what === "selection") {
       if (state.review.destinations.some((entry) => entry.session_id === record.destination.session_id)) {

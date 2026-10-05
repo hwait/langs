@@ -2471,6 +2471,26 @@ def log(
                 duplicate=True,
                 warnings=("this batch was already stored, so nothing was written again",),
             )
+        # Batch keys share `domain_events.idempotency_key` with every keyed operation, so a
+        # key a close, an abandon, or a recovery already used is refused by name here rather
+        # than by the unique index at the insert.
+        foreign = database.one(
+            "SELECT event_type, aggregate_id FROM domain_events WHERE idempotency_key = ?",
+            [validated.idempotency_key],
+        )
+        if foreign is not None and str(foreign[0]) != "session.batch_staged":
+            raise LinguaWikiError(
+                "idempotency_conflict",
+                f"idempotency key {validated.idempotency_key} already performed {foreign[0]} "
+                f"on {foreign[1]}; a batch needs a key of its own",
+                details=(
+                    ErrorDetail(
+                        field="idempotency_key",
+                        reason="key belongs to another operation",
+                        context={"idempotency_key": validated.idempotency_key},
+                    ),
+                ),
+            )
         row = _session_row(database, session_id)
         _assert_loggable(session_id=session_id, status=str(row[2]))
         occupied = database.one(
@@ -4499,6 +4519,14 @@ def recover(
     with open_writer(paths, command=command, clock=active_clock) as database:
         track_id, source_id = resolve_session_and_track(database, source, track)
         selected = tuple(events)
+        repeated = sorted({event for event in selected if selected.count(event) > 1})
+        if repeated:
+            raise LinguaWikiError(
+                "recovery_event_repeated",
+                "a recovery names each staged event once; these were named more than once: "
+                + ", ".join(repeated),
+                details=tuple(ErrorDetail(field="events", reason=event) for event in repeated),
+            )
         request = idempotency.request_hash(
             operation="session.recover",
             source_session_id=source_id,
@@ -4570,6 +4598,27 @@ def recover(
             session_id=target_id,
             event_ids=[str(row[6]) for row in chosen],
         )
+        batch_key = (
+            f"recovery:{idempotency_key}"
+            if idempotency_key is not None
+            else f"recovery:{source_id}:{sequence}"
+        )
+        taken = database.one(
+            "SELECT session_id FROM session_event_batches WHERE idempotency_key = ?", [batch_key]
+        )
+        if taken is not None:
+            raise LinguaWikiError(
+                "idempotency_conflict",
+                f"the batch key this recovery would use ({batch_key}) already belongs to a batch "
+                f"of session {taken[0]}; recover under a different key",
+                details=(
+                    ErrorDetail(
+                        field="idempotency_key",
+                        reason="derived batch key is taken",
+                        context={"batch_key": batch_key},
+                    ),
+                ),
+            )
         batch_id = str(BatchId.new())
         now = aware_utc(database.now())
         moved: list[RecoveredEvent] = []
@@ -4586,12 +4635,9 @@ def recover(
                     batch_id,
                     target_id,
                     sequence,
-                    # Prefixed rather than the caller's key itself: batch keys share one
-                    # namespace with every flush, and a recovery key must not collide
-                    # with a skill's batch key.
-                    f"recovery:{idempotency_key}"
-                    if idempotency_key is not None
-                    else f"recovery:{source_id}:{sequence}",
+                    # Prefixed rather than the caller's key itself, and checked above:
+                    # batch keys share one namespace with every flush.
+                    batch_key,
                     canonical_hash(payloads),
                     len(chosen),
                     naive_utc(now),

@@ -6363,7 +6363,8 @@
                       "type": "string"
                     },
                     "minItems": 1,
-                    "type": "array"
+                    "type": "array",
+                    "uniqueItems": true
                   },
                   "idempotency_key": {
                     "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",

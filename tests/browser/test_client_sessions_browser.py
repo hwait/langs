@@ -716,3 +716,30 @@ def test_the_session_page_offers_no_exercise_and_says_where_teaching_happens(
     assert "Teaching happens elsewhere" in page.inner_text("[data-role=teaching-elsewhere]")
     assert page.locator("textarea").count() == 0
     assert page.locator(".choices, section.task, [data-role=submit]").count() == 0
+
+
+def test_a_recovery_refused_because_events_moved_reviews_what_is_left(
+    page: Any, served: Served, onboarded: PolishWorkspace
+) -> None:
+    source = abandoned(onboarded, "plan-src", [0, 1, 2])
+    elsewhere = running(onboarded, "plan-elsewhere")
+    launch(page, served)
+    page.click("[data-role=home]")
+    page.click(f"[data-role=recoverable-sessions] li[data-session={source}] [data-role=review]")
+    page.wait_for_selector("[data-role=recovery-review]")
+    moved = page.get_attribute("[data-role=recover-event] >> nth=0", "data-event")
+    session_service.recover(
+        onboarded.paths, source=source, target=elsewhere, events=[moved], clock=onboarded.clock
+    )
+    page.check(f"[data-role=destination][data-session={elsewhere}]")
+
+    page.click("[data-role=recover]")
+
+    page.wait_for_selector(".error[data-code=recovery_selection_needed]")
+    page.wait_for_function(
+        "() => document.querySelectorAll('[data-role=recover-event]').length === 2"
+    )
+    assert page.is_checked(f"[data-role=destination][data-session={elsewhere}]")
+    page.click("[data-role=recover]")
+    page.wait_for_selector("[data-role=staged][data-count='3']")
+    assert _count(onboarded, "SELECT count(*) FROM sessions") == 2

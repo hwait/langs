@@ -575,7 +575,12 @@ SESSION_ROUTES: tuple[Route, ...] = (
         request_schema=_body(
             {
                 "into": {"type": "string", "minLength": 1},
-                "events": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "events": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "uniqueItems": True,
+                },
                 "idempotency_key": IDEMPOTENCY_KEY,
             },
             required=["into", "events"],

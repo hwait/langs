@@ -1254,3 +1254,81 @@ def test_a_batch_gap_refuses_a_complete_close_and_its_remedy_works(
     assert partial.attempts_written == 1
     # The lost flush stays visible to `db check` after the partial close, by design.
     assert failures(onboarded) == ["session_batch_sequence"]
+
+
+# --- Keys shared across operations ---------------------------------------------------
+
+
+def test_a_batch_key_another_operation_already_used_is_a_named_conflict(
+    onboarded: PolishWorkspace,
+) -> None:
+    other = running(onboarded, "plan-other")
+    session_service.abandon(
+        onboarded.paths, session=other.session_id, idempotency_key="shared", clock=onboarded.clock
+    )
+    report = running(onboarded, "plan-1")
+
+    with pytest.raises(LinguaWikiError) as failure:
+        log(onboarded, report.session_id, batch(core_blocks(report)[0], key="shared"))
+
+    assert failure.value.payload.code == "idempotency_conflict"
+    assert "session.abandoned" in failure.value.payload.message
+
+
+def test_a_recovery_naming_one_event_twice_is_refused_by_name(onboarded: PolishWorkspace) -> None:
+    source = abandoned_with(onboarded, 1)
+    target = running(onboarded, "plan-target")
+    event = (
+        session_service.staged_listing(
+            onboarded.paths, session=source, status="staged", clock=onboarded.clock
+        )
+        .events[0]
+        .staged_event_id
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        session_service.recover(
+            onboarded.paths,
+            source=source,
+            target=target.session_id,
+            events=[event, event],
+            clock=onboarded.clock,
+        )
+
+    assert failure.value.payload.code == "recovery_event_repeated"
+
+
+def test_a_recovery_whose_batch_key_is_taken_is_a_named_conflict(
+    onboarded: PolishWorkspace,
+) -> None:
+    source = abandoned_with(onboarded, 1)
+    target = running(onboarded, "plan-target")
+    log(
+        onboarded,
+        target.session_id,
+        batch(
+            core_blocks(target)[0],
+            key="recovery:r9",
+            events=[attempt_event(core_blocks(target)[0], event_id=EVENT_IDS[0])],
+        ),
+    )
+
+    with pytest.raises(LinguaWikiError) as failure:
+        session_service.recover(
+            onboarded.paths,
+            source=source,
+            target=target.session_id,
+            idempotency_key="r9",
+            clock=onboarded.clock,
+        )
+
+    assert failure.value.payload.code == "idempotency_conflict"
+    assert (
+        count(
+            onboarded,
+            "SELECT count(*) FROM session_staged_events WHERE status = 'staged' AND session_id = '"
+            + source
+            + "'",
+        )
+        == 1
+    )
