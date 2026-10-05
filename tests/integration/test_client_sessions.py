@@ -19,6 +19,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from linguawiki import retrying
+from linguawiki.cli import run as run_cli
 from linguawiki.client import server as server_module
 from linguawiki.db.connection import open_writer
 from linguawiki.errors import LinguaWikiError
@@ -1097,3 +1098,120 @@ def test_a_keyed_abandon_over_http_replays(
     again = data(server.request("POST", f"/sessions/{report.session_id}/abandon", body=body))
 
     assert first["status"] == "abandoned" and again["replayed"]
+
+
+# --- The CLI -------------------------------------------------------------------------
+
+
+def cli(workspace: PolishWorkspace, capsys: pytest.CaptureFixture[str], *arguments: str) -> Any:
+    code = run_cli(
+        [*arguments, "--workspace", str(workspace.root), "--format", "json"],
+        clock=workspace.clock,
+    )
+    captured = capsys.readouterr()
+    return code, json.loads(captured.out or captured.err)
+
+
+def test_the_cli_confirms_a_close_against_the_digest_it_printed(
+    onboarded: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report, _ = staged_close(onboarded)
+    blocks = core_blocks(report)
+    _, status = cli(onboarded, capsys, "session", "status", "--session", report.session_id)
+    digest = status["data"]["staging_digest"]
+    log(
+        onboarded,
+        report.session_id,
+        batch(
+            blocks[0],
+            sequence=2,
+            key="batch-2",
+            events=[
+                attempt_event(blocks[0], event_id=EVENT_IDS[1], occurred_at="2026-01-01T09:05:00Z")
+            ],
+        ),
+    )
+
+    code, refused = cli(
+        onboarded,
+        capsys,
+        "session",
+        "close",
+        "--session",
+        report.session_id,
+        "--expect-staging",
+        digest,
+    )
+
+    assert code != 0
+    assert refused["error"]["code"] == "session_staging_changed"
+    assert (
+        run_cli(
+            [
+                "session",
+                "status",
+                "--session",
+                report.session_id,
+                "--workspace",
+                str(onboarded.root),
+            ],
+            clock=onboarded.clock,
+        )
+        == 0
+    )
+    assert "staging digest" in capsys.readouterr().out
+
+
+def test_the_cli_lists_staged_work_by_status_with_its_total(
+    onboarded: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = abandoned_with(onboarded, 2)
+
+    _, listing = cli(
+        onboarded,
+        capsys,
+        "session",
+        "staged",
+        "--session",
+        source,
+        "--status",
+        "staged",
+        "--limit",
+        "1",
+        "--offset",
+        "1",
+    )
+
+    assert listing["data"]["total"] == 2
+    assert len(listing["data"]["events"]) == 1
+
+
+def test_the_cli_abandon_and_recover_take_keys_and_replay(
+    onboarded: PolishWorkspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = running(onboarded)
+    block = core_blocks(report)[0]
+    log(
+        onboarded,
+        report.session_id,
+        batch(block, events=[attempt_event(block, event_id=EVENT_IDS[3])]),
+    )
+    abandon = ("session", "abandon", "--session", report.session_id, "--idempotency-key", "a-1")
+    cli(onboarded, capsys, *abandon)
+    _, again = cli(onboarded, capsys, *abandon)
+    target = running(onboarded, "plan-target")
+    recover = (
+        "session",
+        "recover",
+        "--from",
+        report.session_id,
+        "--into",
+        target.session_id,
+        "--idempotency-key",
+        "r-1",
+    )
+    _, first = cli(onboarded, capsys, *recover)
+    _, replay = cli(onboarded, capsys, *recover)
+
+    assert again["data"]["replayed"]
+    assert first["data"]["recovered"] == 1 and replay["data"]["replayed"]

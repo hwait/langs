@@ -2185,6 +2185,11 @@
             "title": "Staged Events",
             "type": "integer"
           },
+          "staging_digest": {
+            "default": "",
+            "title": "Staging Digest",
+            "type": "string"
+          },
           "started_at": {
             "anyOf": [
               {

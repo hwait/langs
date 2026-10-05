@@ -204,6 +204,9 @@ class SessionReport(ContractModel):
     batches: int = 0
     staged_events: int = 0
     last_batch_sequence: int | None = None
+    #: The fingerprint of what a close would consume now. A caller confirming a close
+    #: passes it back as `expected_staging`, and the close refuses if it has moved.
+    staging_digest: str = ""
     #: Present while a session can still be worked. `None` once it is finished, or when
     #: every block has been worked through.
     resume_from: ResumePoint | None = None
@@ -1538,6 +1541,7 @@ def _read_session(database: Database, *, session_id: str) -> SessionReport:
         batches=batches,
         staged_events=staged,
         last_batch_sequence=last_sequence,
+        staging_digest=_staging_state(database, session_id=session_id).digest,
         resume_from=_resume_point(blocks, status=str(row[2])),
         finalization=finalization,
         planned_at=aware_utc(row[16]).isoformat(),
