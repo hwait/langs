@@ -21,8 +21,8 @@ from jsonschema import Draft202012Validator
 from linguawiki import retrying
 from linguawiki.client import server as server_module
 from linguawiki.db.connection import open_writer
-from linguawiki.openapi import DOCUMENT_RELATIVE_PATH
 from linguawiki.errors import LinguaWikiError
+from linguawiki.openapi import DOCUMENT_RELATIVE_PATH
 from linguawiki.services import database as database_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import onboarding as onboarding_service
