@@ -17,12 +17,13 @@ import argparse
 import hashlib
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from linguawiki.db.backup import registered_tables
 from linguawiki.db.connection import open_reader, open_temporary, open_writer
 from linguawiki.db.schema import TABLE_ORDER
+from linguawiki.ids import AssessmentId
 from linguawiki.paths import workspace_paths
 from linguawiki.services import artifacts as artifact_service
 from linguawiki.services import assessment as assessment_service
@@ -135,7 +136,7 @@ def _calibrate(paths: object, run_id: str) -> None:
 LISTENING_KEY = "pl.task.listening.02"
 
 
-def _tone() -> bytes:
+def _tone(frequency: float = 440.0) -> bytes:
     """A third of a second of a generated tone: a real WAV, and nothing anybody said."""
 
     import io
@@ -150,7 +151,7 @@ def _tone() -> bytes:
         output.setframerate(8000)
         output.writeframes(
             b"".join(
-                struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / 8000)))
+                struct.pack("<h", int(12000 * math.sin(2 * math.pi * frequency * i / 8000)))
                 for i in range(2400)
             )
         )
@@ -251,6 +252,66 @@ def _listening(paths: object, *, root: Path) -> None:
         clock=Clock(),
         actor="client",
     )
+
+
+def _captured(paths: object) -> None:
+    """A spoken answer recorded twice, judged, finalized, and purged -- as a page and a
+    judge do it.
+
+    The second recording supersedes the first before the verdict, so a superseded
+    submission and its purged recording exist; purging the judged one afterwards marks its
+    result invalidated and annotates the estimate snapshot that rested on it. The staging
+    rows are what the captures left behind. The recordings are generated tones.
+    """
+
+    from linguawiki.services import recordings as recording_service
+
+    learner_service.update_track(
+        paths,  # type: ignore[arg-type]
+        preferences=learner_service.TrackPreferences(
+            voice_available=True,
+            transcript_retention_consent=True,
+            audio_recording_available=True,
+            audio_retention_consent=True,
+        ),
+        clock=Clock(),
+    )
+    run = assessment_service.start(
+        paths,  # type: ignore[arg-type]
+        dimensions=["pronunciation"],
+        modalities=["speech"],
+        scoring="machine+recorded",
+        clock=Clock(),
+    )
+    served = assessment_service.next_task(paths, run=run.run_id, clock=Clock())  # type: ignore[arg-type]
+    assert isinstance(served, assessment_service.NextTaskReport)
+    taken = None
+    for index, frequency in enumerate((523.25, 587.33)):
+        taken = recording_service.capture(
+            paths,  # type: ignore[arg-type]
+            run=run.run_id,
+            content_id=served.content_id,
+            capture_id=f"00000000-0000-4000-8000-00000000000{index}",
+            data=_tone(frequency),
+            media_type="audio/wav",
+            clock=Clock(),
+            actor="client",
+        )
+    assert taken is not None and taken.artifact_id is not None
+    assessment_service.record(
+        paths,  # type: ignore[arg-type]
+        run=run.run_id,
+        content_id=served.content_id,
+        score=0.5,
+        audio_artifact=taken.artifact_id,
+        assessor_kind="ai",
+        assessor="upgrade-fixture-judge",
+        confidence="medium",
+        rubric={"segmentals": 0.5},
+        clock=Clock(),
+    )
+    assessment_service.finalize(paths, run=run.run_id, clock=Clock())  # type: ignore[arg-type]
+    artifact_service.purge(paths, artifact=taken.artifact_id, clock=Clock())  # type: ignore[arg-type]
 
 
 def _curriculum(paths: object) -> None:
@@ -930,6 +991,55 @@ def _spoken_package() -> dict[str, object]:
     }
 
 
+def _judging_rows(paths: object) -> None:
+    """A judge's claim and release, and a served round, on the run `_captured` judged.
+
+    Written directly, as `_job_row` is: the commands that own these tables (`assessment
+    claim`, `release`, and batched serving) arrive later in C6. The rows are the ones those
+    commands write -- a lease the judge gave back before the verdict that judged the
+    submission, and a one-task round naming the task the run served -- so `db check` holds
+    them to the same rules on both versions.
+    """
+
+    with (
+        open_writer(paths, command="seed", clock=Clock()) as database,  # type: ignore[arg-type]
+        database.transaction() as tx,
+    ):
+        now = tx.now()
+        submission_id, run_id = tx.one(
+            "SELECT submission_id, run_id FROM assessment_submissions "
+            "WHERE status = 'judged' ORDER BY submission_id LIMIT 1"
+        )
+        content_id, dimension = tx.one(
+            "SELECT content_id, dimension FROM assessment_run_tasks WHERE run_id = ? "
+            "ORDER BY sequence LIMIT 1",
+            [run_id],
+        )
+        claim_id = str(AssessmentId.new())
+        tx.execute(
+            "INSERT INTO judging_claims (claim_id, submission_id, judge, claimed_at, "
+            "lease_expires_at) VALUES (?, ?, ?, ?, ?)",
+            [claim_id, submission_id, "upgrade-fixture-judge", now, now + timedelta(minutes=10)],
+        )
+        reason = "the judge restarted before it listened"
+        tx.execute(
+            "INSERT INTO judging_releases (claim_id, released_at, terminal, code, reason, "
+            "reason_hash) VALUES (?, ?, FALSE, NULL, ?, ?)",
+            [claim_id, now, reason, hashlib.sha256(reason.encode("utf-8")).hexdigest()],
+        )
+        batch_id = str(AssessmentId.new())
+        tx.execute(
+            "INSERT INTO assessment_batches (batch_id, run_id, idempotency_key, request_hash, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            [batch_id, run_id, "upgrade-fixture-round-1", "d" * 64, now],
+        )
+        tx.execute(
+            "INSERT INTO assessment_batch_tasks (batch_id, position, content_id, dimension) "
+            "VALUES (?, 1, ?, ?)",
+            [batch_id, content_id, dimension],
+        )
+
+
 def _job_row(paths: object) -> None:
     """The one table no Stage 2 workflow writes: local job state."""
 
@@ -978,6 +1088,8 @@ def seed(root: Path) -> None:
     _material(paths)
     _spoken(paths, root=root)
     _listening(paths, root=root)
+    _captured(paths)
+    _judging_rows(paths)
     _job_row(paths)
 
 

@@ -179,8 +179,10 @@ def _path_template(pattern: str) -> str:
     """
 
     template = pattern.removeprefix("^").removesuffix("$")
-    return template.replace(client_routes.RUN_ID, "{run_id}").replace(
-        client_routes.CONTENT_ID, "{content_id}"
+    return (
+        template.replace(client_routes.RUN_ID, "{run_id}")
+        .replace(client_routes.CONTENT_ID, "{content_id}")
+        .replace(client_routes.CAPTURE_ID, "{capture_id}")
     )
 
 
@@ -214,6 +216,22 @@ CONTENT_ID_PARAMETER: dict[str, Any] = {
     "required": True,
     "description": "A task this run served, by its content identifier.",
     "schema": {"type": "string", "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$"},
+}
+
+
+CAPTURE_ID_PARAMETER: dict[str, Any] = {
+    "name": "capture_id",
+    "in": "path",
+    "required": True,
+    "description": (
+        "The client's own identifier for one recording, minted when the learner stopped "
+        "recording. It is the upload's idempotency key: the same identifier with the same "
+        "bytes replays the first upload's result, and with different bytes is refused."
+    ),
+    "schema": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    },
 }
 
 
@@ -297,6 +315,8 @@ def document(schema_directory: Path) -> dict[str, Any]:
             parameters.append(RUN_ID_PARAMETER)
         if "{content_id}" in template:
             parameters.append(CONTENT_ID_PARAMETER)
+        if "{capture_id}" in template:
+            parameters.append(CAPTURE_ID_PARAMETER)
         if route.query_schema is not None:
             parameters.extend(
                 {"name": name, "in": "query", "required": False, "schema": dict(schema)}
@@ -306,6 +326,17 @@ def document(schema_directory: Path) -> dict[str, Any]:
             parameters.append(ORIGIN_PARAMETER)
         if parameters:
             operation["parameters"] = parameters
+        if route.upload is not None:
+            operation["requestBody"] = {
+                "required": True,
+                "description": (
+                    f"The recording's bytes, at most {route.upload_limit} of them, with a "
+                    "Content-Length."
+                ),
+                "content": {
+                    route.upload: {"schema": {"type": "string", "contentMediaType": route.upload}}
+                },
+            }
         if route.request_schema is not None:
             operation["requestBody"] = {
                 "required": False,

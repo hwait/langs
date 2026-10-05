@@ -21,6 +21,7 @@ from linguawiki.db.backup import (
 )
 from linguawiki.db.connection import Database, open_reader, open_writer
 from linguawiki.db.integrity import IntegrityReport, check_database
+from linguawiki.db.schema import tables_at_schema_version
 from linguawiki.db.state import DatabaseState, classify_database
 from linguawiki.errors import ErrorDetail, LinguaWikiError
 from linguawiki.ids import EventId
@@ -198,7 +199,22 @@ def check(
     """Run integrity checks from a read-only connection."""
 
     with open_reader(paths, clock=clock or SystemClock()) as database:
-        return check_database(database, lock=lock)
+        report = check_database(database, lock=lock)
+        if "capture_stagings" not in tables_at_schema_version(report.database_schema_version):
+            return report
+        # The half of the C5 checks that needs the disk, which `check_database` -- given only
+        # a connection -- cannot see: bytes under the staging root, and whether a judged
+        # recording is still the one that was judged.
+        from linguawiki.services import recordings as recording_service
+
+        found = recording_service.filesystem_checks(paths, database)
+    checks = (*report.checks, *found)
+    return report.model_copy(
+        update={
+            "checks": checks,
+            "ok": all(entry.status != "failed" for entry in checks),
+        }
+    )
 
 
 def backup(

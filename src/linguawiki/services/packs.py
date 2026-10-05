@@ -1708,6 +1708,80 @@ def _write_pack_rows(
         )
 
 
+def _asset_rows(pack: LoadedPack) -> set[tuple[str, str, str, str, str, int]]:
+    return {
+        (
+            str(asset.content_id),
+            asset.asset_key,
+            asset.asset.path,
+            asset.sha256,
+            str(asset.asset.media_type),
+            int(asset.asset.duration_ms),
+        )
+        for asset in pack.assets
+    }
+
+
+def _installed_assets_current(database: Database, pack: LoadedPack, *, pack_id: str) -> bool:
+    """Whether `pack_assets` already holds exactly the recordings this pack ships."""
+
+    stored = {
+        (str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]), int(row[5]))
+        for row in database.query(
+            "SELECT content_id, asset_key, path, sha256, media_type, duration_ms "
+            "FROM pack_assets WHERE pack_id = ?",
+            [pack_id],
+        )
+    }
+    return stored == _asset_rows(pack)
+
+
+def _install_assets(database: Database, pack: LoadedPack, *, pack_id: str) -> None:
+    """Record the recordings this pack version ships, in place of the previous version's.
+
+    The rows describe an installation rather than anything a learner's history points at:
+    a served task snapshots the digest it played, and that snapshot -- not this table -- is
+    the account of what the learner heard. This is where the digest is read from at serve
+    time, instead of loading the whole pack to find it.
+
+    Updated in place by content ID rather than deleted and re-inserted. A content ID is
+    derived from the asset key, so a recording kept across versions keeps its row, and
+    DuckDB refuses a delete and a re-insert of one unique key inside a transaction.
+    """
+
+    now = database.now()
+    shipped = {str(asset.content_id): asset for asset in pack.assets}
+    held = {
+        str(content_id)
+        for (content_id,) in database.query(
+            "SELECT content_id FROM pack_assets WHERE pack_id = ?", [pack_id]
+        )
+    }
+    for content_id in sorted(held - set(shipped)):
+        database.execute("DELETE FROM pack_assets WHERE content_id = ?", [content_id])
+    for content_id, asset in sorted(shipped.items()):
+        values = [
+            asset.asset.path,
+            asset.sha256,
+            str(asset.asset.media_type),
+            int(asset.asset.duration_ms),
+            pack.manifest.version,
+            now,
+        ]
+        if content_id in held:
+            database.execute(
+                "UPDATE pack_assets SET path = ?, sha256 = ?, media_type = ?, duration_ms = ?, "
+                "pack_version = ?, installed_at = ? WHERE content_id = ?",
+                [*values, content_id],
+            )
+            continue
+        database.execute(
+            "INSERT INTO pack_assets (content_id, pack_id, asset_key, path, sha256, media_type, "
+            "duration_ms, pack_version, installed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [content_id, pack_id, asset.asset_key, *values],
+        )
+
+
 def _already_installed_unchanged(
     database: Database, pack: LoadedPack, *, pack_id: str, difference: PackDiffReport, source: Path
 ) -> bool:
@@ -1878,6 +1952,17 @@ def install(
         unchanged_install = installed is not None and _already_installed_unchanged(
             database, pack, pack_id=pack_id, difference=difference, source=root
         )
+        if (
+            unchanged_install
+            and not dry_run
+            and not _installed_assets_current(database, pack, pack_id=pack_id)
+        ):
+            # The pack is installed byte for byte, and only its recordings are unrecorded --
+            # an install made before `pack_assets` existed. Writing them is the whole of the
+            # work, and rewriting every content record to get there would re-bind reviews
+            # and touch rows learner state points at.
+            with database.transaction() as transaction:
+                _install_assets(transaction, pack, pack_id=pack_id)
         if dry_run or unchanged_install:
             return PackInstallReport(
                 pack_id=pack_id,
@@ -1929,6 +2014,7 @@ def install(
             _install_recommendations(transaction, pack, pack_id=pack_id)
             _install_bundles(transaction, pack, pack_id=pack_id)
             _install_assessments(transaction, pack, pack_id=pack_id)
+            _install_assets(transaction, pack, pack_id=pack_id)
             _deprecate_removed(
                 transaction,
                 pack_id=pack_id,

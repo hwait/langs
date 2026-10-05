@@ -147,6 +147,7 @@ def test_every_route_the_server_serves_is_declared() -> None:
             .removesuffix("$")
             .replace(client_routes.RUN_ID, "{run_id}")
             .replace(client_routes.CONTENT_ID, "{content_id}")
+            .replace(client_routes.CAPTURE_ID, "{capture_id}")
         )
         assert template in whole["paths"], template
         assert route.method.lower() in whole["paths"][template], template
@@ -192,24 +193,43 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
             .removesuffix("$")
             .replace(client_routes.RUN_ID, "{run_id}")
             .replace(client_routes.CONTENT_ID, "{content_id}")
+            .replace(client_routes.CAPTURE_ID, "{capture_id}")
         )
         operation = whole["paths"][template][route.method.lower()]
+        if route.upload is not None:
+            # An upload's body is bytes, so its key travels in the path, where a retry
+            # cannot drop it -- and the document has to say that it is the key.
+            keyed.append(template)
+            (named,) = [
+                parameter
+                for parameter in operation["parameters"]
+                if parameter["name"] == "capture_id"
+            ]
+            assert named["in"] == "path" and "idempotency key" in named["description"]
+            assert "409" in operation["responses"], template
+            continue
         body = operation["requestBody"]["content"]["application/json"]["schema"]
         if template == IDEMPOTENT_BY_STATE:
             assert "idempotency_key" not in body["properties"]
             continue
         keyed.append(template)
-        assert "idempotency_key" in body["properties"], template
+        # The key is `idempotency_key` beside the request, or -- for a written answer -- the
+        # producer's own `submission_key`; either way the document says it replays.
+        assert route.key_field in body["properties"], template
+        assert "replays" in body["properties"][route.key_field]["description"], template
         assert "409" in operation["responses"], template
 
     # Named rather than counted, so a new mutating route added without a key fails here
     # instead of joining a tally nobody reads.
     assert sorted(keyed) == [
         "/runs",
+        "/runs/{run_id}/batch",
         "/runs/{run_id}/finalization",
         "/runs/{run_id}/results",
         "/runs/{run_id}/tasks",
+        "/runs/{run_id}/tasks/{content_id}/captures/{capture_id}",
         "/runs/{run_id}/tasks/{content_id}/plays",
+        "/runs/{run_id}/tasks/{content_id}/submission",
     ]
 
 

@@ -1,4 +1,4 @@
-"""The route table: ten operations, each one service call wide.
+"""The route table: thirteen operations, each one service call wide.
 
 A handler resolves its arguments, calls one service function, and returns the report. There
 is no business logic here and there must not be -- selection, scoring, the stop rule, the
@@ -24,6 +24,8 @@ from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import DEFAULT_SCORING, SCORING_CONDITIONS
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import assessment_view as view_service
+from linguawiki.services import recordings as recording_service
+from linguawiki.services import written_answers as written_service
 
 #: The actor recorded against every mutation this server drives. The command name does not
 #: change between entry points -- that would make every audit query ask twice -- so this is
@@ -59,6 +61,10 @@ def _body(properties: Mapping[str, Any], *, required: Sequence[str] = ()) -> dic
 RUN_ID = r"(?P<run_id>asm_[0-9A-HJKMNP-TV-Z]{26})"
 #: A served task's content identifier in a path, matched as narrowly as a run's.
 CONTENT_ID = r"(?P<content_id>cnt_[0-9A-HJKMNP-TV-Z]{26})"
+#: The page's own identifier for one recording: a lower-case v4 UUID it minted when the
+#: learner pressed stop. It is the upload's idempotency key, so it sits in the path where
+#: a retry cannot drop it.
+CAPTURE_ID = r"(?P<capture_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +78,9 @@ class Request:
     #: The query string, one value per name. Only a route that publishes a query schema
     #: receives one; every other route refuses a query rather than ignoring it.
     query: Mapping[str, str] = field(default_factory=dict)
+    #: The raw body and its declared type, for a route that takes bytes rather than JSON.
+    raw: bytes = b""
+    content_type: str = ""
 
     def optional(self, name: str, kind: type[Any]) -> Any:
         """A body field of the expected type, or `None` when it is absent.
@@ -142,6 +151,16 @@ class Route:
     #: The query parameters this route reads, as a JSON Schema object over string values.
     #: Validated like a body: a parameter the document does not publish is refused.
     query_schema: Mapping[str, Any] | None = None
+    #: The media type family a route *accepts* bytes in, instead of a JSON body, and the
+    #: most it reads. The cap is the route's, because a recording is not a form field.
+    upload: str | None = None
+    upload_limit: int = 0
+    #: The body field that is this route's idempotency key. `idempotency_key` everywhere a
+    #: caller supplies one beside the request; a written answer's `submission_key` is the
+    #: producer's own identifier for the answer, stored on the submission, and it is the
+    #: key in exactly the sense the others are -- the same request under it replays, a
+    #: different one conflicts -- so the server retries on it the way it retries on them.
+    key_field: str = "idempotency_key"
 
 
 def _start(request: Request) -> Any:
@@ -167,6 +186,17 @@ def _serve(request: Request) -> Any:
         command="assessment.next",
         actor=ACTOR,
         idempotency_key=request.optional("idempotency_key", str),
+    )
+
+
+def _batch(request: Request) -> Any:
+    return assessment_service.next_batch(
+        request.paths,
+        run=request.path_values["run_id"],
+        clock=request.clock,
+        command="assessment.batch",
+        actor=ACTOR,
+        idempotency_key=request.required("idempotency_key", str),
     )
 
 
@@ -206,6 +236,7 @@ def _finalize(request: Request) -> Any:
         request.paths,
         run=request.path_values["run_id"],
         reason=request.optional("reason", str) or "completed",
+        exclude_outstanding=request.optional("exclude_outstanding", bool) is True,
         idempotency_key=request.optional("idempotency_key", str),
         clock=request.clock,
         command="assessment.finalize",
@@ -240,6 +271,33 @@ def _play(request: Request) -> Any:
         idempotency_key=request.required("idempotency_key", str),
         clock=request.clock,
         command="assessment.play",
+        actor=ACTOR,
+    )
+
+
+def _capture(request: Request) -> Any:
+    return recording_service.capture(
+        request.paths,
+        run=request.path_values["run_id"],
+        content_id=request.path_values["content_id"],
+        capture_id=request.path_values["capture_id"],
+        data=request.raw,
+        media_type=request.content_type,
+        clock=request.clock,
+        actor=ACTOR,
+        command="assessment.capture",
+    )
+
+
+def _submit(request: Request) -> Any:
+    return written_service.submit(
+        request.paths,
+        run=request.path_values["run_id"],
+        content_id=request.path_values["content_id"],
+        submission_key=request.required("submission_key", str),
+        response=request.required("response", str),
+        clock=request.clock,
+        command="assessment.submit",
         actor=ACTOR,
     )
 
@@ -330,6 +388,21 @@ ROUTES: tuple[Route, ...] = (
         ),
     ),
     Route(
+        "POST",
+        re.compile(rf"^/runs/{RUN_ID}/batch$"),
+        "assessment.batch",
+        _batch,
+        mutates=True,
+        summary=(
+            "Serve one task in every free open dimension at once, or replay the batch a key "
+            "already served"
+        ),
+        # Required, not optional as it is for a single serve: a batch is several serves,
+        # and a retry after a lost response must return those tasks rather than serve more.
+        request_schema=_body({"idempotency_key": IDEMPOTENCY_KEY}, required=["idempotency_key"]),
+        response_models=(assessment_service.BatchReport,),
+    ),
+    Route(
         "GET",
         re.compile(rf"^/runs/{RUN_ID}/tasks/{CONTENT_ID}/audio$"),
         "assessment.recording",
@@ -347,6 +420,46 @@ ROUTES: tuple[Route, ...] = (
         summary="Record one play of an outstanding task's recording, before it is heard",
         request_schema=_body({"idempotency_key": IDEMPOTENCY_KEY}, required=["idempotency_key"]),
         response_models=(assessment_service.PlayReport,),
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/runs/{RUN_ID}/tasks/{CONTENT_ID}/captures/{CAPTURE_ID}$"),
+        "assessment.capture",
+        _capture,
+        mutates=True,
+        summary=("Submit the learner's recorded answer to an outstanding spoken task, for a judge"),
+        response_models=(recording_service.CaptureReport,),
+        upload="audio/*",
+        upload_limit=recording_service.MAXIMUM_CAPTURE_BYTES,
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/runs/{RUN_ID}/tasks/{CONTENT_ID}/submission$"),
+        "assessment.submit",
+        _submit,
+        mutates=True,
+        summary="Hand in the learner's written answer to an outstanding written task, for a judge",
+        request_schema=_body(
+            {
+                # No length bounds on either field: the service refuses a blank or over-long
+                # key or answer by its own name, and one input gets one code on every surface
+                # -- the schema refusing the same input first would answer `invalid_contract`
+                # here and the named code from the CLI. The body cap still bounds what is read.
+                "submission_key": {
+                    "type": "string",
+                    "description": (
+                        "The page's own identifier for this answer, and the operation's "
+                        "idempotency key: the same key with the same answer replays the "
+                        "first call's result; with a different answer, or another task, "
+                        "it is refused with idempotency_conflict naming the recorded digest."
+                    ),
+                },
+                "response": {"type": "string"},
+            },
+            required=["submission_key", "response"],
+        ),
+        response_models=(written_service.WrittenSubmissionReport,),
+        key_field="submission_key",
     ),
     Route(
         "POST",
@@ -394,6 +507,7 @@ ROUTES: tuple[Route, ...] = (
         request_schema=_body(
             {
                 "reason": {"type": "string", "minLength": 1},
+                "exclude_outstanding": {"type": "boolean"},
                 "idempotency_key": IDEMPOTENCY_KEY,
             }
         ),

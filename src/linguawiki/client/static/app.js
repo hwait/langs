@@ -13,6 +13,10 @@
 //     clicks are one answer.
 //   * State is read back from `/screen` after every change. Nothing about a run lives
 //     only here, so a reload, a resume, or a different sitting draws the same thing.
+//
+// A judge marks recorded and written answers later, in another process, and the server has
+// no way to tell the page. So while anything waits on a judge the page re-reads `/screen`
+// on a backoff, and a change it finds never disturbs the task the learner is on.
 
 const TOKEN_HEADER = "X-LinguaWiki-Token";
 const PENDING_KEY = "linguawiki.pending";
@@ -22,8 +26,32 @@ const PENDING_KEY = "linguawiki.pending";
 // dropped.
 const TOKEN_KEY = "linguawiki.token";
 const RUN_KEY = "linguawiki.run";
+// The batch being worked through: `{run, idempotency_key, batch_id, content_ids}`. Its own
+// slot, not the pending one: the pending slot is cleared the moment an operation is
+// answered, and a batch is a round of answers long. Written before the batch is sent, so a
+// reload that lost the answer replays the same key rather than serving a second round.
+const BATCH_KEY = "linguawiki.batch";
 const STALE_TOKEN = new Set(["client_token_required", "client_token_invalid"]);
 const MACHINE_RUN = { scoring: "machine", modalities: ["text", "audio"] };
+// Where the track lets a judge mark something the learner makes here -- a recording it has
+// both said it can make and agreed to keep, or a written answer it agrees to keep whole --
+// the run is opened `machine+judged`, and those tasks wait for the judge. The server decides
+// both (`recording.offered`, `written_offered`); the page only reads them. Speech is asked
+// for only where a recording can be made, as it was under `machine+recorded`; writing
+// always, so a track that keeps no whole answer is told so by name rather than by an
+// unavailable modality.
+function judgedRun(recording) {
+  const modalities = ["text", "audio", "writing"];
+  if (recording) modalities.push("speech");
+  return { scoring: "machine+judged", modalities };
+}
+// `machine+recorded` is still drawn: a run opened under it keeps meaning what it meant.
+const PAGE_SCORING = new Set(["machine", "machine+recorded", "machine+judged"]);
+const JUDGED_SCORING = "machine+judged";
+// How often the page asks whether a judge has delivered: from the first interval, doubling
+// to the cap while nothing changes, and back to the first on any change.
+const POLL_FIRST_MS = 2000;
+const POLL_CAP_MS = 30000;
 
 const state = {
   token: null,
@@ -37,6 +65,25 @@ const state = {
   // a draft that lived only in the DOM was erased by pressing Play or by any error.
   drafts: new Map(),
   stale: false,
+  recording: null, // the track's recording policy, from discovery
+  recorder: null, // { recorder, chunks, content_id } while the learner is speaking
+  // content_id -> { capture_id, blob } of a recording made and not yet acknowledged, so a
+  // retry resends the same bytes under the same identifier.
+  takes: new Map(),
+  // content_id -> { submission_key, response } of a written answer handed in and not yet
+  // acknowledged. Pressing submit again with the same words resends them under the same
+  // key, which the server answers as a replay rather than a second answer.
+  answers: new Map(),
+  written: false, // whether the track keeps a written answer whole, from discovery
+  // Bumped whenever an operation starts. A poll that was sent before it is older than what
+  // the operation will draw, and is dropped rather than drawn over it.
+  epoch: 0,
+  poll: { timer: null, delay: POLL_FIRST_MS },
+  // A finalization refused because judgements are outstanding: the operation, kept so the
+  // learner's "finish without these" is the same request with the flag added.
+  finishing: null,
+  // The last batch served nothing. A page that served again on its own would loop.
+  servedNothing: false,
 };
 
 // --- the fragment ----------------------------------------------------------------------
@@ -112,7 +159,7 @@ function loadPending() {
   }
 }
 
-function setStatus(status) {
+function showStatus(status) {
   if (state.status !== status) {
     state.status = status;
     drawStatus();
@@ -121,9 +168,17 @@ function setStatus(status) {
 
 // One request, retried only where a retry is a replay: a read, or a mutation that carries
 // its key. A retryable refusal waits the server's `Retry-After` and sends the same body.
-async function request(method, path, body, { binary = false, attempts = Infinity } = {}) {
-  const keyed = body !== undefined && typeof body.idempotency_key === "string";
+//
+// `quiet` is for a poll: it never changes the status banner and never waits out a busy
+// database. A poll the writer lock refuses -- usually the judge's own `record` -- is a poll
+// to try at the next tick, not a wait to show the learner.
+async function request(method, path, body, { binary = false, attempts = Infinity, quiet = false } = {}) {
+  // A written answer's key is its `submission_key`, and it makes a resend a replay exactly
+  // as `idempotency_key` does elsewhere.
+  const keyed =
+    body !== undefined && (typeof body.idempotency_key === "string" || typeof body.submission_key === "string");
   const mayRetry = method === "GET" || keyed;
+  const setStatus = quiet ? () => {} : showStatus;
   for (let attempt = 0; ; attempt += 1) {
     let response;
     try {
@@ -199,7 +254,7 @@ async function request(method, path, body, { binary = false, attempts = Infinity
       setStatus("");
       throw new Refusal(response.status, error);
     }
-    if (response.status === 503 && error.retryable && mayRetry) {
+    if (response.status === 503 && error.retryable && mayRetry && !quiet) {
       setStatus("waiting");
       const after = Number(response.headers.get("Retry-After")) || 1;
       await sleep(after * 1000);
@@ -236,11 +291,76 @@ async function send(operation) {
   }
 }
 
+// One recording, sent as its own bytes under the identifier minted when the learner pressed
+// stop. The identifier is the upload's idempotency key: a retry resends the same bytes
+// under it, and the server answers a retry of a capture it already registered with that
+// registration rather than a second one.
+async function uploadTake(task, take) {
+  const path = `/runs/${state.run}/tasks/${task.content_id}/captures/${take.capture_id}`;
+  for (let attempt = 0; ; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(path, {
+        method: "POST",
+        headers: { [TOKEN_HEADER]: state.token, "Content-Type": take.blob.type || "audio/webm" },
+        body: take.blob,
+        cache: "no-store",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+      });
+    } catch {
+      showStatus("offline");
+      await sleep(Math.min(1000 * (attempt + 1), 5000));
+      continue;
+    }
+    let envelope = null;
+    try {
+      envelope = await response.json();
+    } catch {
+      envelope = null;
+    }
+    // An answer that cannot be read is not an answer -- the upload may have landed -- so it
+    // is resent under the same identifier, which the server answers as a replay. Reading
+    // `error.code` off an envelope that has none threw, and stranded the take.
+    const readable =
+      envelope !== null &&
+      typeof envelope === "object" &&
+      ((response.ok && envelope.ok === true) || (envelope.error && typeof envelope.error.code === "string"));
+    if (!readable) {
+      showStatus("offline");
+      await sleep(Math.min(1000 * (attempt + 1), 5000));
+      continue;
+    }
+    if (response.ok && envelope.ok) {
+      showStatus("");
+      state.takes.delete(task.content_id);
+      return envelope.data;
+    }
+    const error = envelope.error;
+    if (STALE_TOKEN.has(error.code)) {
+      state.stale = true;
+      store(TOKEN_KEY, null);
+      showStatus("");
+      throw new Refusal(response.status, error);
+    }
+    if (response.status === 503 && error.retryable) {
+      showStatus("waiting");
+      await sleep((Number(response.headers.get("Retry-After")) || 1) * 1000);
+      continue;
+    }
+    showStatus("");
+    // A refusal is an answer: the server removed the bytes and said why. This take is over.
+    state.takes.delete(task.content_id);
+    throw new Refusal(response.status, error);
+  }
+}
+
 // --- actions ---------------------------------------------------------------------------
 
 async function act(work) {
   if (state.busy) return; // two clicks are one answer
   state.busy = true;
+  state.epoch += 1;
   state.error = null;
   draw();
   try {
@@ -267,9 +387,74 @@ async function openRun(runId) {
 
 function startRun() {
   return act(async () => {
-    const run = await keyed("POST", "/runs", MACHINE_RUN);
+    const recording = Boolean(state.recording && state.recording.offered);
+    const shape = recording || state.written ? judgedRun(recording) : MACHINE_RUN;
+    const run = await keyed("POST", "/runs", shape);
     state.run = run.run_id;
   });
+}
+
+// Press to start, press to stop. No countdown: the learner decides when they have finished.
+async function startRecording(task) {
+  if (state.busy || state.recorder) return;
+  state.error = null;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    state.error = {
+      code: "client_microphone_unavailable",
+      message: "The browser did not allow the microphone, so nothing was recorded.",
+    };
+    draw();
+    return;
+  }
+  const recorder = new MediaRecorder(stream);
+  const chunks = [];
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data && event.data.size) chunks.push(event.data);
+  });
+  state.recorder = { recorder, chunks, stream, content_id: task.content_id };
+  recorder.start();
+  draw();
+}
+
+// Stop the microphone and throw the take away. Leaving the task view for any reason --
+// pausing, a refusal, the task settling -- must not leave a live microphone behind a screen
+// with no stop button on it.
+function discardRecording() {
+  const active = state.recorder;
+  if (!active) return;
+  state.recorder = null;
+  try {
+    if (active.recorder.state !== "inactive") active.recorder.stop();
+  } catch {
+    /* already stopped */
+  }
+  active.stream.getTracks().forEach((track) => track.stop());
+}
+
+function stopRecording(task) {
+  const active = state.recorder;
+  if (!active || active.content_id !== task.content_id) return;
+  active.recorder.addEventListener(
+    "stop",
+    () => {
+      active.stream.getTracks().forEach((track) => track.stop());
+      state.recorder = null;
+      const blob = new Blob(active.chunks, { type: active.recorder.mimeType || "audio/webm" });
+      state.takes.set(task.content_id, { capture_id: crypto.randomUUID(), blob });
+      submitTake(task);
+    },
+    { once: true },
+  );
+  active.recorder.stop();
+}
+
+function submitTake(task) {
+  const take = state.takes.get(task.content_id);
+  if (!take) return Promise.resolve();
+  return act(() => uploadTake(task, take));
 }
 
 function resumeRun(runId) {
@@ -283,16 +468,90 @@ function resumeRun(runId) {
 }
 
 function setRunStatus(status) {
+  discardRecording();
   return act(() => request("POST", `/runs/${state.run}/status`, { status }));
 }
 
-// Serve the next task. A replayed serve can hand back a task already answered; it is never
-// drawn, and the next serve goes out under a new key.
-async function serveNext() {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const served = await keyed("POST", `/runs/${state.run}/tasks`);
-    if (!("content_id" in served) || served.status === "served") return;
+// --- batches ---------------------------------------------------------------------------
+
+function loadBatch() {
+  try {
+    const raw = sessionStorage.getItem(BATCH_KEY);
+    const batch = raw ? JSON.parse(raw) : null;
+    return batch && typeof batch.idempotency_key === "string" ? batch : null;
+  } catch {
+    return null;
   }
+}
+
+function saveBatch(batch) {
+  store(BATCH_KEY, batch === null ? null : JSON.stringify(batch));
+}
+
+// What a batch report says the page holds: its tasks in the order the batch served them.
+function remember(batch, report) {
+  saveBatch({ ...batch, batch_id: report.batch_id, content_ids: report.tasks.map((task) => task.content_id) });
+}
+
+// Serve one task in every free dimension at once. The key is written down before it is
+// sent, so a reload replays this round rather than serving a second one beside it.
+async function serveBatch() {
+  const batch = { run: state.run, idempotency_key: crypto.randomUUID(), batch_id: null, content_ids: [] };
+  saveBatch(batch);
+  let report;
+  try {
+    report = await request("POST", `/runs/${state.run}/batch`, { idempotency_key: batch.idempotency_key });
+  } catch (refusal) {
+    // A refusal served nothing, and the key is spent on it. Only an unreachable server
+    // leaves the batch to replay, because then nobody knows whether it landed.
+    if (refusal.code !== "client_unreachable") saveBatch(null);
+    throw refusal;
+  }
+  // A batch that served nothing is settled the moment it is answered. Kept, it would be
+  // replayed after every reload -- serving nothing again -- once dimensions had freed up.
+  state.servedNothing = report.tasks.length === 0;
+  if (state.servedNothing) saveBatch(null);
+  else remember(batch, report);
+}
+
+// On a reload, before anything new is served: the stored batch, replayed by its key. The
+// server hands back the same tasks with where each stands now, and serves nothing.
+async function replayBatch() {
+  const batch = loadBatch();
+  if (!batch) return;
+  if (batch.run !== state.run) {
+    saveBatch(null);
+    return;
+  }
+  try {
+    const report = await request("POST", `/runs/${batch.run}/batch`, { idempotency_key: batch.idempotency_key });
+    if (report.tasks.every((task) => task.state !== "served")) saveBatch(null);
+    else remember(batch, report);
+  } catch (refusal) {
+    // The run moved on in a way the batch cannot follow -- closed, or the key refused. The
+    // screen is what the page draws from either way, so the batch is let go and the
+    // refusal said.
+    saveBatch(null);
+    throw refusal;
+  }
+}
+
+// The batch is worked through until no task in it is still waiting for the learner. An
+// answer handed to a judge is the learner's part done: holding the round open until the
+// judge marked it would stop the learner working in every other dimension.
+function settleBatch(screen) {
+  const batch = loadBatch();
+  if (!batch) return null;
+  const waitingOnLearner = new Set(
+    screen.outstanding.filter((task) => task.state !== "awaiting-judge").map((task) => task.content_id),
+  );
+  if (batch.run !== screen.run_id || !batch.content_ids.some((id) => waitingOnLearner.has(id))) {
+    // A batch whose response never arrived has no members yet; it is kept for the replay.
+    if (batch.run === screen.run_id && batch.batch_id === null) return batch;
+    saveBatch(null);
+    return null;
+  }
+  return batch;
 }
 
 function answer(task, response) {
@@ -301,13 +560,169 @@ function answer(task, response) {
   );
 }
 
-function finish() {
-  return act(() => keyed("POST", `/runs/${state.run}/finalization`, { reason: "completed" }));
+// A written answer for a judge. The key is the page's own identifier for the answer, kept
+// with the words until the server acknowledges them: the same words sent again go under the
+// same key, so a response lost on the way back is replayed rather than handed in twice.
+function submitWritten(task, text) {
+  const kept = state.answers.get(task.content_id);
+  const submission =
+    kept && kept.response === text ? kept : { submission_key: crypto.randomUUID(), response: text };
+  state.answers.set(task.content_id, submission);
+  return act(async () => {
+    try {
+      await send({
+        method: "POST",
+        path: `/runs/${state.run}/tasks/${task.content_id}/submission`,
+        body: { submission_key: submission.submission_key, response: submission.response },
+      });
+    } catch (refusal) {
+      // A refusal is an answer; the next press is a new hand-in under a new key. Unknown
+      // is not, and keeps the key.
+      if (refusal.code !== "client_unreachable") state.answers.delete(task.content_id);
+      throw refusal;
+    }
+    state.answers.delete(task.content_id);
+    state.drafts.delete(task.content_id);
+  });
 }
+
+function finish() {
+  return act(async () => {
+    const operation = {
+      method: "POST",
+      path: `/runs/${state.run}/finalization`,
+      body: { reason: "completed", idempotency_key: crypto.randomUUID() },
+    };
+    state.finishing = null;
+    try {
+      await send(operation);
+    } catch (refusal) {
+      // Answers still waiting for a judge. Not an error to show: a choice to offer.
+      if (refusal.code !== "assessment_judgement_outstanding") throw refusal;
+      state.finishing = { operation };
+    }
+  });
+}
+
+// "Finish without these": the refused request again, under its key, with the flag the
+// refusal named. The flag is part of the request's hash, so this is a new request rather
+// than a replay of the refusal.
+function finishWithout() {
+  const { operation } = state.finishing;
+  return act(async () => {
+    await send({ ...operation, body: { ...operation.body, exclude_outstanding: true } });
+    state.finishing = null;
+  });
+}
+
+function keepWaiting() {
+  state.finishing = null;
+  draw();
+}
+
+// --- waiting for a judge ---------------------------------------------------------------
+
+// What a poll compares: the run's and each dimension's standing, and every judgement it
+// waits on. Claims change in place, so there is nothing to count -- equal means no redraw.
+function signature(screen) {
+  return JSON.stringify([
+    screen.status,
+    screen.progress,
+    screen.dimensions.map((dimension) => [dimension.dimension, dimension.status, dimension.progress]),
+    screen.outstanding_judgements,
+  ]);
+}
+
+// Polling runs while something is outstanding on a run that is going, and stops when the
+// page is refusing: a refusal that repeats must not loop.
+function pollWanted() {
+  const screen = state.screen;
+  return Boolean(
+    !state.stale &&
+      state.run &&
+      screen &&
+      screen.run_id === state.run &&
+      screen.status === "in-progress" &&
+      screen.outstanding_judgements &&
+      screen.outstanding_judgements.length &&
+      !state.error,
+  );
+}
+
+function stopPolling() {
+  if (state.poll.timer !== null) clearTimeout(state.poll.timer);
+  state.poll.timer = null;
+}
+
+function schedulePoll() {
+  if (!pollWanted()) {
+    stopPolling();
+    state.poll.delay = POLL_FIRST_MS;
+    return;
+  }
+  if (state.poll.timer !== null || document.visibilityState === "hidden") return;
+  state.poll.timer = setTimeout(pollOnce, state.poll.delay);
+}
+
+function backOff() {
+  state.poll.delay = Math.min(state.poll.delay * 2, POLL_CAP_MS);
+}
+
+async function pollOnce() {
+  state.poll.timer = null;
+  // An operation in flight reads the screen itself when it ends.
+  if (!pollWanted() || state.busy || document.visibilityState === "hidden") return schedulePoll();
+  const epoch = state.epoch;
+  const before = signature(state.screen);
+  let fresh;
+  try {
+    fresh = await request("GET", `/runs/${state.run}/screen`, undefined, { attempts: 1, quiet: true });
+  } catch (refusal) {
+    if (state.stale) return draw();
+    // Busy (the writer lock), unreachable, or unreadable: keep the screen, try at the next
+    // tick. Anything else is the page refusing, and stops the polling.
+    const transient = refusal.code === "client_unreachable" || (refusal.status === 503 && refusal.retryable);
+    if (!transient) {
+      state.error = { code: refusal.code, message: refusal.message };
+      if (!taskOnScreen()) draw();
+      return schedulePoll();
+    }
+    backOff();
+    return schedulePoll();
+  }
+  // Something the learner did since has drawn, or will draw, a newer screen.
+  if (epoch !== state.epoch || state.busy) return schedulePoll();
+  if (signature(fresh) === before) {
+    backOff();
+    return schedulePoll();
+  }
+  state.screen = fresh;
+  state.poll.delay = POLL_FIRST_MS;
+  state.servedNothing = false;
+  if (taskOnScreen()) {
+    // The learner is on a task. Only what surrounds it changes: their typing, a live
+    // recording, and a playing recording are all inside the node that is kept. A dimension
+    // this found open is served when they finish, through the normal post-answer draw.
+    refreshSurroundings(fresh);
+    schedulePoll();
+  } else {
+    draw();
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    stopPolling();
+  } else if (pollWanted() && state.poll.timer === null) {
+    // Back at once: a learner returning to the tab should not wait out a backoff.
+    state.poll.timer = setTimeout(pollOnce, 0);
+  }
+});
 
 async function play(task, player) {
   if (state.busy) return;
   state.busy = true;
+  state.epoch += 1;
   state.error = null;
   draw();
   try {
@@ -421,8 +836,15 @@ function dimensionRow(dimension) {
       parts.push(h("span", { class: "estimate" }, `${dimension.estimated_level}${span}`));
     }
     parts.push(h("span", { class: "confidence" }, dimension.confidence));
+    if (dimension.progress === "waiting") {
+      parts.push(h("span", { class: "reason", dataset: { role: "dimension-waiting" } }, "waiting for a judge"));
+    }
   }
-  return h("li", { dataset: { dimension: dimension.dimension, status: dimension.status } }, parts);
+  return h(
+    "li",
+    { dataset: { dimension: dimension.dimension, status: dimension.status, progress: dimension.progress || "" } },
+    parts,
+  );
 }
 
 function progress(screen) {
@@ -454,6 +876,8 @@ async function drawPicker() {
     state.error = { code: refusal.code, message: refusal.message };
     listed = { runs: [] };
   }
+  state.recording = listed.recording || null;
+  state.written = listed.written_offered === true;
   const items = listed.runs.map((run) =>
     h(
       "li",
@@ -462,7 +886,7 @@ async function drawPicker() {
         "span",
         {},
         `${run.calibration_label} · ${run.status} · started ${run.started_at.slice(0, 10)}`,
-        run.scoring === "machine" ? "" : " · opened elsewhere: continue it with the assess skill",
+        PAGE_SCORING.has(run.scoring) ? "" : " · opened elsewhere: continue it with the assess skill",
       ),
       button(run.status === "paused" ? "Resume" : "Continue", () => resumeRun(run.run_id), {
         dataset: { run: run.run_id },
@@ -476,6 +900,9 @@ async function drawPicker() {
       ? h("section", { class: "panel" }, h("h2", {}, "Pick up where you left off"), h("ul", { class: "runs" }, items))
       : "",
     message(items.length ? "Or begin again:" : "No calibration is open.", button("Start a calibration", startRun)),
+    state.recording && state.recording.offered
+      ? h("p", { class: "note", dataset: { role: "retention" } }, retentionNote(state.recording))
+      : null,
   );
   drawStatus();
 }
@@ -503,7 +930,22 @@ function taskView(screen, task) {
       ),
     );
   }
-  if (task.answer_with === "choice") {
+  if (task.answer_with === "recording") {
+    const recording = state.recorder && state.recorder.content_id === task.content_id;
+    const pending = state.takes.get(task.content_id);
+    body.push(
+      h(
+        "div",
+        { class: "speak" },
+        recording
+          ? button("Stop recording", () => stopRecording(task), { dataset: { role: "stop" }, disabled: false })
+          : button("Start recording", () => startRecording(task), { dataset: { role: "record" } }),
+        pending && !recording ? button("Send again", () => submitTake(task), { dataset: { role: "resend" } }) : null,
+        h("span", { class: "recording-state", dataset: { role: "recording-state" } }, recording ? "Recording…" : ""),
+      ),
+      h("p", { class: "note", dataset: { role: "retention" } }, retentionNote(screen.recording)),
+    );
+  } else if (task.answer_with === "choice") {
     body.push(
       h(
         "div",
@@ -515,6 +957,36 @@ function taskView(screen, task) {
           }),
         ),
       ),
+    );
+  } else if (writable(screen, task)) {
+    // Long writing for a judge: a box rather than a line, and Enter is a new line, not a
+    // submission. Handed in, it waits for the judge like a recording does.
+    const field = h("textarea", {
+      name: "written",
+      rows: 8,
+      spellcheck: "false",
+      "aria-label": "Your answer",
+      disabled: state.busy,
+    });
+    field.value = state.drafts.get(task.content_id) || "";
+    field.addEventListener("input", () => state.drafts.set(task.content_id, field.value));
+    const submit = () => {
+      const text = field.value;
+      if (!text.trim()) {
+        state.error = { code: "invalid_arguments", message: "Write an answer first." };
+        draw();
+        return;
+      }
+      submitWritten(task, text);
+    };
+    body.push(
+      h(
+        "form",
+        { class: "written", onsubmit: (event) => (event.preventDefault(), submit()) },
+        field,
+        button("Hand in for marking", submit, { dataset: { role: "hand-in" } }),
+      ),
+      h("p", { class: "note" }, "A judge reads your answer to mark it, so it is kept whole."),
     );
   } else {
     const field = h("input", {
@@ -554,6 +1026,101 @@ function taskView(screen, task) {
   return h("section", { class: "task", dataset: { content: task.content_id } }, body);
 }
 
+// The track's retention policy as it applies to *this* recording, said rather than chosen:
+// the page never overrides it, and it must not promise a deletion the sweep never does.
+// `delete-after-ingestion` is about recordings a package brought in; a recording made here
+// is not one, so under it this recording is kept until the learner removes it. Under a
+// rolling window, a recording a judge has not heard yet is held until it is heard.
+function retentionNote(policy) {
+  if (!policy) return "";
+  const kept = {
+    keep: "Your recording is kept until you remove it.",
+    "rolling-days": `Your recording is removed ${policy.retention_days || "a set number of"} day(s) after you make it, though not before a judge has heard it.`,
+    "delete-after-ingestion":
+      "Your recording is kept until you remove it: this track removes imported recordings after they are processed, and a recording made here is not one.",
+  }[policy.retention_policy];
+  return `${kept || ""} A judge listens to it to mark your answer.`;
+}
+
+// A written task a judge marks from what the learner types. Only a `machine+judged` run
+// serves one, and only where the track keeps the answer whole -- the server decided that
+// when it served the task.
+function writable(screen, task) {
+  return (
+    screen.scoring === JUDGED_SCORING &&
+    task.needs_judge &&
+    task.answer_with === "text" &&
+    task.modality === "writing"
+  );
+}
+
+function when(stamp) {
+  const time = new Date(stamp);
+  return Number.isNaN(time.getTime()) ? String(stamp) : time.toLocaleString();
+}
+
+// What each answer is waiting *on*: a queue nobody has picked up reads differently from one
+// being worked, and a verdict held for a resume differently again.
+function judgementLine(judgement) {
+  const what = judgement.kind === "text" ? "Written answer" : "Recorded answer";
+  const where = judgement.dimension ? ` (${judgement.dimension})` : "";
+  const standing = {
+    unclaimed: judgement.unclaimed_since
+      ? `waiting for a judge since ${when(judgement.unclaimed_since)}`
+      : "waiting for a judge",
+    claimed: `being marked by ${judgement.claimed_by || "a judge"}${judgement.claimed_until ? ` until ${when(judgement.claimed_until)}` : ""}`,
+    held: "marked; the mark is held until the run resumes",
+    lapsed: "no judge could mark it, so it will be set aside",
+  }[judgement.claim_state];
+  return h(
+    "li",
+    { dataset: { submission: judgement.submission_id, claimState: judgement.claim_state } },
+    `${what}${where}: ${standing || judgement.claim_state}`,
+  );
+}
+
+function waitingNote(screen) {
+  const judgements = screen.outstanding_judgements || [];
+  if (!judgements.length) return null;
+  const count = judgements.length;
+  return h(
+    "div",
+    { class: "note", dataset: { role: "awaiting-judge" } },
+    h("p", {}, `${count} answer${count === 1 ? " is" : "s are"} waiting for a judge to mark.`),
+    h("ul", { class: "judgements" }, judgements.map(judgementLine)),
+  );
+}
+
+// The slot the waiting note lives in, present on every run screen so a poll has one place
+// to put it without touching anything around it.
+function judgementSlot(screen) {
+  return h("div", { dataset: { role: "judgements" } }, waitingNote(screen) || "");
+}
+
+function taskOnScreen() {
+  return Boolean(document.querySelector("#app section.task"));
+}
+
+// A changed poll while a task is on screen: the progress and the waiting note are redrawn,
+// and nothing else is touched -- the task node, with whatever the learner has typed, is
+// recording, or is listening to, stays exactly where it is.
+function refreshSurroundings(screen) {
+  const root = app();
+  const shown = root.querySelector("section.progress");
+  if (shown) shown.replaceWith(progress(screen));
+  const slot = root.querySelector("[data-role=judgements]");
+  if (slot) slot.replaceWith(judgementSlot(screen));
+}
+
+function finishChoice(screen) {
+  const count = (screen.outstanding_judgements || []).length;
+  return message(
+    `${count} answer${count === 1 ? " is" : "s are"} still waiting for a judge. Wait for the marks, or finish now without ${count === 1 ? "it" : "them"}: an answer left out is withdrawn and does not count towards the estimates.`,
+    button("Wait for the judge", keepWaiting, { dataset: { role: "keep-waiting" } }),
+    button("Finish without these", finishWithout, { dataset: { role: "finish-without" } }),
+  );
+}
+
 function results(screen) {
   const closed = screen.status === "finalized" || screen.status === "abandoned";
   return message(
@@ -562,23 +1129,71 @@ function results(screen) {
   );
 }
 
+function waitingPanel() {
+  return message(
+    "Everything left in this calibration is waiting for a judge to mark an answer. This page checks for the marks on its own and carries on when one arrives. You can also pause here and come back, or finish now.",
+    button("Pause", () => setRunStatus("paused")),
+    button("Finish now", finish, { dataset: { role: "finish-now" } }),
+    state.error ? button("Check again", () => act(async () => {})) : null,
+  );
+}
+
 async function draw(options = {}) {
-  if (state.stale) return drawStale();
+  if (state.stale || !state.run || !state.screen) discardRecording();
+  if (state.stale) {
+    stopPolling();
+    return drawStale();
+  }
   store(RUN_KEY, state.run);
-  if (!state.run || !state.screen) return drawPicker();
+  if (!state.run || !state.screen) {
+    stopPolling();
+    return drawPicker();
+  }
   const screen = state.screen;
   let content;
-  // Answerable here: scored by the server, and -- when heard -- with something to hear.
-  const answerable = screen.outstanding.find((task) => !task.needs_judge && !task.missing_recording);
-  const judged = screen.outstanding.find((task) => task.needs_judge || task.missing_recording);
-  // Only a run opened for machine scoring is served from this page. Under `any` the next
-  // task can need a judge or a recording this page does not have, and serving it would
-  // spend an exposure on a question the learner cannot answer here.
-  const servable = screen.scoring === "machine";
+  // A spoken task is answered here by recording it, when the track permits that; a written
+  // task for a judge by typing it, under a run opened for that. A judge marks both later.
+  // Everything else answerable here is scored by the server.
+  const recordable = (task) =>
+    task.answer_with === "recording" && screen.recording && screen.recording.offered;
+  const open = screen.outstanding.filter((task) => task.state !== "awaiting-judge");
+  const canAnswer = (task) =>
+    (!task.needs_judge && !task.missing_recording) || recordable(task) || writable(screen, task);
+  // The batch being worked through goes first, in the order it was served; anything else
+  // outstanding -- a task served before batches, or by another surface -- after it.
+  const batch = settleBatch(screen);
+  const inBatch = batch ? batch.content_ids.map((id) => open.find((task) => task.content_id === id)) : [];
+  const answerable = inBatch.find((task) => task && canAnswer(task)) || open.find(canAnswer);
+  const judged = open.find((task) => !canAnswer(task));
+  // Only a run this page shaped is served from it. Under `any` the next task can need a
+  // judge or a recording this page does not have, and serving it would spend an exposure
+  // on a question the learner cannot answer here.
+  const servable = PAGE_SCORING.has(screen.scoring);
+  // A dimension is free when it is open as the learner meets it and no task in it is in
+  // the learner's hands. One waiting on a judge is `waiting`, not `open`, and is not served
+  // in; the run may still serve the others.
+  const holding = new Set(open.map((task) => task.dimension));
+  const free = screen.dimensions.some(
+    (dimension) => dimension.status === "open" && dimension.progress === "open" && !holding.has(dimension.dimension),
+  );
+  const outstanding = (screen.outstanding_judgements || []).length > 0;
+  // The choice between waiting and finishing is about a run with nothing else to do. Once
+  // the judge has delivered, or there is work again, it no longer describes anything.
+  if (!outstanding || screen.status !== "in-progress" || answerable || free) state.finishing = null;
+  if (!free) state.servedNothing = false;
+  // The only screen a live recording may sit behind is the task it is recording.
+  if (
+    state.recorder &&
+    (screen.status !== "in-progress" || !answerable || answerable.content_id !== state.recorder.content_id)
+  ) {
+    discardRecording();
+  }
   if (screen.status === "paused") {
     content = message("This calibration is paused.", button("Resume", () => resumeRun(screen.run_id)));
   } else if (screen.status !== "in-progress") {
     content = results(screen);
+  } else if (state.finishing) {
+    content = finishChoice(screen);
   } else if (answerable) {
     content = taskView(screen, answerable);
     if (options.keepPlayer) {
@@ -597,22 +1212,30 @@ async function draw(options = {}) {
       "This calibration was opened outside this page, so its next task may need a judge or a recording this page does not have. Continue it with the assess skill, or pause it here.",
       button("Pause", () => setRunStatus("paused")),
     );
-  } else if (screen.dimensions.some((dimension) => dimension.status === "open")) {
-    if (state.error) {
-      // Never serve again on its own after a refusal: a refusal that repeats would loop.
-      // The learner reads the message and decides.
-      content = message("The next task could not be served.", button("Try again", () => act(serveNext)));
+  } else if (free) {
+    if (state.error || state.servedNothing) {
+      // Never serve again on its own after a refusal, or after a round that served
+      // nothing: either one repeated would loop. The learner reads the message and decides.
+      content = message(
+        state.error ? "The next task could not be served." : "Nothing could be served just now.",
+        button("Try again", () => act(serveBatch)),
+      );
     } else if (!state.busy) {
-      act(serveNext);
+      act(serveBatch);
       return;
     } else {
       content = message("Choosing the next task…");
     }
+  } else if (screen.progress === "waiting" || outstanding) {
+    // Waiting is a state, and said: what is left is a judge's to do, and the page asks
+    // after it on its own.
+    content = waitingPanel();
   } else {
     content = results(screen);
   }
-  app().replaceChildren(header(), errorBanner() || "", progress(screen), content);
+  app().replaceChildren(header(), errorBanner() || "", progress(screen), judgementSlot(screen), content);
   drawStatus();
+  schedulePoll();
 }
 
 // --- start -----------------------------------------------------------------------------
@@ -651,6 +1274,16 @@ async function boot() {
     state.error = { code: refusal.code, message: refusal.message };
     state.run = null;
     state.screen = null;
+  }
+  // A round a reload interrupted is replayed by its key before anything new is served, so
+  // the tasks it served are worked through rather than joined by a second round.
+  if (state.run && state.screen && state.screen.status === "in-progress") {
+    try {
+      await replayBatch();
+      state.screen = await request("GET", `/runs/${state.run}/screen`);
+    } catch (refusal) {
+      state.error = state.error || { code: refusal.code, message: refusal.message };
+    }
   }
   draw();
 }

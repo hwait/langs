@@ -43,11 +43,13 @@ from linguawiki.services import database as database_service
 from linguawiki.services import errors as error_service
 from linguawiki.services import estimates as estimate_service
 from linguawiki.services import evidence as evidence_service
+from linguawiki.services import judging as judging_service
 from linguawiki.services import knowledge as knowledge_service
 from linguawiki.services import learners as learner_service
 from linguawiki.services import onboarding as onboarding_service
 from linguawiki.services import packs as pack_service
 from linguawiki.services import privacy as privacy_service
+from linguawiki.services import recordings as recording_service
 from linguawiki.services import resources as resource_service
 from linguawiki.services import sessions as session_service
 from linguawiki.services import skills as skills_service
@@ -56,6 +58,7 @@ from linguawiki.services import speaking as speaking_service
 from linguawiki.services import transcripts as transcript_service
 from linguawiki.services import wiki as wiki_service
 from linguawiki.services import workspace as workspace_service
+from linguawiki.services import written_answers as written_service
 
 FORMATS = ("human", "json")
 # 0 succeeded, 1 ran but reported failures, 2 the command itself failed.
@@ -558,11 +561,20 @@ def _assessment_parser(subcommands: Any) -> None:
     # Serving is a mutation: it spends an item's exposure. Without a key a retry after a
     # lost response consumed a second task and burned a second item.
     nxt.add_argument("--idempotency-key")
+    # One task in every free open dimension, in one transaction. A batch is several serves
+    # at once, so its key is required: a retry has to return those tasks, not serve more.
+    nxt.add_argument(
+        "--batch",
+        action="store_true",
+        help="serve one task per open dimension at once (requires --idempotency-key)",
+    )
     _add_workspace(nxt)
     record = actions.add_parser("record", help="score one served task")
     record.add_argument("--run")
     _add_track_selector(record)
-    record.add_argument("--content", required=True)
+    # Both spellings, on `record` and `submit` alike: a judge moving from handing in an
+    # answer to scoring it should not have to remember which command took which.
+    record.add_argument("--content", "--content-id", dest="content", required=True)
     # Optional now: a machine-scorable task is scored from the key the run snapshotted,
     # and a supplied score is the compatibility path rather than the default one.
     record.add_argument("--score", type=float)
@@ -587,8 +599,69 @@ def _assessment_parser(subcommands: Any) -> None:
     )
     record.add_argument("--assessor")
     record.add_argument("--confidence", choices=("low", "medium", "high"), default="medium")
+    # The recording a judge listened to. A spoken task answered by a recording takes a
+    # verdict only from a judge who names the one the learner submitted.
+    record.add_argument("--audio-artifact")
+    # The submission a judge was handed, and the claim it was handed under. A verdict
+    # naming a submission is revalidated against it when it lands, and held rather than
+    # refused if the run has been paused since.
+    record.add_argument("--submission")
+    record.add_argument("--claim")
+    record.add_argument(
+        "--rubric",
+        help="JSON file holding the per-criterion rubric scores, or - to read stdin",
+    )
     record.add_argument("--idempotency-key")
     _add_workspace(record)
+    # A written answer handed in for a judge: registration does not score, so the task
+    # stays served and waits, as a recording does. Long answers go in --response-file.
+    submit = actions.add_parser("submit", help="hand in a written answer for a judge to score")
+    submit.add_argument("--run")
+    _add_track_selector(submit)
+    submit.add_argument("--content-id", "--content", dest="content_id", required=True)
+    submit.add_argument(
+        "--submission-key",
+        required=True,
+        help="this answer's own identifier; resending the same answer under it replays",
+    )
+    submit.add_argument("--response")
+    submit.add_argument(
+        "--response-file",
+        help="file holding the learner's answer, or - to read stdin",
+    )
+    _add_workspace(submit)
+    pending = actions.add_parser(
+        "pending", help="answers in a run waiting for a judge, with how to reach each"
+    )
+    pending.add_argument("--run")
+    _add_track_selector(pending)
+    _add_workspace(pending)
+    # A judge pulls work: each claim is one attempt under a lease, and the connection
+    # closes before the judging starts.
+    claim = actions.add_parser("claim", help="hand pending answers to a judge, each under a lease")
+    claim.add_argument("--run")
+    _add_track_selector(claim)
+    claim.add_argument("--judge", required=True)
+    claim.add_argument(
+        "--lease",
+        type=int,
+        default=judging_service.JUDGING_POLICY.default_lease_seconds,
+        help="seconds the claim is held before another judge may take the submission",
+    )
+    claim.add_argument("--limit", type=int)
+    _add_workspace(claim)
+    release = actions.add_parser(
+        "release", help="end a claim with no verdict: back to the queue, or --terminal"
+    )
+    release.add_argument("--claim", required=True)
+    release.add_argument("--reason", required=True)
+    release.add_argument(
+        "--terminal",
+        action="store_true",
+        help="give up on the submission: withdraw it with --code, skipping its task",
+    )
+    release.add_argument("--code")
+    _add_workspace(release)
     for name, help_text, status in (
         ("pause", "pause a run so it can resume later", "paused"),
         ("resume", "resume a paused run", "in-progress"),
@@ -603,6 +676,12 @@ def _assessment_parser(subcommands: Any) -> None:
     finalize.add_argument("--run")
     _add_track_selector(finalize)
     finalize.add_argument("--reason", default="completed")
+    finalize.add_argument(
+        "--exclude-outstanding",
+        action="store_true",
+        help="close without answers still waiting for a judge or verdicts held for a "
+        "resume, withdrawing them",
+    )
     finalize.add_argument("--idempotency-key")
     _add_workspace(finalize)
     report = actions.add_parser("report", help="show a run's per-dimension estimates")
@@ -2192,21 +2271,140 @@ def _screen_lines(screen: view_service.RunScreen) -> str:
         f"{screen.tasks_recorded} of {screen.tasks_served} served task(s) scored"
     ]
     lines.extend(
-        f"  {dimension.dimension} ({dimension.dimension_kind}): {dimension.status}, "
-        f"{dimension.tasks_used}/{dimension.maximum_tasks} task(s), "
+        f"  {dimension.dimension} ({dimension.dimension_kind}): {dimension.status}"
+        + (f" ({dimension.progress})" if dimension.progress == "waiting" else "")
+        + f", {dimension.tasks_used}/{dimension.maximum_tasks} task(s), "
         f"{dimension.estimated_level or 'no estimate'} ({dimension.confidence})"
         for dimension in screen.dimensions
     )
     # The tasks by name, not a count: an operator comparing this against the browser needs
     # to know which task is waiting, not how many are.
     lines.extend(
-        f"  awaiting {task.content_id} in {task.dimension}: answer by {task.answer_with}"
-        + (" with audio" if task.plays_audio else "")
+        (
+            f"  awaiting a judge for {task.content_id} in {task.dimension}"
+            if task.state == "awaiting-judge"
+            else f"  awaiting {task.content_id} in {task.dimension}: answer by "
+            f"{task.answer_with}" + (" with audio" if task.plays_audio else "")
+        )
         for task in screen.outstanding
     )
     if not screen.outstanding:
         lines.append("  nothing is awaiting an answer")
+    lines.extend(_progress_lines(screen.progress, screen.outstanding_judgements))
     return "\n".join(lines)
+
+
+def _progress_lines(
+    progress: str, judgements: tuple[assessment_service.OutstandingJudgement, ...]
+) -> list[str]:
+    """The run's remaining work, and each judgement it waits on by submission -- a count
+    is not something an operator can go and look at."""
+
+    lines = [f"progress: {progress}"]
+    for entry in judgements:
+        if entry.claim_state == "held":
+            on = "verdict held until the run resumes"
+        elif entry.claim_state == "claimed":
+            on = f"claimed by {entry.claimed_by} until {entry.claimed_until}"
+        elif entry.claim_state == "lapsed":
+            # Every attempt used and none live: nobody may claim it, and the next write to
+            # the run withdraws it. "Unclaimed since" would invite a judge to take it.
+            on = "lapsed, its judging attempts used up; the next write to the run withdraws it"
+        else:
+            on = f"unclaimed since {entry.unclaimed_since}"
+        lines.append(
+            f"  waiting on {entry.kind} submission {entry.submission_id} for "
+            f"{entry.content_id} ({entry.dimension or 'dimension unrecorded'}): {on}; "
+            f"{entry.attempts} claim(s) so far"
+        )
+    return lines
+
+
+def _pending_lines(report: recording_service.PendingReport) -> str:
+    lines = [
+        f"{report.run_id}: {len(report.pending)} answer(s) waiting for a judge; recording "
+        f"{'offered' if report.recording.offered else 'not offered'}, kept under "
+        f"{report.recording.retention_policy}"
+    ]
+    for entry in report.pending:
+        lines.append(
+            f"  {entry.task.content_id} ({entry.task.dimension}, {entry.task.task_type}) "
+            f"{_answer_line(entry)}"
+        )
+    return "\n".join(lines)
+
+
+def _answer_line(entry: recording_service.PendingJudgement) -> str:
+    """Where a judge finds an answer -- never the learner's words, which only the JSON
+    envelope carries: a terminal's scrollback is not somewhere a written answer is kept."""
+
+    if not entry.judgeable:
+        return f"{entry.kind} {entry.submission.submission_id}: cannot be judged: {entry.problem}"
+    if entry.kind == "text":
+        return (
+            f"written answer {entry.submission.submission_id}: "
+            f"{len(entry.response_text or '')} character(s), in response_text"
+        )
+    return f"recording {entry.submission.artifact_id}: {entry.audio_path}"
+
+
+def _claim_lines(report: judging_service.ClaimReport) -> str:
+    lines = [
+        f"{report.run_id}: {report.judge} claimed {len(report.claimed)} answer(s) for "
+        f"{report.lease_seconds}s; {report.waiting} still waiting"
+    ]
+    for entry in report.claimed:
+        lines.append(
+            f"  claim {entry.claim_id}: {entry.task.content_id} ({entry.task.dimension}) "
+            f"attempt {entry.attempts} of {report.max_attempts}, until "
+            f"{entry.lease_expires_at}: {_answer_line(entry)}"
+        )
+    for withdrawn in report.withdrawn:
+        lines.append(
+            f"  withdrew {withdrawn.submission_id} ({withdrawn.content_id}): "
+            f"{withdrawn.code}: {withdrawn.reason}"
+        )
+    return "\n".join(lines)
+
+
+def _release_lines(report: judging_service.ReleaseReport) -> str:
+    how = f"terminally ({report.code})" if report.terminal else "back to the queue"
+    lines = [
+        f"claim {report.claim_id} released {how}"
+        + (" (already recorded)" if report.replayed else "")
+        + f"; submission {report.submission_id} is {report.submission_status}, attempt "
+        f"{report.attempts} of {report.max_attempts}"
+        + ("; claimable again" if report.returned_to_queue else "")
+    ]
+    for withdrawn in report.withdrawn:
+        lines.append(
+            f"  withdrew {withdrawn.submission_id} ({withdrawn.content_id}): "
+            f"{withdrawn.code}: {withdrawn.reason}"
+        )
+    return "\n".join(lines)
+
+
+def _assessment_rubric(args: argparse.Namespace) -> Any:
+    """The rubric a judge scored against: `--rubric`, or the older `--input`, not both."""
+
+    if args.rubric is not None and args.input_path is not None:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "pass the rubric once, with --rubric; --input is the older spelling of the same "
+            "payload",
+            details=(ErrorDetail(field="rubric", reason="also passed as --input"),),
+        )
+    reference = args.rubric if args.rubric is not None else args.input_path
+    if reference is None:
+        return None
+    rubric = _read_input(reference)
+    if not isinstance(rubric, dict):
+        raise LinguaWikiError(
+            "invalid_input",
+            "a rubric is a JSON object of criterion scores",
+            details=(ErrorDetail(field="rubric", reason=type(rubric).__name__),),
+        )
+    return rubric
 
 
 def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
@@ -2216,7 +2414,9 @@ def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
         f"{report.tasks_recorded} of {report.tasks_served} served task(s) scored"
     ]
     lines.extend(
-        f"  {entry.dimension}: {entry.status} n={entry.tasks_used}/"
+        f"  {entry.dimension}: {entry.status}"
+        + (f" ({entry.progress})" if entry.progress == "waiting" else "")
+        + f" n={entry.tasks_used}/"
         f"{entry.minimum_tasks}-{entry.maximum_tasks} confidence={entry.confidence} "
         f"estimate={entry.estimated_level} [{entry.credible_low}..{entry.credible_high}]"
         + (f" stop={entry.stop_reason}" if entry.stop_reason else "")
@@ -2224,6 +2424,23 @@ def _assessment_lines(report: assessment_service.AssessmentRunReport) -> str:
     )
     if report.untested_dimensions:
         lines.append(f"not tested: {list(report.untested_dimensions)}")
+    lines.extend(_progress_lines(report.progress, report.outstanding_judgements))
+    lines.extend(
+        f"applied held verdict {entry.verdict_id} to {entry.content_id} at {entry.score}"
+        for entry in report.applied_verdicts
+    )
+    lines.extend(
+        f"withdrew {entry.submission_id} ({entry.content_id}) as {entry.code}"
+        for entry in report.withdrawn
+    )
+    lines.extend(
+        f"excluded {entry.submission_id} ({entry.content_id}) as {entry.code}"
+        for entry in report.excluded
+    )
+    lines.extend(
+        f"voided verdict {entry.verdict_id} on {entry.content_id} ({entry.code}): {entry.reason}"
+        for entry in report.voided_verdicts
+    )
     return "\n".join(lines)
 
 
@@ -2308,8 +2525,41 @@ def _assessment_response(args: argparse.Namespace) -> str | None:
     return response
 
 
+def _batch_lines(batch: assessment_service.BatchReport) -> str:
+    lines = [f"batch {batch.batch_id}" + (" (replayed)" if batch.replayed else "")]
+    lines.extend(
+        f"{entry.position}. [{entry.dimension}] {entry.task.task_type} "
+        f"({entry.task.modality}, {entry.task.level_code}) {entry.content_id}: {entry.state}"
+        for entry in batch.tasks
+    )
+    if batch.outstanding:
+        lines.append(f"holding a task already: {', '.join(batch.outstanding)}")
+    if batch.exhausted:
+        lines.append(f"exhausted: {', '.join(batch.exhausted)}")
+    if not batch.tasks and not batch.outstanding:
+        lines.append("nothing to serve: no open dimension is free")
+    return "\n".join(lines)
+
+
 def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int:
     paths = _pack_workspace(args)
+    if args.action == "next" and args.batch:
+        batch = assessment_service.next_batch(
+            paths,
+            run=args.run,
+            track=args.track,
+            clock=clock,
+            # The service's own name rather than this invocation's, so a batch served from
+            # the CLI and one served by the page leave the same audit trail.
+            command="assessment.batch",
+            idempotency_key=args.idempotency_key,
+        )
+        _print(
+            _envelope(command, batch, clock, batch.warnings),
+            _batch_lines(batch),
+            args.format,
+        )
+        return 0
     if args.action == "next":
         outcome = assessment_service.next_task(
             paths,
@@ -2356,15 +2606,85 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             response_visibility=args.response_visibility,
             run=args.run,
             track=args.track,
-            rubric=None if args.input_path is None else _read_input(args.input_path),
+            rubric=_assessment_rubric(args),
             response_excerpt=args.excerpt,
             assessor_kind=args.assessor_kind,
             assessor=args.assessor,
             confidence=args.confidence,
+            audio_artifact=args.audio_artifact,
+            submission=args.submission,
+            claim=args.claim,
             idempotency_key=args.idempotency_key,
             clock=clock,
             command=command,
         )
+    elif args.action == "submit":
+        response = _assessment_response(args)
+        if response is None:
+            raise LinguaWikiError(
+                "invalid_arguments",
+                "a written answer is handed in with --response or --response-file",
+                details=(ErrorDetail(field="response", reason="absent"),),
+            )
+        handed_in = written_service.submit(
+            paths,
+            run=args.run,
+            track=args.track,
+            content_id=args.content_id,
+            submission_key=args.submission_key,
+            response=response,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, handed_in, clock, handed_in.warnings),
+            f"{handed_in.content_id}: written answer {handed_in.submission.submission_id} "
+            f"is {handed_in.submission.status}"
+            + (" (already received)" if handed_in.replayed else "; waiting for a judge"),
+            args.format,
+        )
+        return 0
+    elif args.action == "pending":
+        waiting = recording_service.pending(paths, run=args.run, track=args.track, clock=clock)
+        _print(
+            _envelope(command, waiting, clock, waiting.warnings),
+            _pending_lines(waiting),
+            args.format,
+        )
+        return 0
+    elif args.action == "claim":
+        claimed = judging_service.claim(
+            paths,
+            judge=args.judge,
+            run=args.run,
+            track=args.track,
+            lease_seconds=args.lease,
+            limit=args.limit,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, claimed, clock, claimed.warnings),
+            _claim_lines(claimed),
+            args.format,
+        )
+        return 0
+    elif args.action == "release":
+        released = judging_service.release(
+            paths,
+            claim=args.claim,
+            reason=args.reason,
+            terminal=args.terminal,
+            code=args.code,
+            clock=clock,
+            command=command,
+        )
+        _print(
+            _envelope(command, released, clock, released.warnings),
+            _release_lines(released),
+            args.format,
+        )
+        return 0
     elif args.action in ("pause", "resume", "abandon"):
         report = assessment_service.set_status(
             paths,
@@ -2380,6 +2700,7 @@ def _run_assessment(args: argparse.Namespace, clock: Clock, command: str) -> int
             run=args.run,
             track=args.track,
             reason=args.reason,
+            exclude_outstanding=args.exclude_outstanding,
             idempotency_key=args.idempotency_key,
             clock=clock,
             command=command,
@@ -2412,6 +2733,15 @@ def _run_client(args: argparse.Namespace, clock: Clock, command: str) -> int:
     paths = _pack_workspace(args)
     client = client_server.build_server(paths, port=args.port, clock=clock, run=args.run)
     # On stderr, so `--format json` output on stdout stays a single parseable document.
+    recovery = client.recovery
+    if recovery is not None and recovery.examined:
+        print(
+            f"recovered {recovery.examined} unresolved recording(s): "
+            f"{len(recovery.registered)} registered, {len(recovery.refused)} refused",
+            file=sys.stderr,
+        )
+    for finding in () if recovery is None else recovery.findings:
+        print(f"warning: {finding}", file=sys.stderr)
     print(f"LinguaWiki client listening on {client.origin}", file=sys.stderr)
     print(f"open {client.launch_url}", file=sys.stderr)
     if not args.no_open:

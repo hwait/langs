@@ -1150,6 +1150,8 @@ def test_a_workspace_that_served_a_rubric_scored_task_is_still_healthy(
             content_id=served.content_id,
             score=1.0,
             assessor_kind="ai",
+            # A judged pronunciation or spoken score names its judge (`evidence.py`).
+            assessor="synthetic-judge",
             clock=polish_workspace.clock,
         )
 

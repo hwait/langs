@@ -157,7 +157,7 @@ def test_a_recording_replaced_since_the_serve_is_refused_rather_than_played(
     assert answer.code == "assessment_asset_changed"
 
 
-def test_a_recording_tampered_on_disk_reports_the_pack_rather_than_playing(
+def test_a_recording_tampered_on_disk_is_refused_rather_than_played(
     recorded: PolishWorkspace, client: Client, tmp_path: Path
 ) -> None:
     run_id = _start_listening(client)
@@ -168,7 +168,7 @@ def test_a_recording_tampered_on_disk_reports_the_pack_rather_than_playing(
     answer = client.get(f"/runs/{run_id}/tasks/{task['content_id']}/audio")
 
     assert answer.status != 200
-    assert answer.code == "pack_checksum_mismatch"
+    assert answer.code == "assessment_asset_changed"
 
 
 # --- plays ---------------------------------------------------------------------------
@@ -281,6 +281,22 @@ def test_a_fresh_page_finds_the_runs_it_can_resume_newest_first(plain: Client) -
     assert [run["status"] for run in listed["runs"]] == ["paused", "in-progress"]
     assert listed["runs"][0]["scoring"] == "machine"
     assert listed["omitted"] == 0
+
+
+def test_discovery_says_whether_a_judge_can_mark_the_learners_writing(
+    polish_workspace: PolishWorkspace, plain: Client
+) -> None:
+    """The page chooses `machine+judged` from this, having no preferences of its own."""
+
+    from linguawiki.services import learners as learner_service
+
+    assert plain.get("/runs").data["written_offered"] is True
+    learner_service.update_track(
+        polish_workspace.paths,
+        preferences=learner_service.TrackPreferences(transcript_retention_consent=False),
+        clock=polish_workspace.clock,
+    )
+    assert plain.get("/runs").data["written_offered"] is False
 
 
 def test_discovery_filters_by_status(plain: Client) -> None:

@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -123,6 +123,15 @@ class PurgeReport(ContractModel):
     #: not deleted: a learner who was told their vowel was wrong deserves to see that
     #: the evidence for it is gone.
     invalidated_observations: tuple[str, ...] = ()
+    #: Assessment results a judge reached by listening to this recording. Marked
+    #: invalidated, never deleted, and the estimates they shaped are rebuilt.
+    invalidated_results: tuple[str, ...] = ()
+    #: Recordings a judge had not yet heard, withdrawn with their tasks skipped.
+    withdrawn_submissions: tuple[str, ...] = ()
+    #: Verdicts a judge had delivered for those recordings while their run was paused,
+    #: voided with them: they can never be applied, and the judge's work is named rather
+    #: than silently dropped.
+    voided_verdicts: tuple[str, ...] = ()
     #: What survived, and why -- the counterpart of the above, and the reason a purge is
     #: safe to offer at all.
     surviving_language_evidence: int = 0
@@ -130,7 +139,9 @@ class PurgeReport(ContractModel):
     warnings: tuple[str, ...] = ()
 
 
-def _assert_safe_relative(relative_path: str) -> PurePosixPath:
+def _assert_safe_relative(
+    relative_path: str, *, roots: tuple[str, ...] = ARTIFACT_ROOTS
+) -> PurePosixPath:
     """Refuse a path that is not inside one of the workspace's private roots."""
 
     path = PurePosixPath(relative_path)
@@ -141,10 +152,10 @@ def _assert_safe_relative(relative_path: str) -> PurePosixPath:
             "path ties the record to one machine and '..' reaches outside it entirely",
             details=(ErrorDetail(field="relative_path", reason=relative_path),),
         )
-    if not path.parts or path.parts[0] not in ARTIFACT_ROOTS:
+    if not path.parts or path.parts[0] not in roots:
         raise LinguaWikiError(
             "artifact_outside_private_roots",
-            f"{relative_path} is outside {' and '.join(ARTIFACT_ROOTS)}/, which are the "
+            f"{relative_path} is outside {' and '.join(roots)}/, which are the "
             "directories the workspace already keeps out of Git; a recording registered "
             "anywhere else would be a recording Git is willing to commit",
             details=(
@@ -234,11 +245,17 @@ PATH_ESCAPED = "escaped"
 PATH_UNREADABLE = "unreadable"
 
 
-def classify_path(root: Path, relative_path: str) -> tuple[str, Path | None]:
-    """Say what is at a stored path: present, absent, escaping, or unreadable."""
+def classify_path(
+    root: Path, relative_path: str, *, roots: tuple[str, ...] = ARTIFACT_ROOTS
+) -> tuple[str, Path | None]:
+    """Say what is at a stored path: present, absent, escaping, or unreadable.
+
+    `roots` is the private roots the path must stay under. Only the capture service widens
+    it, to read the staging root that `register` deliberately refuses.
+    """
 
     try:
-        safe = _assert_safe_relative(relative_path)
+        safe = _assert_safe_relative(relative_path, roots=roots)
         absolute = assert_within(root / str(safe), root, purpose="artifact")
     except LinguaWikiError as failure:
         # Two different facts, and calling one by the other's name sends somebody to look
@@ -416,8 +433,38 @@ def _read_artifact(database: Database, *, artifact_id: str) -> ArtifactReport:
     )
 
 
-def register(
-    paths: WorkspacePaths,
+@dataclass(frozen=True, slots=True)
+class RegistrationPlan:
+    """Everything `register` decided before writing, so a caller can write it in its own
+    transaction.
+
+    `existing` is set when these bytes are already registered on this track: the plan then
+    describes a duplicate rather than a new row, and `write_registration` refuses it --
+    only `register` itself knows how to reconcile a second copy of a recording.
+    """
+
+    relative_path: str
+    absolute: Path
+    kind: str
+    media_type: str | None
+    origin: str
+    rights: str
+    external_id: str | None
+    digest: str
+    size: int
+    track_id: str
+    source_id: str | None
+    clip_of_artifact_id: str | None
+    clip_starts_at_ms: int | None
+    clip_ends_at_ms: int | None
+    retained: bool
+    #: `(artifact_id, retained, external_id)` of the row already holding these bytes.
+    existing: tuple[str, bool, str | None] | None = None
+
+
+def plan_registration(
+    database: Database,
+    root: Path,
     *,
     relative_path: str,
     kind: str = "audio",
@@ -432,30 +479,13 @@ def register(
     clip_starts_at_ms: int | None = None,
     clip_ends_at_ms: int | None = None,
     track: str | None = None,
-    clock: Clock | None = None,
-    command: str = "artifact.register",
-) -> ArtifactReport:
-    """Record that a file exists, without moving it or reading it into the database.
+) -> RegistrationPlan:
+    """Decide a registration inside the caller's connection, refusing everything it would.
 
-    Retention defaults to the track's own consent rather than to `True`: a learner who
-    has not agreed to audio being kept has a recording registered as *not retained*.
-
-    "Not retained" then *means* it. Stage 5 wrote the row and left the bytes where they
-    were, so a workspace could hold a recording the learner never agreed to keep while
-    reporting that it held none -- the privacy audit counts only retained artifacts, and
-    this one was invisible to it. The file is deleted, and the row is what survives: a
-    record that it existed, its hash, and that it was not kept. That is what makes a later
-    absence explicable rather than merely unexplained.
-
-    `expected_sha256` is for a caller who already knows what the file should be -- an
-    ingested package naming its own audio. A mismatch is refused rather than recorded,
-    because registering the wrong file under a package's artifact ID attaches a claim to
-    a recording of something else.
-
-    `clip_of` marks this file as a selected excerpt of another recording. The distinction
-    is not cosmetic: the plan prefers keeping short clips to keeping whole conversations
-    indefinitely, and the retention sweep holds back a clip that supports an unfinished
-    pronunciation target where it would not hold back the entire call.
+    A read: it opens the file to hash it and reads the database, and writes neither. That
+    is what lets a caller holding the writer -- a capture binding its recording to a served
+    task -- run every refusal before its first write and then commit the registration
+    beside its own rows, which a `register` opening its own writer could not do.
     """
 
     from linguawiki import sources as source_policy
@@ -479,11 +509,10 @@ def register(
         clip_ends_at_ms=clip_ends_at_ms,
     )
     safe = _assert_safe_relative(relative_path)
-    active_clock = clock or SystemClock()
     # Classified *before* the bare containment call, so a path that cannot be resolved at
     # all -- a symlink loop, say -- is reported as the unreadable file it is rather than as
     # a containment failure, and `assert_within` below never meets one.
-    state, absolute = classify_path(paths.root, relative_path)
+    state, absolute = classify_path(root, relative_path)
     if state != PATH_PRESENT:
         # Absent and unreadable are different facts, and the operator's next move differs:
         # find the file, or fix its permissions.
@@ -533,306 +562,415 @@ def register(
             "can read is one no claim can rest on.",
             details=(ErrorDetail(field="relative_path", reason=relative_path),),
         ) from failure
-    with open_writer(paths, command=command, clock=active_clock) as database:
-        track_id = learner_service.resolve_track(database, track)
-        record = learner_service.track_context(database, track_id)
-        source_id = None
-        if source is not None:
-            from linguawiki.services import sources as source_service
+    track_id = learner_service.resolve_track(database, track)
+    record = learner_service.track_context(database, track_id)
+    source_id = None
+    if source is not None:
+        from linguawiki.services import sources as source_service
 
-            source_id = source_service._resolve_source(database, source, track_id=track_id)
-        clip_of_artifact_id = None
-        if clip_of is not None:
-            # Resolved inside the track, and required to be audio: a clip of a transcript
-            # is not the thing this concept is for.
-            row = database.one(
-                "SELECT artifact_id, kind FROM artifacts WHERE track_id = ? "
-                "AND (artifact_id = ? OR external_id = ?)",
-                [track_id, clip_of, clip_of],
-            )
-            if row is None:
-                raise LinguaWikiError(
-                    "clip_source_not_found",
-                    f"this track holds no recording {clip_of} for a clip to come from",
-                    details=(ErrorDetail(field="clip_of", reason=clip_of),),
-                )
-            if str(row[1]) != "audio":
-                raise LinguaWikiError(
-                    "clip_source_is_not_audio",
-                    f"{row[0]} is {row[1]}; a selected clip is an excerpt of a recording",
-                    details=(ErrorDetail(field="clip_of", reason=str(row[1])),),
-                )
-            clip_of_artifact_id = str(row[0])
-            if (
-                str(
-                    database.scalar(
-                        "SELECT sha256 FROM artifacts WHERE artifact_id = ?", [clip_of_artifact_id]
-                    )
-                )
-                == digest
-            ):
-                raise LinguaWikiError(
-                    "clip_of_itself",
-                    "these are the bytes of the recording this clip says it came from, so "
-                    "it is not an excerpt of anything: it is the whole thing with a label "
-                    "that would earn it longer retention",
-                    details=(ErrorDetail(field="clip_of", reason=clip_of),),
-                )
-        preferences = record.preferences if isinstance(record.preferences, dict) else {}
-        consented = bool(preferences.get("audio_retention_consent"))
-        resolved_retained = (
-            retained if retained is not None else (consented if kind == "audio" else True)
+        source_id = source_service._resolve_source(database, source, track_id=track_id)
+    clip_of_artifact_id = None
+    if clip_of is not None:
+        # Resolved inside the track, and required to be audio: a clip of a transcript
+        # is not the thing this concept is for.
+        row = database.one(
+            "SELECT artifact_id, kind FROM artifacts WHERE track_id = ? "
+            "AND (artifact_id = ? OR external_id = ?)",
+            [track_id, clip_of, clip_of],
         )
-        owner = path_owners(database).get(str(safe))
-        if owner is not None and owner.track_id != track_id:
+        if row is None:
             raise LinguaWikiError(
-                "artifact_path_owned_elsewhere",
-                f"{relative_path} is already registered on another track as "
-                f"{owner.artifact_id}. One file cannot belong to two learners: a purge or a "
-                "retention sweep by either would delete the other's recording. Give this "
-                "learner their own copy under a path of their own.",
-                details=(
-                    ErrorDetail(field="relative_path", reason=relative_path),
-                    ErrorDetail(field="artifact", reason=owner.artifact_id),
-                ),
+                "clip_source_not_found",
+                f"this track holds no recording {clip_of} for a clip to come from",
+                details=(ErrorDetail(field="clip_of", reason=clip_of),),
             )
-        if owner is not None and owner.sha256 != digest:
-            # The path is registered and its bytes have changed. Making a second row for it
-            # left two artifacts claiming one file, with `verify` reporting the first as
-            # altered and nothing explaining the second. An alteration is a fact about the
-            # recording that is already registered, so it is reported as one.
+        if str(row[1]) != "audio":
             raise LinguaWikiError(
-                "artifact_altered",
-                f"{owner.artifact_id} is already registered at {relative_path}, and the file "
-                f"there no longer matches it: it hashes to {digest[:12]}... and the record "
-                f"says {owner.sha256[:12]}.... Registering it again would leave two "
-                "rows claiming one file. `artifact verify` reports the alteration; purge the "
-                "artifact if the recording is genuinely gone.",
-                details=(
-                    ErrorDetail(field="relative_path", reason=relative_path),
-                    ErrorDetail(field="sha256", reason=digest),
-                ),
+                "clip_source_is_not_audio",
+                f"{row[0]} is {row[1]}; a selected clip is an excerpt of a recording",
+                details=(ErrorDetail(field="clip_of", reason=str(row[1])),),
             )
-        tombstone = database.one(
-            "SELECT artifact_id, purge_reason FROM artifacts WHERE track_id = ? "
-            "AND sha256 = ? AND purged_at IS NOT NULL",
-            [track_id, digest],
-        )
-        if tombstone is not None:
-            # Refused *before* the not-retained branch below, which would otherwise delete
-            # the file just offered: a purged row is non-retained, so resurrection looked
-            # exactly like "the learner declined this" and the recording was destroyed.
-            raise LinguaWikiError(
-                "artifact_purged",
-                f"{tombstone[0]} is this recording, purged at the learner's request "
-                f"({tombstone[1]}). The workspace does not un-delete a recording, and it "
-                "holds one row per recording, so there is nowhere for a second life to go. "
-                "The file just offered was left where it is.",
-                details=(
-                    ErrorDetail(field="artifact", reason=str(tombstone[0])),
-                    ErrorDetail(field="purge_reason", reason=str(tombstone[1])),
-                ),
-            )
-        existing = database.one(
-            "SELECT artifact_id, retained, external_id FROM artifacts "
-            "WHERE track_id = ? AND sha256 = ? AND purged_at IS NULL",
-            [track_id, digest],
-        )
-        if existing is not None:
-            # Same bytes, same artifact. Registering a file twice is one file, however
-            # many paths it arrived under -- but the *other* inputs are not decoration,
-            # and returning early used to discard both of them.
-            held_id, held_retained, held_external = (
-                str(existing[0]),
-                bool(existing[1]),
-                None if existing[2] is None else str(existing[2]),
-            )
-            if held_retained and not resolved_retained:
-                # "Keep this" and "do not keep this" about one recording. Silently
-                # returning the retained row left a second copy of the bytes on disk under
-                # a row that says they are not kept.
-                raise LinguaWikiError(
-                    "artifact_retention_conflict",
-                    f"{held_id} already holds these exact bytes and is kept; this "
-                    "registration asks for the same recording not to be kept. Purge the "
-                    "artifact if the learner has changed their mind -- that deletes the "
-                    "recording and settles the claims resting on it.",
-                    details=(ErrorDetail(field="retained", reason="conflicts with " + held_id),),
-                )
-            if not held_retained and resolved_retained:
-                # A renewed request to keep these bytes contradicts the durable record that
-                # they were not kept. Silently applying the old decision was worse: it
-                # deleted the file the caller had explicitly asked to retain. Reversing a
-                # privacy decision needs its own audited operation; registration refuses and
-                # leaves the bytes untouched until one exists.
-                raise LinguaWikiError(
-                    "artifact_retention_conflict",
-                    f"{held_id} records that these exact bytes were not kept, while this "
-                    "registration asks to retain them. Registration cannot silently reverse "
-                    "that privacy decision, and it will not delete a file offered with the "
-                    "opposite instruction; the file was left where it is.",
-                    details=(ErrorDetail(field="retained", reason="conflicts with " + held_id),),
-                )
-            if external_id is not None and held_external not in (None, external_id):
-                raise LinguaWikiError(
-                    "artifact_identity_conflict",
-                    f"{held_id} already holds these bytes under producer identifier "
-                    f"{held_external}, and this registration names {external_id}. One "
-                    "recording cannot answer to two producer identifiers without claims "
-                    "about it landing on whichever row a later lookup happens to find.",
-                    details=(ErrorDetail(field="external_id", reason=str(held_external)),),
-                )
-            notes = ["this file's content is already registered; the existing artifact is returned"]
-            now = aware_utc(database.now())
-            if not held_retained:
-                # The row says the learner declined to keep this recording. Bytes that
-                # reappear under it are governed by that decision, not by the fact that
-                # somebody ran `register` again.
-                _remove_file(absolute, artifact_id=held_id, reason="not retained")
-                return _read_artifact(database, artifact_id=held_id).model_copy(
-                    update={
-                        "warnings": (
-                            "this recording is on record as one the learner chose not to "
-                            "keep, so the copy just offered was removed rather than "
-                            "registered",
-                        )
-                    }
-                )
-            held_relative = str(
+        clip_of_artifact_id = str(row[0])
+        if (
+            str(
                 database.scalar(
-                    "SELECT relative_path FROM artifacts WHERE artifact_id = ?", [held_id]
+                    "SELECT sha256 FROM artifacts WHERE artifact_id = ?", [clip_of_artifact_id]
                 )
             )
-            held_path = paths.root / held_relative
-            # Resolved, not joined. A registered path replaced by a symlink out of the
-            # workspace was treated as the canonical copy, and a genuine in-workspace copy
-            # offered afterwards was deleted as the duplicate.
-            held_contained = contained_file(paths.root, held_relative)
-            if held_contained is None and _path_exists(held_path):
-                raise LinguaWikiError(
-                    "artifact_escaped_the_workspace",
-                    f"{held_id} is registered at {held_relative}, and what is there now "
-                    "leads outside this workspace. Nothing will be read through it and "
-                    "nothing will be deleted on its word: `artifact verify` reports it, and "
-                    "the path has to be put back or the record retired with `artifact "
-                    "purge`.",
-                    details=(ErrorDetail(field="relative_path", reason=held_relative),),
-                )
-            binding = external_id is not None and held_external is None
-            # A *duplicate* means two copies of the registered recording exist. Presence
-            # alone was not enough: when the registered path had been altered, the correct
-            # recording restored elsewhere was classified as the duplicate and deleted, so
-            # the workspace kept the tampered copy and destroyed the real one.
-            held_present = held_contained is not None
-            held_matches = held_present and digest_or_none(held_path) == digest
-            duplicate_on_disk = absolute != held_path and held_matches
-            restores_a_missing_file = absolute != held_path and not held_present
-            if absolute != held_path and held_present and not held_matches:
-                # The registered path holds bytes that are not this recording's. Repointing
-                # the row would leave them under a private root with nothing accounting for
-                # them -- the state a not-retained declaration exists to prevent -- and
-                # deleting them would destroy a file this workspace cannot identify. Both
-                # are decisions for a person.
-                raise LinguaWikiError(
-                    "artifact_altered_at_registered_path",
-                    f"{held_id} is registered at {held_path.name}, and the file there is "
-                    "neither this recording nor gone: it has been altered. Repointing the "
-                    "record would leave those bytes under a private directory with nothing "
-                    "accounting for them. Settle them first -- `artifact verify` reports "
-                    "the alteration, and `artifact purge` retires the record if the "
-                    "recording is genuinely lost.",
-                    details=(
-                        ErrorDetail(field="artifact", reason=held_id),
-                        ErrorDetail(field="relative_path", reason=str(held_path.name)),
-                    ),
-                )
-            if binding or duplicate_on_disk or restores_a_missing_file:
-                # One transaction over both, because the deletion cannot be undone and the
-                # binding can: committing the binding first and then failing to delete left
-                # the identifier bound to a row while untracked bytes stayed on disk.
-                with database.transaction() as transaction:
-                    if binding:
-                        # Binding it now is what makes a re-ingested package find this row
-                        # rather than register the same recording again.
-                        transaction.execute(
-                            "UPDATE artifacts SET external_id = ?, updated_at = ? "
-                            "WHERE artifact_id = ?",
-                            [external_id, naive_utc(now), held_id],
-                        )
-                        notes.append(f"bound to producer identifier {external_id}")
-                    if restores_a_missing_file:
-                        # The registered copy is gone or no longer its own bytes, and these
-                        # are: the learner moved or restored the recording. Repointing the
-                        # row is what makes the claims resting on it checkable again.
-                        transaction.execute(
-                            "UPDATE artifacts SET relative_path = ?, updated_at = ? "
-                            "WHERE artifact_id = ?",
-                            [str(safe), naive_utc(now), held_id],
-                        )
-                        notes.append("the registered copy was missing, so this one takes its place")
-                    if duplicate_on_disk:
-                        # A second copy of bytes already held, with the first still there.
-                        # Whatever the learner decided about the original governs the copy,
-                        # and leaving it would put a recording on disk no row accounts for.
-                        _remove_file(absolute, artifact_id=held_id, reason="already registered")
-                        notes.append("the duplicate copy was removed")
-            return _read_artifact(database, artifact_id=held_id).model_copy(
-                update={"warnings": tuple(notes)}
+            == digest
+        ):
+            raise LinguaWikiError(
+                "clip_of_itself",
+                "these are the bytes of the recording this clip says it came from, so "
+                "it is not an excerpt of anything: it is the whole thing with a label "
+                "that would earn it longer retention",
+                details=(ErrorDetail(field="clip_of", reason=clip_of),),
             )
-        artifact_id = str(ArtifactId.new())
-        now = aware_utc(database.now())
+    preferences = record.preferences if isinstance(record.preferences, dict) else {}
+    consented = bool(preferences.get("audio_retention_consent"))
+    resolved_retained = (
+        retained if retained is not None else (consented if kind == "audio" else True)
+    )
+    owner = path_owners(database).get(str(safe))
+    if owner is not None and owner.track_id != track_id:
+        raise LinguaWikiError(
+            "artifact_path_owned_elsewhere",
+            f"{relative_path} is already registered on another track as "
+            f"{owner.artifact_id}. One file cannot belong to two learners: a purge or a "
+            "retention sweep by either would delete the other's recording. Give this "
+            "learner their own copy under a path of their own.",
+            details=(
+                ErrorDetail(field="relative_path", reason=relative_path),
+                ErrorDetail(field="artifact", reason=owner.artifact_id),
+            ),
+        )
+    if owner is not None and owner.sha256 != digest:
+        # The path is registered and its bytes have changed. Making a second row for it
+        # left two artifacts claiming one file, with `verify` reporting the first as
+        # altered and nothing explaining the second. An alteration is a fact about the
+        # recording that is already registered, so it is reported as one.
+        raise LinguaWikiError(
+            "artifact_altered",
+            f"{owner.artifact_id} is already registered at {relative_path}, and the file "
+            f"there no longer matches it: it hashes to {digest[:12]}... and the record "
+            f"says {owner.sha256[:12]}.... Registering it again would leave two "
+            "rows claiming one file. `artifact verify` reports the alteration; purge the "
+            "artifact if the recording is genuinely gone.",
+            details=(
+                ErrorDetail(field="relative_path", reason=relative_path),
+                ErrorDetail(field="sha256", reason=digest),
+            ),
+        )
+    tombstone = database.one(
+        "SELECT artifact_id, purge_reason FROM artifacts WHERE track_id = ? "
+        "AND sha256 = ? AND purged_at IS NOT NULL",
+        [track_id, digest],
+    )
+    if tombstone is not None:
+        # Refused *before* the not-retained branch below, which would otherwise delete
+        # the file just offered: a purged row is non-retained, so resurrection looked
+        # exactly like "the learner declined this" and the recording was destroyed.
+        raise LinguaWikiError(
+            "artifact_purged",
+            f"{tombstone[0]} is this recording, purged at the learner's request "
+            f"({tombstone[1]}). The workspace does not un-delete a recording, and it "
+            "holds one row per recording, so there is nowhere for a second life to go. "
+            "The file just offered was left where it is.",
+            details=(
+                ErrorDetail(field="artifact", reason=str(tombstone[0])),
+                ErrorDetail(field="purge_reason", reason=str(tombstone[1])),
+            ),
+        )
+    plan = RegistrationPlan(
+        relative_path=str(safe),
+        absolute=absolute,
+        kind=kind,
+        media_type=media_type,
+        origin=origin,
+        rights=rights,
+        external_id=external_id,
+        digest=digest,
+        size=size,
+        track_id=track_id,
+        source_id=source_id,
+        clip_of_artifact_id=clip_of_artifact_id,
+        clip_starts_at_ms=clip_starts_at_ms,
+        clip_ends_at_ms=clip_ends_at_ms,
+        retained=resolved_retained,
+    )
+    existing = database.one(
+        "SELECT artifact_id, retained, external_id FROM artifacts "
+        "WHERE track_id = ? AND sha256 = ? AND purged_at IS NULL",
+        [track_id, digest],
+    )
+    if existing is None:
+        return plan
+    # Same bytes, same artifact. Registering a file twice is one file, however many paths
+    # it arrived under -- but the *other* inputs are not decoration, and returning early
+    # used to discard both of them.
+    held_id, held_retained, held_external = (
+        str(existing[0]),
+        bool(existing[1]),
+        None if existing[2] is None else str(existing[2]),
+    )
+    if held_retained and not resolved_retained:
+        # "Keep this" and "do not keep this" about one recording. Silently returning the
+        # retained row left a second copy of the bytes on disk under a row that says they
+        # are not kept.
+        raise LinguaWikiError(
+            "artifact_retention_conflict",
+            f"{held_id} already holds these exact bytes and is kept; this registration "
+            "asks for the same recording not to be kept. Purge the artifact if the learner "
+            "has changed their mind -- that deletes the recording and settles the claims "
+            "resting on it.",
+            details=(ErrorDetail(field="retained", reason="conflicts with " + held_id),),
+        )
+    if not held_retained and resolved_retained:
+        # A renewed request to keep these bytes contradicts the durable record that they
+        # were not kept. Silently applying the old decision was worse: it deleted the file
+        # the caller had explicitly asked to retain. Reversing a privacy decision needs its
+        # own audited operation; registration refuses and leaves the bytes untouched until
+        # one exists.
+        raise LinguaWikiError(
+            "artifact_retention_conflict",
+            f"{held_id} records that these exact bytes were not kept, while this "
+            "registration asks to retain them. Registration cannot silently reverse that "
+            "privacy decision, and it will not delete a file offered with the opposite "
+            "instruction; the file was left where it is.",
+            details=(ErrorDetail(field="retained", reason="conflicts with " + held_id),),
+        )
+    if external_id is not None and held_external not in (None, external_id):
+        raise LinguaWikiError(
+            "artifact_identity_conflict",
+            f"{held_id} already holds these bytes under producer identifier "
+            f"{held_external}, and this registration names {external_id}. One recording "
+            "cannot answer to two producer identifiers without claims about it landing on "
+            "whichever row a later lookup happens to find.",
+            details=(ErrorDetail(field="external_id", reason=str(held_external)),),
+        )
+    return replace(plan, existing=(held_id, held_retained, held_external))
+
+
+def write_registration(database: Database, plan: RegistrationPlan, *, command: str) -> str:
+    """Write a planned new registration inside the caller's transaction.
+
+    Only a plan for bytes this track does not yet hold: reconciling a second copy of a
+    registered recording -- binding, repointing, deleting the duplicate -- is `register`'s
+    to decide, and doing it here would bind a caller's rows to a recording it never made.
+    """
+
+    if plan.existing is not None:
+        raise LinguaWikiError(
+            "artifact_already_registered",
+            f"these bytes are already registered as {plan.existing[0]}; a new registration "
+            "cannot be written for them",
+            details=(ErrorDetail(field="artifact", reason=plan.existing[0]),),
+        )
+    artifact_id = str(ArtifactId.new())
+    now = database.now()
+    database.execute(
+        "INSERT INTO artifacts (artifact_id, track_id, kind, relative_path, "
+        "media_type, byte_size, sha256, origin, rights, source_id, retained, "
+        "external_id, clip_of_artifact_id, clip_starts_at_ms, clip_ends_at_ms, "
+        "created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            artifact_id,
+            plan.track_id,
+            plan.kind,
+            plan.relative_path,
+            plan.media_type,
+            plan.size,
+            plan.digest,
+            plan.origin,
+            plan.rights,
+            plan.source_id,
+            plan.retained,
+            plan.external_id,
+            plan.clip_of_artifact_id,
+            plan.clip_starts_at_ms,
+            plan.clip_ends_at_ms,
+            now,
+            now,
+        ],
+    )
+    migration_module.record_audit_entry(
+        database,
+        command=command,
+        correlation_id=EventId.new(),
+        outcome="succeeded",
+        # The path is a private location, so the audit trail names the artifact and its
+        # hash rather than where on disk the learner keeps it.
+        affected_records_json=json.dumps([artifact_id]),
+        after_summary=f"registered a {plan.kind} artifact of {plan.size} byte(s)",
+    )
+    if not plan.retained:
+        # Inside the transaction, deliberately. Recording "not kept" and keeping the bytes
+        # is the one combination that must not exist -- the row says they are gone and the
+        # privacy audit believes it -- and a deletion that failed after the commit left
+        # exactly that state on disk.
+        _remove_file(plan.absolute, artifact_id=artifact_id, reason="not retained")
+    return artifact_id
+
+
+def register(
+    paths: WorkspacePaths,
+    *,
+    relative_path: str,
+    kind: str = "audio",
+    media_type: str | None = None,
+    origin: str = "learner-recording",
+    rights: str = "metadata-only",
+    source: str | None = None,
+    retained: bool | None = None,
+    external_id: str | None = None,
+    expected_sha256: str | None = None,
+    clip_of: str | None = None,
+    clip_starts_at_ms: int | None = None,
+    clip_ends_at_ms: int | None = None,
+    track: str | None = None,
+    clock: Clock | None = None,
+    command: str = "artifact.register",
+) -> ArtifactReport:
+    """Record that a file exists, without moving it or reading it into the database.
+
+    Retention defaults to the track's own consent rather than to `True`: a learner who
+    has not agreed to audio being kept has a recording registered as *not retained*.
+
+    "Not retained" then *means* it. Stage 5 wrote the row and left the bytes where they
+    were, so a workspace could hold a recording the learner never agreed to keep while
+    reporting that it held none -- the privacy audit counts only retained artifacts, and
+    this one was invisible to it. The file is deleted, and the row is what survives: a
+    record that it existed, its hash, and that it was not kept. That is what makes a later
+    absence explicable rather than merely unexplained.
+
+    `expected_sha256` is for a caller who already knows what the file should be -- an
+    ingested package naming its own audio. A mismatch is refused rather than recorded,
+    because registering the wrong file under a package's artifact ID attaches a claim to
+    a recording of something else.
+
+    `clip_of` marks this file as a selected excerpt of another recording. The distinction
+    is not cosmetic: the plan prefers keeping short clips to keeping whole conversations
+    indefinitely, and the retention sweep holds back a clip that supports an unfinished
+    pronunciation target where it would not hold back the entire call.
+
+    It is not a promotion and must not become one: every caller relies on it registering
+    the path it is given. Moving a file into place is the caller's, and a capture does it
+    in `services/recordings.py` before planning the registration.
+    """
+
+    active_clock = clock or SystemClock()
+    with open_writer(paths, command=command, clock=active_clock) as database:
+        plan = plan_registration(
+            database,
+            paths.root,
+            relative_path=relative_path,
+            kind=kind,
+            media_type=media_type,
+            origin=origin,
+            rights=rights,
+            source=source,
+            retained=retained,
+            external_id=external_id,
+            expected_sha256=expected_sha256,
+            clip_of=clip_of,
+            clip_starts_at_ms=clip_starts_at_ms,
+            clip_ends_at_ms=clip_ends_at_ms,
+            track=track,
+        )
+        if plan.existing is not None:
+            return _reconcile_duplicate(paths, database, plan)
         with database.transaction() as transaction:
-            transaction.execute(
-                "INSERT INTO artifacts (artifact_id, track_id, kind, relative_path, "
-                "media_type, byte_size, sha256, origin, rights, source_id, retained, "
-                "external_id, clip_of_artifact_id, clip_starts_at_ms, clip_ends_at_ms, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    artifact_id,
-                    track_id,
-                    kind,
-                    str(safe),
-                    media_type,
-                    size,
-                    digest,
-                    origin,
-                    rights,
-                    source_id,
-                    resolved_retained,
-                    external_id,
-                    clip_of_artifact_id,
-                    clip_starts_at_ms,
-                    clip_ends_at_ms,
-                    naive_utc(now),
-                    naive_utc(now),
-                ],
-            )
-            migration_module.record_audit_entry(
-                transaction,
-                command=command,
-                correlation_id=EventId.new(),
-                outcome="succeeded",
-                # The path is a private location, so the audit trail names the artifact
-                # and its hash rather than where on disk the learner keeps it.
-                affected_records_json=json.dumps([artifact_id]),
-                after_summary=f"registered a {kind} artifact of {size} byte(s)",
-            )
-            if not resolved_retained:
-                # Inside the transaction, deliberately. Recording "not kept" and keeping
-                # the bytes is the one combination that must not exist -- the row says
-                # they are gone and the privacy audit believes it -- and a deletion that
-                # failed after the commit left exactly that state on disk.
-                _remove_file(absolute, artifact_id=artifact_id, reason="not retained")
+            artifact_id = write_registration(transaction, plan, command=command)
         report = _read_artifact(database, artifact_id=artifact_id)
     warnings: list[str] = []
-    if kind == "audio" and not resolved_retained:
+    if kind == "audio" and not plan.retained:
         warnings.append(
             "registered as not retained, because this track has not consented to keeping "
             "audio; the recording can be worked with now, and no pronunciation claim made "
             "from it will survive as confirmed"
         )
     return report.model_copy(update={"warnings": tuple(warnings)})
+
+
+def _reconcile_duplicate(
+    paths: WorkspacePaths, database: Database, plan: RegistrationPlan
+) -> ArtifactReport:
+    """A second registration of bytes this track already holds: one recording, one row."""
+
+    assert plan.existing is not None
+    held_id, held_retained, held_external = plan.existing
+    absolute = plan.absolute
+    external_id = plan.external_id
+    notes = ["this file's content is already registered; the existing artifact is returned"]
+    now = aware_utc(database.now())
+    if not held_retained:
+        # The row says the learner declined to keep this recording. Bytes that reappear
+        # under it are governed by that decision, not by the fact that somebody ran
+        # `register` again.
+        _remove_file(absolute, artifact_id=held_id, reason="not retained")
+        return _read_artifact(database, artifact_id=held_id).model_copy(
+            update={
+                "warnings": (
+                    "this recording is on record as one the learner chose not to keep, so "
+                    "the copy just offered was removed rather than registered",
+                )
+            }
+        )
+    held_relative = str(
+        database.scalar("SELECT relative_path FROM artifacts WHERE artifact_id = ?", [held_id])
+    )
+    held_path = paths.root / held_relative
+    # Resolved, not joined. A registered path replaced by a symlink out of the workspace
+    # was treated as the canonical copy, and a genuine in-workspace copy offered afterwards
+    # was deleted as the duplicate.
+    held_contained = contained_file(paths.root, held_relative)
+    if held_contained is None and _path_exists(held_path):
+        raise LinguaWikiError(
+            "artifact_escaped_the_workspace",
+            f"{held_id} is registered at {held_relative}, and what is there now leads "
+            "outside this workspace. Nothing will be read through it and nothing will be "
+            "deleted on its word: `artifact verify` reports it, and the path has to be put "
+            "back or the record retired with `artifact purge`.",
+            details=(ErrorDetail(field="relative_path", reason=held_relative),),
+        )
+    binding = external_id is not None and held_external is None
+    # A *duplicate* means two copies of the registered recording exist. Presence alone was
+    # not enough: when the registered path had been altered, the correct recording restored
+    # elsewhere was classified as the duplicate and deleted, so the workspace kept the
+    # tampered copy and destroyed the real one.
+    held_present = held_contained is not None
+    held_matches = held_present and digest_or_none(held_path) == plan.digest
+    duplicate_on_disk = absolute != held_path and held_matches
+    restores_a_missing_file = absolute != held_path and not held_present
+    if absolute != held_path and held_present and not held_matches:
+        # The registered path holds bytes that are not this recording's. Repointing the row
+        # would leave them under a private root with nothing accounting for them -- the
+        # state a not-retained declaration exists to prevent -- and deleting them would
+        # destroy a file this workspace cannot identify. Both are decisions for a person.
+        raise LinguaWikiError(
+            "artifact_altered_at_registered_path",
+            f"{held_id} is registered at {held_path.name}, and the file there is neither "
+            "this recording nor gone: it has been altered. Repointing the record would "
+            "leave those bytes under a private directory with nothing accounting for them. "
+            "Settle them first -- `artifact verify` reports the alteration, and `artifact "
+            "purge` retires the record if the recording is genuinely lost.",
+            details=(
+                ErrorDetail(field="artifact", reason=held_id),
+                ErrorDetail(field="relative_path", reason=str(held_path.name)),
+            ),
+        )
+    if binding or duplicate_on_disk or restores_a_missing_file:
+        # One transaction over both, because the deletion cannot be undone and the binding
+        # can: committing the binding first and then failing to delete left the identifier
+        # bound to a row while untracked bytes stayed on disk.
+        with database.transaction() as transaction:
+            if binding:
+                # Binding it now is what makes a re-ingested package find this row rather
+                # than register the same recording again.
+                transaction.execute(
+                    "UPDATE artifacts SET external_id = ?, updated_at = ? WHERE artifact_id = ?",
+                    [external_id, naive_utc(now), held_id],
+                )
+                notes.append(f"bound to producer identifier {external_id}")
+            if restores_a_missing_file:
+                # The registered copy is gone or no longer its own bytes, and these are:
+                # the learner moved or restored the recording. Repointing the row is what
+                # makes the claims resting on it checkable again.
+                transaction.execute(
+                    "UPDATE artifacts SET relative_path = ?, updated_at = ? WHERE artifact_id = ?",
+                    [plan.relative_path, naive_utc(now), held_id],
+                )
+                notes.append("the registered copy was missing, so this one takes its place")
+            if duplicate_on_disk:
+                # A second copy of bytes already held, with the first still there. Whatever
+                # the learner decided about the original governs the copy, and leaving it
+                # would put a recording on disk no row accounts for.
+                _remove_file(absolute, artifact_id=held_id, reason="already registered")
+                notes.append("the duplicate copy was removed")
+    return _read_artifact(database, artifact_id=held_id).model_copy(
+        update={"warnings": tuple(notes)}
+    )
 
 
 def verify(
@@ -981,6 +1119,128 @@ def listing(
         return ArtifactListing(track_id=track_id, total=total, artifacts=tuple(artifacts))
 
 
+@dataclass(frozen=True, slots=True)
+class PurgeOutcome:
+    """What one purge settled, written inside the caller's transaction."""
+
+    #: The moment the tombstone records, so a report states the same time the row does.
+    purged_at: str
+    invalidated_observations: tuple[str, ...] = ()
+    invalidated_results: tuple[str, ...] = ()
+    withdrawn_submissions: tuple[str, ...] = ()
+    voided_verdicts: tuple[str, ...] = ()
+
+
+def write_purge(
+    database: Database,
+    root: Path,
+    *,
+    artifact_id: str,
+    reason: str,
+    command: str,
+    detail: str | None = None,
+) -> PurgeOutcome:
+    """Tombstone a recording, settle what rested on it, and delete its bytes -- in the
+    caller's transaction.
+
+    Separate from `purge` so a caller that already holds a transaction can purge as part
+    of it: a capture superseding an earlier recording of the same task purges that
+    recording in the transaction that binds the new one, so there is no moment at which
+    both are live and no moment at which neither is.
+
+    `reason` is the tombstone's, from a closed vocabulary. `detail`, when given, is the
+    why in words -- `consent withdrawn` for a consent change, which the vocabulary has no
+    term for -- and it is what the withdrawn submissions and the audit entry say, so the
+    reason is not lost to the column's narrower one.
+    """
+
+    from linguawiki.services import withdrawal
+
+    why = reason if detail is None else detail
+
+    relative_path = str(
+        database.scalar("SELECT relative_path FROM artifacts WHERE artifact_id = ?", [artifact_id])
+    )
+    dependent = dependent_observations(database, artifact_id=artifact_id)
+    now = database.now()
+    absolute = assert_within(root / relative_path, root, purpose="artifact")
+    database.execute(
+        "UPDATE artifacts SET purged_at = ?, purge_reason = ?, retained = FALSE, "
+        "updated_at = ? WHERE artifact_id = ?",
+        [now, reason, now, artifact_id],
+    )
+    for observation_id, _ in dependent:
+        database.execute(
+            "UPDATE pronunciation_observations SET invalidated_at = ?, "
+            "invalidation_reason = ? WHERE observation_id = ?",
+            [now, f"the audio it rested on was purged ({why})", observation_id],
+        )
+    # The assessment results that rested on it, and any submission still waiting for a
+    # judge. Before C5 a purge found its dependents only among pronunciation observations,
+    # so a score outlived the recording it was given for.
+    withdrawn = withdrawal.write_withdrawal(
+        database, artifact_id=artifact_id, reason=f"the recording was purged ({why})"
+    )
+    migration_module.record_audit_entry(
+        database,
+        command=command,
+        correlation_id=EventId.new(),
+        outcome="succeeded",
+        affected_records_json=json.dumps([artifact_id]),
+        after_summary=(
+            f"purged ({reason if detail is None else f'{reason}: {detail}'}); "
+            f"{len(dependent)} acoustic claim(s) and "
+            f"{len(withdrawn.invalidated_results)} assessment result(s) invalidated, "
+            f"{len(withdrawn.withdrawn_submissions)} unjudged submission(s) withdrawn"
+            + (
+                f" and verdict(s) {', '.join(withdrawn.voided_verdicts)} voided"
+                if withdrawn.voided_verdicts
+                else ""
+            )
+            + ", language evidence untouched"
+        ),
+    )
+    migration_module.record_domain_event(
+        database,
+        event_type="artifact.purged",
+        aggregate_type="artifact",
+        aggregate_id=artifact_id,
+        correlation_id=EventId.new(),
+        payload_json=json.dumps(
+            {
+                "reason": reason,
+                "invalidated": len(dependent),
+                "invalidated_results": len(withdrawn.invalidated_results),
+                **({} if detail is None else {"detail": detail}),
+            },
+            sort_keys=True,
+        ),
+    )
+    # Deleted before the commit, deliberately. Either order can fail partway, so the
+    # question is which wreckage is safer, and it is not symmetric:
+    #
+    # - commit first, then delete: a failure leaves a tombstone saying the recording is
+    #   gone while the file is still on disk. The learner reads "purged" and believes a
+    #   privacy request was honoured that was not.
+    # - delete first, then commit: a failure leaves the file gone with no tombstone. The
+    #   privacy request *was* honoured, the record is merely incomplete, `artifact verify`
+    #   reports it as missing, and running the purge again completes it.
+    #
+    # Never claim a privacy action that did not happen. An incomplete record of a deletion
+    # that did happen is recoverable; the reverse is a lie. Always: Stage 5 offered
+    # `--keep-file`, which wrote a tombstone, invalidated the claims that rested on the
+    # recording, and left the recording where it was. There is no reading of that state
+    # that is true.
+    _remove_file(absolute, artifact_id=artifact_id, reason=f"purged ({reason})")
+    return PurgeOutcome(
+        purged_at=aware_utc(now).isoformat(),
+        invalidated_observations=tuple(entry[0] for entry in dependent),
+        invalidated_results=withdrawn.invalidated_results,
+        withdrawn_submissions=withdrawn.withdrawn_submissions,
+        voided_verdicts=withdrawn.voided_verdicts,
+    )
+
+
 def purge(
     paths: WorkspacePaths,
     *,
@@ -995,16 +1255,18 @@ def purge(
 
     The invalidation is the careful part, and it is deliberately narrow. Losing the audio
     invalidates exactly the claims that needed the audio to be made: anything `confirmed`,
-    and anything about prosody or native-likeness at any confidence. It does **not** touch
-    what the learner said -- that was established by the transcript, which is still here.
-    Purging a recording is a privacy choice, and a privacy choice that also deleted a
-    month of language evidence would be one nobody could afford to make.
+    anything about prosody or native-likeness at any confidence, and every assessment
+    result a judge reached by listening to it. It does **not** touch what the learner said
+    -- that was established by the transcript, which is still here. Purging a recording is
+    a privacy choice, and a privacy choice that also deleted a month of language evidence
+    would be one nobody could afford to make.
 
     `dry_run` reports exactly this without doing it, because the plan requires that the
     consequences are visible before the deletion, not after.
     """
 
     from linguawiki import sources as source_policy
+    from linguawiki.services import withdrawal
 
     source_policy.assert_known(
         reason,
@@ -1036,6 +1298,7 @@ def purge(
         relative_path = str(row[2])
         already_purged = row[3] is not None
         dependent = dependent_observations(database, artifact_id=artifact_id)
+        results = withdrawal.dependent_results(database, artifact_id=artifact_id)
         surviving = int(
             database.scalar(
                 "SELECT count(*) FROM evidence evidence "
@@ -1052,12 +1315,14 @@ def purge(
                 reason=reason,
                 file_removed=False,
                 invalidated_observations=tuple(entry[0] for entry in dependent),
+                invalidated_results=tuple(results),
                 surviving_language_evidence=surviving,
                 purged_at=now.isoformat(),
                 warnings=(
                     "dry run: nothing was removed. Purging would invalidate "
-                    f"{len(dependent)} acoustic claim(s) and leave {surviving} piece(s) of "
-                    "language evidence untouched.",
+                    f"{len(dependent)} acoustic claim(s) and {len(results)} assessment "
+                    f"result(s), and leave {surviving} piece(s) of language evidence "
+                    "untouched.",
                 ),
             )
         if already_purged:
@@ -1070,81 +1335,46 @@ def purge(
                 purged_at=aware_utc(row[3]).isoformat(),
                 warnings=("this artifact was already purged; nothing was changed",),
             )
-        absolute = assert_within(paths.root / relative_path, paths.root, purpose="artifact")
-        removed = False
         with database.transaction() as transaction:
-            transaction.execute(
-                "UPDATE artifacts SET purged_at = ?, purge_reason = ?, retained = FALSE, "
-                "updated_at = ? WHERE artifact_id = ?",
-                [naive_utc(now), reason, naive_utc(now), artifact_id],
+            outcome = write_purge(
+                transaction, paths.root, artifact_id=artifact_id, reason=reason, command=command
             )
-            for observation_id, _ in dependent:
-                transaction.execute(
-                    "UPDATE pronunciation_observations SET invalidated_at = ?, "
-                    "invalidation_reason = ? WHERE observation_id = ?",
-                    [
-                        naive_utc(now),
-                        f"the audio it rested on was purged ({reason})",
-                        observation_id,
-                    ],
-                )
-            migration_module.record_audit_entry(
-                transaction,
-                command=command,
-                correlation_id=EventId.new(),
-                outcome="succeeded",
-                affected_records_json=json.dumps([artifact_id]),
-                after_summary=(
-                    f"purged ({reason}); {len(dependent)} acoustic claim(s) invalidated, "
-                    "language evidence untouched"
-                ),
-            )
-            migration_module.record_domain_event(
-                transaction,
-                event_type="artifact.purged",
-                aggregate_type="artifact",
-                aggregate_id=artifact_id,
-                correlation_id=EventId.new(),
-                payload_json=json.dumps(
-                    {"reason": reason, "invalidated": len(dependent)}, sort_keys=True
-                ),
-            )
-            # Deleted before the commit, deliberately. Either order can fail partway,
-            # so the question is which wreckage is safer, and it is not symmetric:
-            #
-            # - commit first, then delete: a failure leaves a tombstone saying the
-            #   recording is gone while the file is still on disk. The learner reads
-            #   "purged" and believes a privacy request was honoured that was not.
-            # - delete first, then commit: a failure leaves the file gone with no
-            #   tombstone. The privacy request *was* honoured, the record is merely
-            #   incomplete, `artifact verify` reports it as missing, and running the
-            #   purge again completes it.
-            #
-            # Never claim a privacy action that did not happen. An incomplete record of
-            # a deletion that did happen is recoverable; the reverse is a lie.
-            # Always. Stage 5 offered `--keep-file`, which wrote a tombstone, invalidated
-            # the claims that rested on the recording, and left the recording where it
-            # was. There is no reading of that state that is true: `artifact verify`
-            # reported it as damage, and the learner had been told their file was deleted.
-            _remove_file(absolute, artifact_id=artifact_id, reason=f"purged ({reason})")
-            removed = True
+    warnings: list[str] = []
+    if outcome.invalidated_observations:
+        warnings.append(
+            f"{len(outcome.invalidated_observations)} acoustic claim(s) no longer stand and "
+            "are marked as such; they are kept on the record rather than deleted, because a "
+            "learner told their pronunciation was wrong deserves to see that the evidence is "
+            "gone"
+        )
+    if outcome.invalidated_results:
+        warnings.append(
+            f"{len(outcome.invalidated_results)} assessment result(s) rested on this "
+            "recording and are marked invalidated; the estimates they shaped were rebuilt "
+            "from what survives, and the history that rested on them is annotated"
+        )
+    if outcome.withdrawn_submissions:
+        warnings.append(
+            f"{len(outcome.withdrawn_submissions)} recording(s) a judge had not yet heard "
+            "were withdrawn, and their tasks skipped"
+        )
+    if outcome.voided_verdicts:
+        warnings.append(
+            "verdict(s) held for them while their run was paused were voided, and will not "
+            "be applied when it resumes: " + ", ".join(outcome.voided_verdicts)
+        )
     return PurgeReport(
         artifact_id=artifact_id,
         relative_path=relative_path,
         reason=reason,
-        file_removed=removed,
-        invalidated_observations=tuple(entry[0] for entry in dependent),
+        file_removed=True,
+        invalidated_observations=outcome.invalidated_observations,
+        invalidated_results=outcome.invalidated_results,
+        withdrawn_submissions=outcome.withdrawn_submissions,
+        voided_verdicts=outcome.voided_verdicts,
         surviving_language_evidence=surviving,
-        purged_at=now.isoformat(),
-        warnings=(
-            (
-                f"{len(dependent)} acoustic claim(s) no longer stand and are marked as "
-                "such; they are kept on the record rather than deleted, because a learner "
-                "told their pronunciation was wrong deserves to see that the evidence is gone",
-            )
-            if dependent
-            else ()
-        ),
+        purged_at=outcome.purged_at,
+        warnings=tuple(warnings),
     )
 
 
@@ -1522,6 +1752,16 @@ class SweepReport(ContractModel):
     #: what matters before running it for real.
     unclipped_recordings: tuple[str, ...] = ()
     invalidated_observations: tuple[str, ...] = ()
+    #: Captures in a run still being worked, heard by a judge or not. Held back under every
+    #: policy: deleting one discards the learner's answer or a result the run rests on.
+    held_for_judging: tuple[str, ...] = ()
+    #: Captures a judged result rests on, due once their run closed. Purged like any whole
+    #: recording, so their results are invalidated exactly as an explicit purge does it.
+    judged_recordings: tuple[str, ...] = ()
+    invalidated_results: tuple[str, ...] = ()
+    #: Submissions whose run closed before a judge heard them: the hold lapsed, so they
+    #: were withdrawn (or would be, on a dry run) and their recordings treated as any other.
+    withdrawn_submissions: tuple[str, ...] = ()
     dry_run: bool = False
     warnings: tuple[str, ...] = ()
 
@@ -1600,6 +1840,30 @@ def sweep(
                 [track_id, transcript_policy.CONFIRMED_STATUS, ACHIEVED_STAGE],
             )
         }
+        # A capture waiting for a judge, and whether its run is still being worked. The
+        # sweep never consulted assessment results before C5, so it would delete the
+        # recording a judge was about to hear and leave a verdict with nothing under it.
+        awaiting = {
+            str(artifact_id): (str(submission_id), str(status))
+            for artifact_id, submission_id, status in database.query(
+                "SELECT submission.artifact_id, submission.submission_id, run.status "
+                "FROM assessment_submissions submission "
+                "JOIN assessment_runs run ON run.run_id = submission.run_id "
+                "WHERE run.track_id = ? AND submission.status = 'pending'",
+                [track_id],
+            )
+        }
+        judged = {
+            str(artifact_id): str(status)
+            for artifact_id, status in database.query(
+                "SELECT DISTINCT result.audio_artifact_id, run.status "
+                "FROM assessment_results result "
+                "JOIN assessment_runs run ON run.run_id = result.run_id "
+                "WHERE run.track_id = ? AND result.audio_artifact_id IS NOT NULL "
+                "AND result.invalidated_at IS NULL",
+                [track_id],
+            )
+        }
     warnings: list[str] = []
     if policy == "rolling-days" and retention_days is None:
         raise LinguaWikiError(
@@ -1612,6 +1876,9 @@ def sweep(
     due: list[str] = []
     unclipped: list[str] = []
     held_back = 0
+    held_for_judging: list[str] = []
+    judged_due: list[str] = []
+    lapsed: list[str] = []
     for artifact_id, created_at, external_id in candidates:
         if policy == "keep":
             continue
@@ -1624,6 +1891,28 @@ def sweep(
             # what arrives with an ingest, and deleting the rest would be a different
             # decision than the one they made.
             continue
+        waiting = awaiting.get(str(artifact_id))
+        live_run = (waiting is not None and waiting[1] in ("in-progress", "paused")) or (
+            judged.get(str(artifact_id)) in ("in-progress", "paused")
+        )
+        if live_run:
+            # The run is still being worked. A recording a judge has not heard is an answer
+            # the learner has given; one a judge has heard rests a result the run is still
+            # folding, and purging it now would invalidate that result and settle the task
+            # for the rest of the run. A retention window is a weaker reason than either,
+            # and the hold lapses when the run closes.
+            held_for_judging.append(str(artifact_id))
+            continue
+        if waiting is not None:
+            # The run closed with the recording unjudged: nothing will hear it now. The
+            # purge below withdraws the submission in its own transaction, so the
+            # withdrawal and the deletion land together or not at all.
+            lapsed.append(waiting[0])
+        if str(artifact_id) in judged:
+            # A judged result rests on it. It is due like any whole recording, and it goes
+            # through `purge`, so the result is invalidated exactly as an explicit purge
+            # would invalidate it.
+            judged_due.append(str(artifact_id))
         if str(artifact_id) in supporting:
             if str(artifact_id) in clips:
                 held_back += 1
@@ -1649,8 +1938,28 @@ def sweep(
             + ". Extract the moments that matter with `artifact clip` first -- a clip is "
             "kept past the window, an entire conversation is not."
         )
+    if held_for_judging:
+        warnings.append(
+            f"{len(held_for_judging)} recorded answer(s) were kept, because their run is "
+            "still being worked: "
+            + ", ".join(held_for_judging[:10])
+            + ". Deleting them would discard answers the learner has given, or invalidate "
+            "results the run still rests on; they become due when the run closes."
+        )
+    if judged_due:
+        warnings.append(
+            f"{len(judged_due)} recording(s) a judged assessment result rests on are due and "
+            "will go, invalidating those results: " + ", ".join(judged_due[:10])
+        )
+    if lapsed:
+        warnings.append(
+            f"{len(lapsed)} submission(s) whose run closed unjudged "
+            + ("would be" if dry_run else "were")
+            + " withdrawn with their recordings, in the purge that removes them"
+        )
     purged: list[str] = []
     invalidated: list[str] = []
+    invalidated_results: list[str] = []
     for artifact_id in due:
         report = purge(
             paths,
@@ -1663,6 +1972,7 @@ def sweep(
         )
         purged.append(artifact_id)
         invalidated.extend(report.invalidated_observations)
+        invalidated_results.extend(report.invalidated_results)
     if policy == "keep":
         warnings.append(
             "this track keeps audio until the learner says otherwise, so nothing was swept"
@@ -1675,6 +1985,10 @@ def sweep(
         purged=tuple(purged),
         unclipped_recordings=tuple(unclipped),
         invalidated_observations=tuple(dict.fromkeys(invalidated)),
+        held_for_judging=tuple(held_for_judging),
+        judged_recordings=tuple(judged_due),
+        invalidated_results=tuple(dict.fromkeys(invalidated_results)),
+        withdrawn_submissions=tuple(lapsed),
         dry_run=dry_run,
         warnings=tuple(warnings),
     )

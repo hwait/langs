@@ -433,7 +433,79 @@ def claims_for_task(task_type: str) -> tuple[str, ...]:
     return tuple(claim for claim in CLAIMS if task_type in CLAIM_RULES[claim].task_types)
 
 
+#: The version of the rule below, stored on every assessment result it decided so a policy
+#: change is replayed rather than migrated.
+JUDGEMENT_POLICY_VERSION = "judgement.v1"
+#: The assessors a judged score can come from, and the most an `ai` one may claim. A model
+#: listening to a recording is a reviewer whose ceiling is below a person's; nothing held
+#: an `ai` verdict to anything before C5, and `provenance.MACHINE_CEILING` caps content
+#: review axes, not scores.
+JUDGING_ASSESSORS: tuple[str, ...] = ("ai", "human")
+AI_CONFIDENCE_CEILING = "medium"
+#: Ordered weakest first, so a ceiling compares by position rather than by name.
+JUDGED_CONFIDENCE_ORDER: tuple[str, ...] = ("low", "medium", "high")
+
+
+def judged_claim_applies(*, dimension_kind: str, modality: str) -> bool:
+    """Whether a score on this task is a judgement about how the learner *sounded*.
+
+    Pronunciation always is. Productive work is when it was spoken: a written answer is
+    judged from text, and the rule below is about a judge listening.
+    """
+
+    return dimension_kind == "pronunciation" or (
+        dimension_kind == "productive" and modality == "speech"
+    )
+
+
+def assert_judged_claim(
+    *,
+    dimension_kind: str,
+    modality: str,
+    assessor_kind: str,
+    assessor: str | None,
+    confidence: str,
+) -> str | None:
+    """Refuse a judged score that claims more than its judge may, and name the rule.
+
+    Returns the policy version to store when the rule applied, and `None` when it did not.
+    A judged score must name who judged it -- an anonymous verdict about a learner's speech
+    is one nobody can be asked about -- and an `ai` judge may not claim more than
+    `AI_CONFIDENCE_CEILING`. Whether an `ai` verdict should also carry a weaker basis into
+    the estimate is deliberately not decided here; it would be a new policy version.
+    """
+
+    if not judged_claim_applies(dimension_kind=dimension_kind, modality=modality):
+        return None
+    if assessor_kind not in JUDGING_ASSESSORS:
+        return JUDGEMENT_POLICY_VERSION
+    if assessor is None or not assessor.strip():
+        raise LinguaWikiError(
+            "assessor_required",
+            f"a {dimension_kind} score from a {assessor_kind} judge must name the judge; an "
+            "anonymous verdict about how a learner sounded is one nobody can be asked about",
+            details=(ErrorDetail(field="assessor", reason="absent"),),
+        )
+    if assessor_kind == "ai" and JUDGED_CONFIDENCE_ORDER.index(
+        confidence
+    ) > JUDGED_CONFIDENCE_ORDER.index(AI_CONFIDENCE_CEILING):
+        raise LinguaWikiError(
+            "assessor_confidence_ceiling",
+            f"an ai judge may claim at most {AI_CONFIDENCE_CEILING} confidence in a "
+            f"{dimension_kind} score, and this one claimed {confidence}",
+            details=(
+                ErrorDetail(
+                    field="confidence",
+                    reason=f"above {AI_CONFIDENCE_CEILING}",
+                    context={"policy": JUDGEMENT_POLICY_VERSION},
+                ),
+            ),
+        )
+    return JUDGEMENT_POLICY_VERSION
+
+
 __all__ = [
+    "AI_CONFIDENCE_CEILING",
     "ASSESSOR_FACTORS",
     "ASSESSOR_KINDS",
     "ATTEMPT_ORIGINS",
@@ -446,6 +518,9 @@ __all__ = [
     "FULL_HELP",
     "HELP_FACTORS",
     "HELP_LEVELS",
+    "JUDGED_CONFIDENCE_ORDER",
+    "JUDGEMENT_POLICY_VERSION",
+    "JUDGING_ASSESSORS",
     "MEANING_FOCUSED_TASK_TYPES",
     "MODALITIES",
     "NOVELTY",
@@ -459,10 +534,12 @@ __all__ = [
     "TASK_TYPES",
     "ClaimRule",
     "assert_compatible",
+    "assert_judged_claim",
     "assert_known",
     "claim_rule",
     "claims_for_task",
     "help_strength",
+    "judged_claim_applies",
     "observation_strength",
     "outcome_for",
     "polarity_for",

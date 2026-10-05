@@ -1,12 +1,55 @@
 {
   "components": {
     "schemas": {
+      "AppliedVerdict": {
+        "additionalProperties": false,
+        "description": "A held verdict a resume revalidated and applied: the result it became.",
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "result_id": {
+            "title": "Result Id",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "verdict_id": {
+            "title": "Verdict Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict_id",
+          "submission_id",
+          "content_id",
+          "result_id",
+          "score"
+        ],
+        "title": "AppliedVerdict",
+        "type": "object"
+      },
       "AssessmentRunReport": {
         "additionalProperties": false,
         "properties": {
           "algorithm_version": {
             "title": "Algorithm Version",
             "type": "string"
+          },
+          "applied_verdicts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AppliedVerdict"
+            },
+            "title": "Applied Verdicts",
+            "type": "array"
           },
           "available_modalities": {
             "items": {
@@ -37,6 +80,14 @@
             "title": "Dimensions",
             "type": "array"
           },
+          "excluded": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WithdrawnSubmission"
+            },
+            "title": "Excluded",
+            "type": "array"
+          },
           "finalized_at": {
             "anyOf": [
               {
@@ -60,6 +111,19 @@
             "title": "Framework Levels",
             "type": "array"
           },
+          "held": {
+            "default": false,
+            "title": "Held",
+            "type": "boolean"
+          },
+          "outstanding_judgements": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OutstandingJudgement"
+            },
+            "title": "Outstanding Judgements",
+            "type": "array"
+          },
           "pack_key": {
             "title": "Pack Key",
             "type": "string"
@@ -71,6 +135,22 @@
           "pack_version": {
             "title": "Pack Version",
             "type": "string"
+          },
+          "progress": {
+            "default": "working",
+            "enum": [
+              "working",
+              "waiting",
+              "complete",
+              "closed"
+            ],
+            "title": "Progress",
+            "type": "string"
+          },
+          "results_invalidated": {
+            "default": 0,
+            "title": "Results Invalidated",
+            "type": "integer"
           },
           "run_id": {
             "title": "Run Id",
@@ -135,12 +215,52 @@
             "title": "Untested Dimensions",
             "type": "array"
           },
+          "verdict_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Verdict Id"
+          },
+          "verdict_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Verdict Status"
+          },
+          "voided_verdicts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/VoidedVerdict"
+            },
+            "title": "Voided Verdicts",
+            "type": "array"
+          },
           "warnings": {
             "default": [],
             "items": {
               "type": "string"
             },
             "title": "Warnings",
+            "type": "array"
+          },
+          "withdrawn": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WithdrawnSubmission"
+            },
+            "title": "Withdrawn",
             "type": "array"
           }
         },
@@ -161,6 +281,186 @@
           "dimensions"
         ],
         "title": "AssessmentRunReport",
+        "type": "object"
+      },
+      "BatchReport": {
+        "additionalProperties": false,
+        "description": "One task for each open dimension, served together -- or replayed by their key.",
+        "properties": {
+          "batch_id": {
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "exhausted": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Exhausted",
+            "type": "array"
+          },
+          "outstanding": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Outstanding",
+            "type": "array"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "tasks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/BatchTask"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "batch_id",
+          "run_id"
+        ],
+        "title": "BatchReport",
+        "type": "object"
+      },
+      "BatchTask": {
+        "additionalProperties": false,
+        "description": "One task a batch served, in the position the batch served it.",
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "dimension": {
+            "title": "Dimension",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "served",
+              "answered",
+              "awaiting-judge",
+              "skipped"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "task": {
+            "$ref": "#/components/schemas/NextTaskReport"
+          }
+        },
+        "required": [
+          "position",
+          "dimension",
+          "content_id",
+          "state",
+          "task"
+        ],
+        "title": "BatchTask",
+        "type": "object"
+      },
+      "CaptureReport": {
+        "additionalProperties": false,
+        "description": "What became of one capture.",
+        "properties": {
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "capture_id": {
+            "title": "Capture Id",
+            "type": "string"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "recording": {
+            "$ref": "#/components/schemas/RecordingPolicy"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "submission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SubmissionReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "superseded": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Superseded",
+            "type": "array"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "capture_id",
+          "run_id",
+          "content_id",
+          "state",
+          "sha256",
+          "recording"
+        ],
+        "title": "CaptureReport",
         "type": "object"
       },
       "DimensionReport": {
@@ -247,6 +547,16 @@
             ],
             "default": null,
             "title": "Posterior Mean"
+          },
+          "progress": {
+            "default": "open",
+            "enum": [
+              "open",
+              "waiting",
+              "closed"
+            ],
+            "title": "Progress",
+            "type": "string"
           },
           "status": {
             "title": "Status",
@@ -451,6 +761,110 @@
         "title": "NextTaskReport",
         "type": "object"
       },
+      "OutstandingJudgement": {
+        "additionalProperties": false,
+        "description": "One answer waiting on a judgement, and what it is waiting on.\n\nNever the learner's words: this reaches the screen, which has no consent parameter to\ncheck them against. A judge reads an answer through `pending` and `claim`. Derived from\nthe claim and verdict rows and the clock -- `judging.claim_states` and\n`judging.held_submissions` -- never stored, so it cannot disagree with them.",
+        "properties": {
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "claim_state": {
+            "enum": [
+              "unclaimed",
+              "claimed",
+              "held",
+              "lapsed"
+            ],
+            "title": "Claim State",
+            "type": "string"
+          },
+          "claimed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimed By"
+          },
+          "claimed_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Claimed Until"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "dimension": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Dimension"
+          },
+          "kind": {
+            "enum": [
+              "recording",
+              "text"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "status": {
+            "const": "pending",
+            "default": "pending",
+            "title": "Status",
+            "type": "string"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "unclaimed_since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unclaimed Since"
+          },
+          "verdict_held": {
+            "default": false,
+            "title": "Verdict Held",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "submission_id",
+          "content_id",
+          "kind",
+          "claim_state"
+        ],
+        "title": "OutstandingJudgement",
+        "type": "object"
+      },
       "OutstandingTask": {
         "additionalProperties": false,
         "description": "A task this run served and has not settled, as it was served.\n\nNever from `assessment_tasks`. A pack is mutable and a run is not, so re-reading the\nbank would let an edit made after the serving decide what the learner is held to have\nbeen asked.",
@@ -459,7 +873,8 @@
             "default": "text",
             "enum": [
               "choice",
-              "text"
+              "text",
+              "recording"
             ],
             "title": "Answer With",
             "type": "string"
@@ -580,6 +995,26 @@
             "title": "Sequence",
             "type": "integer"
           },
+          "state": {
+            "default": "awaiting-answer",
+            "enum": [
+              "awaiting-answer",
+              "awaiting-judge"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "submission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SubmissionReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "task_type": {
             "title": "Task Type",
             "type": "string"
@@ -676,6 +1111,60 @@
         "title": "PresentationChoice",
         "type": "object"
       },
+      "RecordingPolicy": {
+        "additionalProperties": false,
+        "description": "Whether this track lets a learner record an answer for a judge, and for how long\nthe recording is kept.\n\n`offered` is the gate: equipment *and* consent, never one standing in for the other.\nThe retention policy is reported so a page can say it, and never overridden.",
+        "properties": {
+          "offered": {
+            "title": "Offered",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          },
+          "recording_available": {
+            "default": false,
+            "title": "Recording Available",
+            "type": "boolean"
+          },
+          "retention_consent": {
+            "default": false,
+            "title": "Retention Consent",
+            "type": "boolean"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Retention Days"
+          },
+          "retention_policy": {
+            "default": "keep",
+            "title": "Retention Policy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "offered"
+        ],
+        "title": "RecordingPolicy",
+        "type": "object"
+      },
       "RunListReport": {
         "additionalProperties": false,
         "description": "The runs a fresh page could resume, newest first, for one track.",
@@ -684,6 +1173,17 @@
             "default": 0,
             "title": "Omitted",
             "type": "integer"
+          },
+          "recording": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordingPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "runs": {
             "default": [],
@@ -696,6 +1196,11 @@
           "track_id": {
             "title": "Track Id",
             "type": "string"
+          },
+          "written_offered": {
+            "default": false,
+            "title": "Written Offered",
+            "type": "boolean"
           }
         },
         "required": [
@@ -748,6 +1253,14 @@
             "title": "Outstanding",
             "type": "array"
           },
+          "outstanding_judgements": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/OutstandingJudgement"
+            },
+            "title": "Outstanding Judgements",
+            "type": "array"
+          },
           "pack_key": {
             "title": "Pack Key",
             "type": "string"
@@ -755,6 +1268,33 @@
           "pack_version": {
             "title": "Pack Version",
             "type": "string"
+          },
+          "progress": {
+            "default": "working",
+            "enum": [
+              "working",
+              "waiting",
+              "complete",
+              "closed"
+            ],
+            "title": "Progress",
+            "type": "string"
+          },
+          "recording": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecordingPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "results_invalidated": {
+            "default": 0,
+            "title": "Results Invalidated",
+            "type": "integer"
           },
           "run_id": {
             "title": "Run Id",
@@ -834,6 +1374,111 @@
           "sha256"
         ],
         "title": "ServedAsset",
+        "type": "object"
+      },
+      "SubmissionReport": {
+        "additionalProperties": false,
+        "description": "Which answer -- a recording, or a written answer -- answers which served task, and\nwhere its judgement stands.\n\nNever the learner's words. A written answer's text is handed to the judge by `pending`\nand `claim` and to nobody else; this report reaches the screen, and the read model does\nnot carry what a learner wrote. The digest says which answer it is without saying what\nit says.",
+        "properties": {
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Id"
+          },
+          "capture_id": {
+            "title": "Capture Id",
+            "type": "string"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "kind": {
+            "default": "recording",
+            "title": "Kind",
+            "type": "string"
+          },
+          "response_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Response Digest"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Superseded By"
+          },
+          "withdrawn_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Withdrawn Code"
+          },
+          "withdrawn_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Withdrawn Reason"
+          }
+        },
+        "required": [
+          "submission_id",
+          "run_id",
+          "content_id",
+          "capture_id",
+          "status",
+          "created_at"
+        ],
+        "title": "SubmissionReport",
         "type": "object"
       },
       "TaskAudio": {
@@ -929,6 +1574,116 @@
           "kind"
         ],
         "title": "TaskPresentation",
+        "type": "object"
+      },
+      "VoidedVerdict": {
+        "additionalProperties": false,
+        "description": "A verdict that will never be applied, and why -- by the code a skill acts on and\nin the words a learner is shown.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "verdict_id": {
+            "title": "Verdict Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict_id",
+          "submission_id",
+          "content_id",
+          "code",
+          "reason"
+        ],
+        "title": "VoidedVerdict",
+        "type": "object"
+      },
+      "WithdrawnSubmission": {
+        "additionalProperties": false,
+        "description": "A submission a command withdrew, and why -- with the held verdicts it voided.\n\nDefined here rather than in `judging`, which imports this module: a run report names\nthe submissions a transition withdrew, and a model a field is typed with has to exist\nwhen the field does.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "submission_id": {
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "voided_verdicts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Voided Verdicts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "submission_id",
+          "content_id",
+          "code",
+          "reason"
+        ],
+        "title": "WithdrawnSubmission",
+        "type": "object"
+      },
+      "WrittenSubmissionReport": {
+        "additionalProperties": false,
+        "description": "What became of one written answer. Never its text: the caller sent it.",
+        "properties": {
+          "content_id": {
+            "title": "Content Id",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "submission": {
+            "$ref": "#/components/schemas/SubmissionReport"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run_id",
+          "content_id",
+          "submission"
+        ],
+        "title": "WrittenSubmissionReport",
         "type": "object"
       },
       "linguawiki.cli.error.v1": {
@@ -1425,7 +2180,9 @@
                   "scoring": {
                     "enum": [
                       "any",
-                      "machine"
+                      "machine",
+                      "machine+recorded",
+                      "machine+judged"
                     ]
                   },
                   "track": {
@@ -1690,6 +2447,176 @@
         "summary": "A run's per-dimension estimates and budgets"
       }
     },
+    "/runs/{run_id}/batch": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_batch",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "idempotency_key": {
+                    "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "idempotency_key"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/BatchReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Serve one task in every free open dimension at once, or replay the batch a key already served"
+      }
+    },
     "/runs/{run_id}/finalization": {
       "post": {
         "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
@@ -1722,6 +2649,9 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "exclude_outstanding": {
+                    "type": "boolean"
+                  },
                   "idempotency_key": {
                     "description": "Operation-scoped key bound to a hash of this request. The same key with the same request replays the first call's result; the same key with a different request, or one recorded against another operation, is refused with idempotency_conflict.",
                     "minLength": 1,
@@ -2681,6 +3611,187 @@
         "summary": "The recording an outstanding task was served with, as those exact bytes"
       }
     },
+    "/runs/{run_id}/tasks/{content_id}/captures/{capture_id}": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_capture",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A task this run served, by its content identifier.",
+            "in": "path",
+            "name": "content_id",
+            "required": true,
+            "schema": {
+              "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The client's own identifier for one recording, minted when the learner stopped recording. It is the upload's idempotency key: the same identifier with the same bytes replays the first upload's result, and with different bytes is refused.",
+            "in": "path",
+            "name": "capture_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "audio/*": {
+              "schema": {
+                "contentMediaType": "audio/*",
+                "type": "string"
+              }
+            }
+          },
+          "description": "The recording's bytes, at most 16777216 of them, with a Content-Length.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/CaptureReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Submit the learner's recorded answer to an outstanding spoken task, for a judge"
+      }
+    },
     "/runs/{run_id}/tasks/{content_id}/plays": {
       "post": {
         "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
@@ -2859,6 +3970,189 @@
           }
         },
         "summary": "Record one play of an outstanding task's recording, before it is heard"
+      }
+    },
+    "/runs/{run_id}/tasks/{content_id}/submission": {
+      "post": {
+        "description": "Mutating: an Origin header matching this server's own origin is required, and absence is refused rather than treated as permission.",
+        "operationId": "assessment_submit",
+        "parameters": [
+          {
+            "description": "The run this operation acts on.",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "pattern": "^asm_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A task this run served, by its content identifier.",
+            "in": "path",
+            "name": "content_id",
+            "required": true,
+            "schema": {
+              "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Must be this server's own origin. Absence is refused rather than treated as permission: a cross-site form post sends no Origin in some browsers.",
+            "in": "header",
+            "name": "Origin",
+            "required": true,
+            "schema": {
+              "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]{1,5}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "response": {
+                    "type": "string"
+                  },
+                  "submission_key": {
+                    "description": "The page's own identifier for this answer, and the operation's idempotency key: the same key with the same answer replays the first call's result; with a different answer, or another task, it is refused with idempotency_conflict naming the recorded digest.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "submission_key",
+                  "response"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/linguawiki.cli.success.v1"
+                    }
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/WrittenSubmissionReport"
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The operation's report, inside the shared success envelope."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request was not understood."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Refused by the host, origin, or launch-token check."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "No such route, or no such run."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Wrong method for this path."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An idempotency key was reused for a different request."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The request body is over the cap."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "Understood, and refused by a rule of this workspace."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "An unexpected internal error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/linguawiki.cli.error.v1"
+                }
+              }
+            },
+            "description": "The database is held by another process.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying; the database is held.",
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Hand in the learner's written answer to an outstanding written task, for a judge"
       }
     }
   },

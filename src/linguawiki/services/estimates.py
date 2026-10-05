@@ -24,7 +24,7 @@ competing ones.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -76,6 +76,10 @@ SNAPSHOT_FIELDS: tuple[str, ...] = (
 )
 #: Differences below this are floating-point noise, not a change in the estimate.
 NUMERIC_TOLERANCE = 1e-9
+#: What a recompute does when no usable evidence remains. See `recompute_dimension`.
+ORDINARY_RECOMPUTE = "ordinary"
+WITHDRAWN_RECOMPUTE = "evidence-withdrawn"
+RECOMPUTE_MODES: tuple[str, ...] = (ORDINARY_RECOMPUTE, WITHDRAWN_RECOMPUTE)
 
 
 class EstimateFactor(ContractModel):
@@ -136,6 +140,20 @@ class EstimateReport(ContractModel):
     warnings: tuple[str, ...] = ()
 
 
+class EstimateAnnotation(ContractModel):
+    """A note on a snapshot that something it rested on no longer stands.
+
+    History is marked, never rewritten: the snapshot keeps the numbers it had, and this
+    says why they should no longer be believed.
+    """
+
+    kind: str
+    result_id: str
+    artifact_id: str | None = None
+    reason: str
+    annotated_at: str
+
+
 class SnapshotRecord(ContractModel):
     snapshot_id: str
     dimension: str
@@ -155,6 +173,8 @@ class SnapshotRecord(ContractModel):
     calculation_version: str
     as_of: str
     recorded_at: str
+    #: Present when evidence this snapshot rested on was withdrawn since.
+    annotations: tuple[EstimateAnnotation, ...] = ()
 
 
 class HistoryReport(ContractModel):
@@ -464,6 +484,77 @@ def write_estimate(
     )
 
 
+WITHDRAWN_ANNOTATION = "evidence-withdrawn"
+
+
+def annotate_withdrawn(
+    database: Database,
+    *,
+    track_id: str,
+    dimension: str,
+    run_id: str,
+    result_id: str,
+    since: datetime,
+    artifact_id: str | None,
+    reason: str,
+    exclude: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Mark the snapshots that rested on a withdrawn result, and say why.
+
+    A snapshot rests on a run's result when it was written from that run -- by its
+    finalization, or by evidence folded into its posterior -- at or after the moment the
+    result was recorded. The snapshot written by the rebuild itself is excluded: it is the
+    account of what survives, and does not rest on what was withdrawn.
+    """
+
+    placeholders = "".join(", ?" for _ in exclude)
+    snapshots = [
+        str(snapshot_id)
+        for (snapshot_id,) in database.query(
+            "SELECT snapshot_id FROM estimate_history WHERE track_id = ? AND dimension = ? "
+            "AND source_run_id = ? AND recorded_at >= ? "
+            f"AND snapshot_id NOT IN (''{placeholders}) "
+            "AND NOT EXISTS (SELECT 1 FROM estimate_annotations note "
+            "  WHERE note.snapshot_id = estimate_history.snapshot_id AND note.result_id = ?) "
+            "ORDER BY recorded_at, snapshot_id",
+            [track_id, dimension, run_id, since, *exclude, result_id],
+        )
+    ]
+    now = database.now()
+    for snapshot_id in snapshots:
+        database.execute(
+            "INSERT INTO estimate_annotations (annotation_id, snapshot_id, kind, result_id, "
+            "artifact_id, reason, annotated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                str(EstimateId.new()),
+                snapshot_id,
+                WITHDRAWN_ANNOTATION,
+                result_id,
+                artifact_id,
+                reason,
+                now,
+            ],
+        )
+    return tuple(snapshots)
+
+
+def snapshot_annotations(database: Database, *, snapshot_id: str) -> tuple[EstimateAnnotation, ...]:
+    return tuple(
+        EstimateAnnotation(
+            kind=str(row[0]),
+            result_id=str(row[1]),
+            artifact_id=None if row[2] is None else str(row[2]),
+            reason=str(row[3]),
+            annotated_at=aware_utc(row[4]).isoformat(),
+        )
+        for row in database.query(
+            "SELECT kind, result_id, artifact_id, reason, annotated_at FROM estimate_annotations "
+            "WHERE snapshot_id = ? ORDER BY annotated_at, annotation_id",
+            [snapshot_id],
+        )
+    )
+
+
 def _level_label(index: float, levels: Sequence[str]) -> str | None:
     if not levels:
         return None
@@ -484,6 +575,7 @@ def upsert_from_state(
     basis: str,
     reason: str,
     dry_run: bool = False,
+    extra_factors: Sequence[EstimateFactor] = (),
 ) -> EstimateChange:
     """Write the estimate a placement or calibration dimension state implies."""
 
@@ -516,6 +608,7 @@ def upsert_from_state(
         factors.append(
             EstimateFactor(name="stop-reason", weight=0.0, detail=str(state.stop_reason))
         )
+    factors.extend(extra_factors)
     return write_estimate(
         database,
         track_id=track_id,
@@ -632,7 +725,10 @@ def _starting_posterior(
         "FROM placement_dimension_state state "
         "JOIN assessment_runs run ON run.run_id = state.run_id "
         "WHERE run.track_id = ? AND state.dimension = ? AND state.tasks_used > 0 "
-        "ORDER BY state.updated_at DESC, state.run_id DESC LIMIT 1",
+        # The run's own chronology, never the state row's `updated_at`: replaying an older
+        # run after a purge rewrites its state, and ordering by the rewrite let that run
+        # displace a newer calibration as the baseline.
+        "ORDER BY run.started_at DESC, run.run_id DESC LIMIT 1",
         [track_id, dimension],
     )
     if row is None:
@@ -654,8 +750,32 @@ def recompute_dimension(
     now: datetime,
     policy: MasteryPolicy = DEFAULT_POLICY,
     dry_run: bool = False,
+    mode: str = ORDINARY_RECOMPUTE,
+    fallback: Callable[[], EstimateChange] | None = None,
+    extra_factors: Sequence[EstimateFactor] = (),
 ) -> EstimateChange:
-    """Recompute one dimension's estimate from raw evidence plus any run posterior."""
+    """Recompute one dimension's estimate from raw evidence plus any run posterior.
+
+    `mode` decides what happens when no usable evidence remains. An ordinary recompute
+    keeps what a run or a declared level already established, because recomputation is
+    not an occasion to downgrade anybody. `evidence-withdrawn` is the opposite case: the
+    evidence that established the estimate is gone, so keeping the estimate would leave a
+    level standing on nothing. It rebuilds through `fallback`, which the caller supplies
+    because only it knows which run, declared level, or `not-tested` is what survives.
+    """
+
+    if mode not in RECOMPUTE_MODES:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            f"recompute mode must be one of {list(RECOMPUTE_MODES)}, not {mode!r}",
+            details=(ErrorDetail(field="mode", reason="unknown mode"),),
+        )
+    if mode == WITHDRAWN_RECOMPUTE and fallback is None:
+        raise LinguaWikiError(
+            "invalid_arguments",
+            "a recompute after evidence was withdrawn needs to know what survives it",
+            details=(ErrorDetail(field="fallback", reason="absent"),),
+        )
 
     observations = dimension_observations(database, track_id=track_id, dimension=dimension)
     grid, posterior, run_id = _starting_posterior(
@@ -676,6 +796,9 @@ def recompute_dimension(
         *already_folded,
     )
     existing = read_estimate(database, track_id=track_id, dimension=dimension)
+    if not usable and mode == WITHDRAWN_RECOMPUTE:
+        assert fallback is not None
+        return fallback().model_copy(update={"excluded_evidence": excluded})
     if not usable:
         # Nothing testable arrived. The dimension keeps whatever a run or a declared
         # level already established; recomputation is not an occasion to downgrade it.
@@ -814,6 +937,7 @@ def recompute_dimension(
                 else f"{len(contexts)} independent contexts support the estimate"
             ),
         ),
+        *extra_factors,
     )
     # A single observation, or several in one context, is a reading rather than a
     # measurement. It is reported with its band and its interval, and labelled
@@ -1074,6 +1198,7 @@ def history(
                 calculation_version=str(row[14]),
                 as_of=aware_utc(row[15]).isoformat(),
                 recorded_at=aware_utc(row[16]).isoformat(),
+                annotations=snapshot_annotations(database, snapshot_id=str(row[0])),
             )
             for row in rows
         )
@@ -1095,8 +1220,13 @@ __all__ = [
     "BASES",
     "CALCULATION_VERSION",
     "ESTIMATE_STATUSES",
+    "ORDINARY_RECOMPUTE",
+    "RECOMPUTE_MODES",
     "SNAPSHOT_FIELDS",
+    "WITHDRAWN_ANNOTATION",
+    "WITHDRAWN_RECOMPUTE",
     "DimensionObservation",
+    "EstimateAnnotation",
     "EstimateChange",
     "EstimateFactor",
     "EstimateRecord",
@@ -1104,6 +1234,7 @@ __all__ = [
     "HistoryReport",
     "RecomputeReport",
     "SnapshotRecord",
+    "annotate_withdrawn",
     "dimension_observations",
     "dimensions_for",
     "history",
@@ -1112,6 +1243,7 @@ __all__ = [
     "recompute",
     "recompute_dimension",
     "report",
+    "snapshot_annotations",
     "upsert_from_state",
     "write_estimate",
 ]

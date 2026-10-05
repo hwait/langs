@@ -6,6 +6,7 @@ import json
 
 from pydantic import Field
 
+from linguawiki import evidence as evidence_policy
 from linguawiki.contracts import (
     SNAPSHOT_PARTIAL,
     LockManifest,
@@ -69,6 +70,40 @@ ORPHAN_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
     # `materialized_id` is checked per kind by `_session_checks` because one column
     # points at four different tables depending on what the event became.
     ("session_staged_events", "finalization_id", "session_finalizations", "finalization_id"),
+    # C5. Every column naming an artifact is unenforced, because a purge rewrites the
+    # artifact row; a staging row learns its artifact in the transaction that registers it;
+    # a submission names its successor after both exist; and a result's artifact column
+    # was added after the table, which DuckDB cannot give a foreign key.
+    ("capture_stagings", "artifact_id", "artifacts", "artifact_id"),
+    ("assessment_submissions", "artifact_id", "artifacts", "artifact_id"),
+    ("assessment_submissions", "superseded_by", "assessment_submissions", "submission_id"),
+    ("assessment_results", "audio_artifact_id", "artifacts", "artifact_id"),
+    ("estimate_annotations", "result_id", "assessment_results", "result_id"),
+    ("estimate_annotations", "artifact_id", "artifacts", "artifact_id"),
+    # C6. A submission is written in place, so nothing that names one may be a foreign
+    # key; claims, verdicts, and outcomes are insert-only today and checked all the same,
+    # so the first stage to write one in place does not have to rebuild a table.
+    ("judging_claims", "submission_id", "assessment_submissions", "submission_id"),
+    ("judging_releases", "claim_id", "judging_claims", "claim_id"),
+    ("assessment_verdicts", "submission_id", "assessment_submissions", "submission_id"),
+    ("assessment_verdicts", "claim_id", "judging_claims", "claim_id"),
+    ("assessment_verdict_outcomes", "verdict_id", "assessment_verdicts", "verdict_id"),
+    ("assessment_verdict_outcomes", "result_id", "assessment_results", "result_id"),
+)
+#: Relations that hold for only some rows of the child: `(table, column, parent,
+#: parent_column, scope_column, scope_value)`. A recording's `capture_id` names its staging
+#: row; a written answer's names the producer's submission key, which no staging row
+#: describes. Where the scope column does not exist yet -- a database behind migration
+#: 0035 -- every row is in scope, because every submission then was a recording.
+SCOPED_ORPHAN_RELATIONS: tuple[tuple[str, str, str, str, str, str], ...] = (
+    (
+        "assessment_submissions",
+        "capture_id",
+        "capture_stagings",
+        "capture_id",
+        "kind",
+        "recording",
+    ),
 )
 REQUIRED_PROJECTIONS = ("wiki",)
 
@@ -1020,6 +1055,679 @@ def _task_play_checks(database: Database) -> list[CheckResult]:
                 "every recorded play count equals the plays it was derived from",
             )
         )
+    return checks
+
+
+def _named(name: str, problems: list[str], *, failed: str, ok: str, field: str) -> CheckResult:
+    if problems:
+        return _failed(name, failed, **{field: "; ".join(problems[:50])})
+    return _ok(name, ok)
+
+
+def _pack_asset_checks(database: Database) -> list[CheckResult]:
+    """Migration 0034: an installed recording is a file the installed pack verified.
+
+    `pack_assets` is what serving reads a digest from instead of loading the pack, so a
+    row that disagrees with `pack_files` -- the digests the install verified -- would let a
+    serve snapshot a hash nobody checked.
+    """
+
+    disagreeing = [
+        f"{content_id} at {path}"
+        for content_id, path in database.query(
+            "SELECT asset.content_id, asset.path FROM pack_assets asset "
+            "WHERE NOT EXISTS (SELECT 1 FROM pack_files file WHERE file.pack_id = asset.pack_id "
+            "AND file.relative_path = asset.path AND file.sha256 = asset.sha256) ORDER BY 1"
+        )
+    ]
+    return [
+        _named(
+            "pack_assets_match_installed_files",
+            disagreeing,
+            failed="an installed recording's digest is not the digest its pack verified, so a "
+            "serve would snapshot bytes nobody checked",
+            ok="every installed recording matches a file its pack verified",
+            field="assets",
+        )
+    ]
+
+
+def _recorded_judgement_checks(database: Database, *, submission_kinds: bool) -> list[CheckResult]:
+    """Migration 0034: captures, the submissions binding them, and the verdicts on them.
+
+    None of the cross-table rules can be a constraint -- every artifact column is
+    unenforced, `status` is mutable, and the result columns were added after the table --
+    so each is asserted here, over the data, with membership established by `NOT EXISTS`
+    rather than an inner join that would pass every row with no counterpart.
+    """
+
+    checks: list[CheckResult] = []
+    unresolved = [
+        f"{capture_id} ({state})"
+        for capture_id, state in database.query(
+            "SELECT capture_id, state FROM capture_stagings "
+            "WHERE state IN ('staged', 'promoting') ORDER BY 1"
+        )
+    ]
+    if unresolved:
+        checks.append(
+            _warning(
+                "capture_stagings_resolved",
+                "a capture is neither registered nor refused; `client serve` recovers it "
+                "before it accepts a request",
+                captures="; ".join(unresolved[:50]),
+            )
+        )
+    registered = [
+        str(capture_id)
+        for (capture_id,) in database.query(
+            "SELECT staging.capture_id FROM capture_stagings staging "
+            "WHERE staging.state = 'registered' AND ("
+            "  NOT EXISTS (SELECT 1 FROM artifacts artifact "
+            "    WHERE artifact.artifact_id = staging.artifact_id "
+            "    AND artifact.track_id = staging.track_id AND artifact.kind = 'audio' "
+            "    AND artifact.sha256 = staging.sha256) "
+            "  OR NOT EXISTS (SELECT 1 FROM assessment_submissions submission "
+            "    WHERE submission.capture_id = staging.capture_id "
+            "    AND submission.artifact_id = staging.artifact_id "
+            "    AND submission.run_id = staging.run_id "
+            "    AND submission.content_id = staging.content_id)) ORDER BY 1"
+        )
+    ]
+    if not unresolved:
+        checks.append(
+            _named(
+                "capture_stagings_resolved",
+                registered,
+                failed="a capture is recorded as registered, and its artifact or its "
+                "submission does not say so -- the three are written in one transaction, so "
+                "this is damage rather than a crash",
+                ok="every capture is registered with its artifact and submission, or refused",
+                field="captures",
+            )
+        )
+    elif registered:
+        checks.append(
+            _failed(
+                "capture_registrations_agree",
+                "a capture is recorded as registered, and its artifact or its submission does "
+                "not say so",
+                captures="; ".join(registered[:50]),
+            )
+        )
+    doubled = [
+        f"{run_id}/{content_id} ({count})"
+        for run_id, content_id, count in database.query(
+            "SELECT run_id, content_id, count(*) FROM assessment_submissions "
+            "WHERE status <> 'superseded' GROUP BY run_id, content_id HAVING count(*) > 1 "
+            "ORDER BY 1, 2"
+        )
+    ]
+    checks.append(
+        _named(
+            "one_live_submission_per_task",
+            doubled,
+            failed="a served task has more than one submission that is not superseded, so "
+            "which recording answers it cannot be said",
+            ok="every served task has at most one submission that is not superseded",
+            field="tasks",
+        )
+    )
+    unnamed = [
+        str(submission_id)
+        for (submission_id,) in database.query(
+            "SELECT submission.submission_id FROM assessment_submissions submission "
+            "WHERE submission.status = 'superseded' AND NOT EXISTS ("
+            "  SELECT 1 FROM assessment_submissions successor "
+            "  WHERE successor.submission_id = submission.superseded_by "
+            "  AND successor.run_id = submission.run_id "
+            "  AND successor.content_id = submission.content_id "
+            "  AND successor.submission_id <> submission.submission_id) ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "submission_supersession_named",
+            unnamed,
+            failed="a superseded submission does not name a successor answering the same task",
+            ok="every superseded submission names its successor for the same task",
+            field="submissions",
+        )
+    )
+    # From 0035 a submission may be a written answer, which names no recording: the rules
+    # about the artifact apply to recordings, and the rules about the task to both.
+    recording = "submission.kind = 'recording'" if submission_kinds else "TRUE"
+    disagreeing = [
+        f"{submission_id} ({reason})"
+        for submission_id, reason in database.query(
+            "SELECT submission.submission_id, CASE "
+            f"  WHEN {recording} AND artifact.artifact_id IS NULL THEN 'names no artifact' "
+            f"  WHEN {recording} AND artifact.track_id <> run.track_id "
+            "    THEN 'another track''s recording' "
+            f"  WHEN {recording} AND artifact.kind <> 'audio' THEN 'not audio' "
+            f"  WHEN {recording} AND submission.status = 'pending' "
+            "    AND (artifact.purged_at IS NOT NULL OR NOT artifact.retained) "
+            "    THEN 'pending on a recording that is gone' "
+            "  WHEN submission.status = 'pending' AND coalesce(task.status, '') <> 'served' "
+            "    THEN 'pending on a task that is not outstanding' "
+            "  WHEN submission.status = 'withdrawn' AND coalesce(task.status, '') = 'served' "
+            "    THEN 'withdrawn while its task is still outstanding' "
+            f"  WHEN {recording} AND submission.status = 'judged' AND NOT EXISTS (SELECT 1 FROM "
+            "    assessment_results result WHERE result.run_id = submission.run_id "
+            "    AND result.content_id = submission.content_id "
+            "    AND result.audio_artifact_id = submission.artifact_id) "
+            "    THEN 'judged with no result resting on it' "
+            "  END AS reason "
+            "FROM assessment_submissions submission "
+            "JOIN assessment_runs run ON run.run_id = submission.run_id "
+            "LEFT JOIN artifacts artifact ON artifact.artifact_id = submission.artifact_id "
+            "LEFT JOIN assessment_run_tasks task ON task.run_id = submission.run_id "
+            "  AND task.content_id = submission.content_id "
+            "WHERE reason IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "submission_artifacts_agree",
+            disagreeing,
+            failed="a submission and the recording or task it names disagree",
+            ok="every submission names its own track's recording, in a state its task agrees with",
+            field="submissions",
+        )
+    )
+    outlived = [
+        f"{result_id} ({reason})"
+        for result_id, reason in database.query(
+            "SELECT result.result_id, CASE "
+            "  WHEN artifact.artifact_id IS NULL THEN 'names no artifact' "
+            "  WHEN artifact.track_id <> run.track_id THEN 'another track''s recording' "
+            "  WHEN artifact.kind <> 'audio' THEN 'not audio' "
+            "  WHEN result.invalidated_at IS NULL AND (artifact.purged_at IS NOT NULL "
+            "    OR NOT artifact.retained) THEN 'standing on a recording that is gone' "
+            "  WHEN NOT EXISTS (SELECT 1 FROM assessment_submissions submission "
+            "    WHERE submission.run_id = result.run_id "
+            "    AND submission.content_id = result.content_id "
+            "    AND submission.artifact_id = result.audio_artifact_id "
+            "    AND submission.status = 'judged') THEN 'no judged submission binds it' "
+            "  END AS reason "
+            "FROM assessment_results result "
+            "JOIN assessment_runs run ON run.run_id = result.run_id "
+            "LEFT JOIN artifacts artifact ON artifact.artifact_id = result.audio_artifact_id "
+            "WHERE result.audio_artifact_id IS NOT NULL AND reason IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "results_rest_on_their_recording",
+            outlived,
+            failed="an assessment result outlived, or never had, the recording it rests on",
+            ok="every judged result rests on its own submitted recording, or is invalidated",
+            field="results",
+        )
+    )
+    half = [
+        str(result_id)
+        for (result_id,) in database.query(
+            "SELECT result_id FROM assessment_results "
+            "WHERE (invalidated_at IS NULL) <> (invalidated_reason IS NULL) "
+            "OR (invalidated_at IS NOT NULL AND audio_artifact_id IS NULL) "
+            "OR (invalidated_reason IS NOT NULL AND length(trim(invalidated_reason)) = 0) "
+            "ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "result_invalidation_complete",
+            half,
+            failed="a result is half invalidated -- a moment without a reason, a reason "
+            "without a moment, or invalidated with no recording to have lost",
+            ok="every invalidated result says when and why, and names the recording it lost",
+            field="results",
+        )
+    )
+    # Asked of the policy itself, never restated here: a second encoding of the rule in SQL
+    # is a second rule, and the first time the two disagree the check reports damage the
+    # service accepted, or passes what it refused.
+    unjudged: list[str] = []
+    for (
+        result_id,
+        conditions,
+        dimension,
+        modality,
+        kind,
+        assessor,
+        confidence,
+        version,
+    ) in database.query(
+        "SELECT result.result_id, run.conditions_json, result.dimension, task.modality, "
+        "result.assessor_kind, result.assessor, result.confidence, "
+        "result.judgement_policy_version FROM assessment_results result "
+        "JOIN assessment_runs run ON run.run_id = result.run_id "
+        "LEFT JOIN assessment_run_tasks task ON task.run_id = result.run_id "
+        "AND task.content_id = result.content_id "
+        "WHERE result.audio_artifact_id IS NOT NULL ORDER BY 1"
+    ):
+        try:
+            kinds = json.loads(str(conditions)).get("dimension_kinds") or {}
+        except (ValueError, AttributeError, RecursionError):
+            kinds = {}
+        dimension_kind = kinds.get(str(dimension)) if isinstance(kinds, dict) else None
+        if dimension_kind is None or modality is None:
+            unjudged.append(f"{result_id} (the run cannot say what kind of task it judged)")
+            continue
+        if str(kind) not in evidence_policy.JUDGING_ASSESSORS:
+            unjudged.append(f"{result_id} (judged from a recording by a {kind} assessor)")
+            continue
+        try:
+            expected = evidence_policy.assert_judged_claim(
+                dimension_kind=str(dimension_kind),
+                modality=str(modality),
+                assessor_kind=str(kind),
+                assessor=None if assessor is None else str(assessor),
+                confidence=str(confidence),
+            )
+        except LinguaWikiError as failure:
+            unjudged.append(f"{result_id} ({failure.payload.code})")
+            continue
+        if (None if version is None else str(version)) != expected:
+            unjudged.append(f"{result_id} (records policy {version}, the rule says {expected})")
+    checks.append(
+        _named(
+            "judged_claims_within_policy",
+            unjudged,
+            failed="a verdict on a recording claims more than its judge may, or does not say "
+            "which rule decided it",
+            ok="every verdict on a recording names its judge and stays within its ceiling",
+            field="results",
+        )
+    )
+    return checks
+
+
+#: The migration that introduced `assessment_results.observed_at`. A result recorded
+#: before it was applied never had the column; one recorded after it always does.
+OBSERVATION_TIME_MIGRATION = 35
+
+
+def _submission_lifecycle_checks(database: Database) -> list[CheckResult]:
+    """Migration 0035: a submission's kind, and the verdicts and outcomes that judge it.
+
+    Each rule a CHECK on the rebuilt table is re-asserted here, for a restore or a hand
+    repair that predates it, and the cross-table rules -- which no constraint can express,
+    because every relation naming a submission, a claim, a verdict, or a result is
+    unenforced -- are asserted over the data. Membership is established with `NOT EXISTS`
+    or a `LEFT JOIN` that reports the missing side, never an inner join that would pass a
+    row with no counterpart.
+    """
+
+    checks: list[CheckResult] = []
+    misshapen = [
+        f"{submission_id} ({reason})"
+        for submission_id, reason in database.query(
+            "SELECT submission_id, CASE "
+            "  WHEN kind IS NULL OR kind NOT IN ('recording', 'text') "
+            "    THEN 'kind ' || coalesce(kind, 'is missing') "
+            "  WHEN length(trim(coalesce(capture_id, ''))) = 0 THEN 'no producer identifier' "
+            # 0035 holds these in the one CHECK it also holds the kind rules in, so a
+            # restore that predates the table loses them together; they are re-asserted
+            # together.
+            "  WHEN (status = 'superseded') IS DISTINCT FROM (superseded_by IS NOT NULL) "
+            "    THEN 'superseded exactly when it names a successor, and it does not' "
+            "  WHEN (status = 'withdrawn') IS DISTINCT FROM "
+            "    (withdrawn_code IS NOT NULL AND withdrawn_reason IS NOT NULL) "
+            "    THEN 'withdrawn exactly when it gives a code and a reason, and it does not' "
+            "  WHEN kind = 'recording' AND artifact_id IS NULL THEN 'a recording with no artifact' "
+            "  WHEN kind = 'text' AND artifact_id IS NOT NULL THEN 'a written answer naming an "
+            "artifact' "
+            "  WHEN kind = 'recording' AND (response_visibility IS NOT NULL "
+            "    OR response_text IS NOT NULL OR response_digest IS NOT NULL) "
+            "    THEN 'a recording carrying text' "
+            "  WHEN kind = 'text' AND (response_visibility IS NULL OR response_digest IS NULL) "
+            "    THEN 'a written answer with no retained form' "
+            "  WHEN kind = 'text' AND response_text IS NULL AND status <> 'withdrawn' "
+            "    THEN 'a written answer whose text is gone while it still waits' "
+            "  WHEN response_visibility NOT IN ('withheld', 'excerpt', 'full') "
+            "    THEN 'response_visibility ' || response_visibility "
+            "  WHEN response_visibility = 'withheld' AND response_text IS NOT NULL "
+            "    THEN 'withheld, and keeps the text' "
+            "  WHEN response_text IS NOT NULL AND length(trim(response_text)) = 0 "
+            "    THEN 'blank text' "
+            "  WHEN response_digest IS NOT NULL AND length(response_digest) <> 64 "
+            "    THEN 'a digest that is not a sha256' "
+            "  END AS problem "
+            "FROM assessment_submissions WHERE problem IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "submission_kind_shape",
+            misshapen,
+            failed="a submission does not have the shape of its kind or its status: a "
+            "recording names its artifact and carries no text, a written answer carries its "
+            "retained text and none, and a superseded or withdrawn one says why",
+            ok="every submission has the shape of its kind and its status",
+            field="submissions",
+        )
+    )
+    doubled = [
+        f"{submission_id} ({count})"
+        for submission_id, count in database.query(
+            "SELECT verdict.submission_id, count(*) FROM assessment_verdict_outcomes outcome "
+            "JOIN assessment_verdicts verdict ON verdict.verdict_id = outcome.verdict_id "
+            "WHERE outcome.outcome = 'applied' GROUP BY verdict.submission_id "
+            "HAVING count(*) > 1 ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "one_applied_verdict_per_submission",
+            doubled,
+            failed="a submission has more than one applied verdict, so one observation was "
+            "credited more than once",
+            ok="every submission has at most one applied verdict",
+            field="submissions",
+        )
+    )
+    unmatched = [
+        f"{verdict_id} ({reason})"
+        for verdict_id, reason in database.query(
+            "SELECT outcome.verdict_id, CASE "
+            "  WHEN outcome.result_id IS NULL THEN 'applied to no result' "
+            "  WHEN result.result_id IS NULL THEN 'its result does not exist' "
+            "  WHEN submission.submission_id IS NULL THEN 'its verdict names no submission' "
+            "  WHEN result.run_id <> submission.run_id "
+            "    OR result.content_id <> submission.content_id "
+            "    THEN 'its result answers another task' "
+            "  WHEN submission.kind = 'recording' "
+            "    AND result.audio_artifact_id IS DISTINCT FROM submission.artifact_id "
+            "    THEN 'its result rests on another recording' "
+            # A written answer is read, not heard: a result judged from one that names a
+            # recording claims acoustic evidence nobody submitted, and a purge of that
+            # recording would invalidate a judgement of writing.
+            "  WHEN submission.kind = 'text' AND result.audio_artifact_id IS NOT NULL "
+            "    THEN 'a written answer''s result rests on a recording' "
+            # The converse of `judged_submissions_have_an_applied_verdict`: applying a
+            # verdict judges its submission in the same transaction, and `judged` is
+            # terminal -- nothing supersedes or withdraws a submission once judged -- so an
+            # applied verdict on one in any other state credits an answer still waiting.
+            # After the mismatches above, which name the more specific fault.
+            "  WHEN submission.status IS DISTINCT FROM 'judged' "
+            "    THEN 'its submission is ' || coalesce(submission.status, 'missing a status') "
+            "  WHEN (SELECT count(*) FROM assessment_verdict_outcomes other "
+            "    WHERE other.outcome = 'applied' AND other.result_id = outcome.result_id) > 1 "
+            "    THEN 'its result is claimed by another verdict too' "
+            "  END AS problem "
+            "FROM assessment_verdict_outcomes outcome "
+            "LEFT JOIN assessment_verdicts verdict ON verdict.verdict_id = outcome.verdict_id "
+            "LEFT JOIN assessment_submissions submission "
+            "  ON submission.submission_id = verdict.submission_id "
+            "LEFT JOIN assessment_results result ON result.result_id = outcome.result_id "
+            "WHERE outcome.outcome = 'applied' AND problem IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "applied_verdicts_name_their_result",
+            unmatched,
+            failed="an applied verdict names a result that is missing, or that answers "
+            "something other than its submission, or its submission is not judged",
+            ok="every applied verdict names its own judged submission's result",
+            field="verdicts",
+        )
+    )
+    # 0035's single-column CHECK on `requested_visibility`, re-asserted for a restore that
+    # predates it, and R10's rule that a written answer's verdict keeps none of its words:
+    # the row is insert-only, so a copy there is one no consent withdrawal can reach.
+    #
+    # R19 widens that to every kind: a verdict keeps a learner excerpt only while it is the
+    # excerpt's sole copy, which is a held recording verdict before resume. One applied in
+    # the transaction that received it keeps none -- its result holds the retained form.
+    # The insert-only row cannot drop an excerpt later, so a held verdict applied at resume,
+    # or voided, still has one, and is allowed it. What tells the two apart is `held`,
+    # written once when the verdict was stored without an outcome. It used to be inferred
+    # from `received_at < decided_at`, which a clock stepping backwards between hold and
+    # resume -- an NTP correction, a restore onto another machine -- turned into a failure
+    # on a perfectly kept workspace.
+    misshapen_verdicts = [
+        f"{verdict_id} ({reason})"
+        for verdict_id, reason in database.query(
+            "SELECT verdict.verdict_id, CASE "
+            "  WHEN verdict.requested_visibility IS NOT NULL "
+            "    AND verdict.requested_visibility NOT IN ('withheld', 'excerpt', 'full') "
+            "    THEN 'requested_visibility ' || verdict.requested_visibility "
+            "  WHEN submission.kind = 'text' AND (verdict.response_excerpt IS NOT NULL "
+            "    OR verdict.response_visibility IS DISTINCT FROM 'withheld') "
+            "    THEN 'a written answer''s verdict keeps some of its words' "
+            "  WHEN verdict.response_excerpt IS NOT NULL AND outcome.outcome = 'applied' "
+            "    AND NOT coalesce(verdict.held, false) "
+            "    THEN 'applied when it arrived, and keeps an excerpt its result already holds' "
+            "  END AS problem "
+            "FROM assessment_verdicts verdict "
+            "LEFT JOIN assessment_submissions submission "
+            "  ON submission.submission_id = verdict.submission_id "
+            "LEFT JOIN assessment_verdict_outcomes outcome "
+            "  ON outcome.verdict_id = verdict.verdict_id "
+            "WHERE problem IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "verdict_response_shape",
+            misshapen_verdicts,
+            failed="a verdict asks for a visibility outside the vocabulary, or keeps some of "
+            "the learner's words where it is not their only copy: a written answer's verdict "
+            "never may (the submission holds them), and a verdict applied when it arrived "
+            "never may (its result holds them); only a recording verdict that was held may",
+            ok="every verdict's request is known, and only a verdict that was held keeps the "
+            "learner's words",
+            field="verdicts",
+        )
+    )
+    # A held verdict waits for a paused run to resume. On a run in any other state it can
+    # never be applied, and nothing would ever say what became of it. A verdict with no
+    # outcome that was not stored as held is a broken apply: `write_verdict` writes an
+    # immediate verdict's outcome in the transaction that stores it.
+    stranded = [
+        f"{verdict_id} ({reason})"
+        for verdict_id, reason in database.query(
+            "SELECT verdict.verdict_id, CASE "
+            "  WHEN submission.submission_id IS NULL THEN 'names no submission' "
+            "  WHEN run.run_id IS NULL THEN 'its submission names no run' "
+            "  WHEN run.status <> 'paused' THEN 'held on a run that is ' || run.status "
+            "  WHEN NOT coalesce(verdict.held, false) "
+            "    THEN 'has no outcome, but was not stored as held' "
+            "  END AS problem "
+            "FROM assessment_verdicts verdict "
+            "LEFT JOIN assessment_submissions submission "
+            "  ON submission.submission_id = verdict.submission_id "
+            "LEFT JOIN assessment_runs run ON run.run_id = submission.run_id "
+            "WHERE NOT EXISTS (SELECT 1 FROM assessment_verdict_outcomes outcome "
+            "  WHERE outcome.verdict_id = verdict.verdict_id) "
+            "AND problem IS NOT NULL ORDER BY 1"
+        )
+    ]
+    checks.append(
+        _named(
+            "held_verdicts_on_paused_runs",
+            stranded,
+            failed="a verdict is held on a run that is not paused, so nothing will ever apply "
+            "or void it, or has no outcome although it was not stored as held",
+            ok="every held verdict waits on a paused run",
+            field="verdicts",
+        )
+    )
+    unaccounted = [
+        str(submission_id)
+        for (submission_id,) in database.query(
+            "SELECT submission.submission_id FROM assessment_submissions submission "
+            "WHERE submission.status = 'judged' AND NOT EXISTS ("
+            "  SELECT 1 FROM assessment_verdicts verdict "
+            "  JOIN assessment_verdict_outcomes outcome "
+            "    ON outcome.verdict_id = verdict.verdict_id "
+            "  WHERE verdict.submission_id = submission.submission_id "
+            "  AND outcome.outcome = 'applied') ORDER BY 1"
+        )
+    ]
+    # A submission whose every judging attempt ended without a verdict is withdrawn by the
+    # next writer that touches its run. Nothing runs in the background, so a workspace
+    # nobody has touched since says so here -- by the same question the writers ask, so
+    # the two cannot disagree about what "lapsed" means.
+    from linguawiki.services import judging
+
+    # A run that is finalized or abandoned holds no pending submission -- closing it
+    # withdraws them all -- so one there is reported once, by the check below, whose remedy
+    # works on a closed run. Every command named here refuses one.
+    open_runs = {
+        str(run_id)
+        for (run_id,) in database.query(
+            "SELECT run_id FROM assessment_runs WHERE status IN ('in-progress', 'paused')"
+        )
+    }
+    lapsed = [
+        f"{entry.submission_id} (run {entry.run_id}, {entry.attempts} attempt(s), none live)"
+        for entry in judging.lapsed_submissions(database, run_id=None)
+        if entry.run_id in open_runs
+    ]
+    checks.append(
+        _named(
+            "lapsed_judging_settled",
+            lapsed,
+            failed="a pending submission has used every judging attempt the policy allows and "
+            "none is still live, so nobody may claim it and it holds its dimension; the next "
+            "command that writes to its run -- serving a task, `assessment claim`, `record`, "
+            "`release`, pausing or resuming, or `finalize` -- withdraws it",
+            ok="no pending submission has run out of judging attempts unsettled",
+            field="submissions",
+        )
+    )
+    # Closing a run settles everything it still owes: abandoning withdraws every pending
+    # submission, and finalizing either refuses or withdraws them. One left pending on a
+    # closed run can never be judged -- every judging command refuses a closed run -- and
+    # nothing would ever say what became of it. A run closed before C6 could leave one.
+    stranded_rows = [
+        (str(submission_id), str(kind), str(run_id), str(status))
+        for submission_id, kind, run_id, status in database.query(
+            "SELECT submission.submission_id, submission.kind, submission.run_id, "
+            "coalesce(run.status, 'missing') FROM assessment_submissions submission "
+            "LEFT JOIN assessment_runs run ON run.run_id = submission.run_id "
+            "WHERE submission.status = 'pending' "
+            "AND (run.run_id IS NULL OR run.status NOT IN ('in-progress', 'paused')) "
+            "ORDER BY 1"
+        )
+    ]
+    stranded_pending = [
+        f"{submission_id} ({kind} on run {run_id}, which is {status})"
+        for submission_id, kind, run_id, status in stranded_rows
+    ]
+    # A remedy per kind, and only for the kinds present: `artifact purge` reaches a
+    # recording and nothing else, and naming it for a written answer would send an operator
+    # to a command that cannot help. A written answer is withdrawn -- its text cleared --
+    # by withdrawing transcript retention consent on its track, which settles every
+    # pending written answer the track has, whatever its run's state.
+    stranded_kinds = {kind for _, kind, _, _ in stranded_rows}
+    remedies = []
+    if "recording" in stranded_kinds:
+        remedies.append("`artifact purge` of its recording withdraws a recorded one")
+    if "text" in stranded_kinds:
+        remedies.append(
+            "setting transcript_retention_consent to false on its track (`track update "
+            "--input`) withdraws a written one and clears its text"
+        )
+    checks.append(
+        _named(
+            "no_pending_submission_on_a_closed_run",
+            stranded_pending,
+            failed="a submission still waits for a judge on a run that is closed, so no "
+            "verdict can ever land on it; "
+            + ("; ".join(remedies) or "nothing in this release withdraws it")
+            + ", with its reason on the row",
+            ok="no submission waits for a judge on a closed run",
+            field="submissions",
+        )
+    )
+    checks.append(
+        _named(
+            "judged_submissions_have_an_applied_verdict",
+            unaccounted,
+            failed="a submission is judged and no applied verdict says by whom or with what",
+            ok="every judged submission has the applied verdict that judged it",
+            field="submissions",
+        )
+    )
+    # A batch's membership is what a retry of its key is answered with, and each member is
+    # reported in its run task's current state. The foreign key reaches the *bank* row, not
+    # the run's record of serving it, so a member its own run never served -- a restore, a
+    # hand repair -- would be answered with no state at all. Membership is established with
+    # a LEFT JOIN, so a member with no counterpart is a finding rather than a row to skip.
+    unserved_members = [
+        f"{batch_id} position {position} ({content_id} in {dimension})"
+        for batch_id, position, content_id, dimension in database.query(
+            "SELECT member.batch_id, member.position, member.content_id, member.dimension "
+            "FROM assessment_batch_tasks member "
+            "LEFT JOIN assessment_batches batch ON batch.batch_id = member.batch_id "
+            "LEFT JOIN assessment_run_tasks served ON served.run_id = batch.run_id "
+            "  AND served.content_id = member.content_id "
+            "  AND served.dimension = member.dimension "
+            "WHERE served.content_id IS NULL ORDER BY 1, 2"
+        )
+    ]
+    checks.append(
+        _named(
+            "batch_members_were_served_by_their_run",
+            unserved_members,
+            failed="a batch names a task its run has no record of serving in that dimension, "
+            "so a retry of the batch's key cannot say where the task stands; serve with a new "
+            "key, and restore the run's tasks from a backup if they were lost",
+            ok="every batch member is a task its run served, in the dimension it names",
+            field="batches",
+        )
+    )
+    # When the learner answered. The rule, by what a result is:
+    #
+    # - bound to a submission (an applied verdict names it): the submission's `created_at`,
+    #   however long the verdict took to arrive;
+    # - any other result: its own `recorded_at`, because answering and scoring were one act;
+    # - NULL only on a result older than migration 0035, which is a result recorded at or
+    #   before the moment 0035 was applied. `schema_migrations.applied_at` is that moment,
+    #   and it survives an export and a restore with the rows it dates.
+    #
+    # NULL is an answer here and never a row to skip: a result written after 0035 with no
+    # observation time is precisely the one every reader of the column would misdate.
+    misdated = [
+        f"{result_id} ({reason})"
+        for result_id, reason in database.query(
+            "SELECT DISTINCT result.result_id, CASE "
+            "  WHEN result.observed_at IS NULL AND (migrated.applied_at IS NULL "
+            "    OR result.recorded_at > migrated.applied_at) "
+            "    THEN 'recorded after migration 0035 with no observation time' "
+            "  WHEN result.observed_at IS NULL THEN NULL "
+            "  WHEN bound.created_at IS NOT NULL AND result.observed_at <> bound.created_at "
+            "    THEN 'observed_at is not when its submission was made' "
+            "  WHEN bound.created_at IS NULL AND result.observed_at <> result.recorded_at "
+            "    THEN 'observed_at is not when it was recorded' "
+            "  END AS problem "
+            "FROM assessment_results result "
+            "LEFT JOIN (SELECT applied_at FROM schema_migrations WHERE version = ?) migrated "
+            "  ON TRUE "
+            "LEFT JOIN (SELECT outcome.result_id, submission.created_at "
+            "  FROM assessment_verdict_outcomes outcome "
+            "  JOIN assessment_verdicts verdict ON verdict.verdict_id = outcome.verdict_id "
+            "  JOIN assessment_submissions submission "
+            "    ON submission.submission_id = verdict.submission_id "
+            "  WHERE outcome.outcome = 'applied') bound ON bound.result_id = result.result_id "
+            "WHERE problem IS NOT NULL ORDER BY 1",
+            [OBSERVATION_TIME_MIGRATION],
+        )
+    ]
+    checks.append(
+        _named(
+            "result_observation_times",
+            misdated,
+            failed="a result's observation time is missing or is not when the learner answered",
+            ok="every result since migration 0035 says when the learner answered",
+            field="results",
+        )
+    )
     return checks
 
 
@@ -2591,21 +3299,28 @@ def _orphan_checks(database: Database, *, schema: SchemaSpecification) -> list[C
         # database still behind that migration does not have.
         return any(name == column for name, _ in schema.get(table, ()))
 
-    relations = [
-        relation
+    relations: list[tuple[str, str, str, str, tuple[str, str] | None]] = [
+        (*relation, None)
         for relation in ORPHAN_RELATIONS
         if present(relation[0], relation[1]) and present(relation[2], relation[3])
     ]
-    for table, column, parent, parent_column in relations:
+    relations.extend(
+        (table, column, parent, parent_column, (scope, value) if present(table, scope) else None)
+        for table, column, parent, parent_column, scope, value in SCOPED_ORPHAN_RELATIONS
+        if present(table, column) and present(parent, parent_column)
+    )
+    for table, column, parent, parent_column, scoped in relations:
         child_table = quote_identifier(table)
         parent_table = quote_identifier(parent)
         child_column = f"child.{quote_identifier(column)}"
         parent_key = f"parent.{quote_identifier(parent_column)}"
+        within = "" if scoped is None else f" AND child.{quote_identifier(scoped[0])} = ?"
         count = int(
             database.scalar(
                 f"SELECT count(*) FROM {child_table} child "
                 f"LEFT JOIN {parent_table} parent ON {child_column} = {parent_key} "
-                f"WHERE {child_column} IS NOT NULL AND {parent_key} IS NULL"
+                f"WHERE {child_column} IS NOT NULL AND {parent_key} IS NULL{within}",
+                [] if scoped is None else [scoped[1]],
             )
         )
         if count:
@@ -2740,6 +3455,34 @@ CHECK_REQUIREMENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("sources", "source_units", "track_source_progress", "comprehension_observations"),
     ),
     ("artifacts", ("artifacts", "pronunciation_observations", "utterances")),
+    ("pack_assets", ("pack_assets", "pack_files")),
+    (
+        "recorded_judgement",
+        (
+            "capture_stagings",
+            "assessment_submissions",
+            "assessment_results",
+            "assessment_run_tasks",
+            "artifacts",
+        ),
+    ),
+    (
+        "submission_lifecycle",
+        (
+            "assessment_submissions",
+            "judging_claims",
+            "judging_releases",
+            "assessment_verdicts",
+            "assessment_verdict_outcomes",
+            "assessment_results",
+            "assessment_runs",
+            "schema_migrations",
+            # The batch check joins all three, and the lapse check reads the run's tasks.
+            "assessment_batches",
+            "assessment_batch_tasks",
+            "assessment_run_tasks",
+        ),
+    ),
     (
         "transcripts",
         (
@@ -2882,6 +3625,20 @@ def check_database(
                     ),
                 )
             )
+        if available["pack_assets"]:
+            checks.extend(_pack_asset_checks(database))
+        if available["recorded_judgement"]:
+            checks.extend(
+                _recorded_judgement_checks(
+                    database,
+                    submission_kinds=any(
+                        name == "kind"
+                        for name, _ in expected_schema(applied).get("assessment_submissions", ())
+                    ),
+                )
+            )
+        if available["submission_lifecycle"]:
+            checks.extend(_submission_lifecycle_checks(database))
         if available["error_model"]:
             checks.extend(_error_model_checks(database))
         if available["estimates"] and any(

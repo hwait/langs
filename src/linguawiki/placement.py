@@ -618,13 +618,47 @@ def unavailable_reason(
 #: what the learner's equipment allows; scoring is what the server can decide without a
 #: judge. `any` serves whatever the bank holds and leaves judged work to a judge; `machine`
 #: serves only what `score_response` can decide, so a surface with no judge never puts a
-#: question in front of a learner that nobody can mark.
-SCORING_CONDITIONS: tuple[str, ...] = ("any", "machine")
+#: question in front of a learner that nobody can mark. `machine+recorded` adds the spoken
+#: tasks a judge can mark from a recording the learner makes -- and only where the track
+#: lets that recording be made and kept, because a judge needs it to still exist.
+#: `machine+judged` is everything `machine+recorded` serves, plus the written tasks a judge
+#: marks from the learner's typed answer -- and only where the track lets that answer be
+#: kept whole. It is a separate name rather than a widening of `machine+recorded`: a run
+#: already opened under that name keeps meaning what it meant when it was opened.
+SCORING_CONDITIONS: tuple[str, ...] = ("any", "machine", "machine+recorded", "machine+judged")
 DEFAULT_SCORING = "any"
+MACHINE_SCORING = "machine"
+RECORDED_SCORING = "machine+recorded"
+JUDGED_SCORING = "machine+judged"
+#: The conditions that serve a spoken task to be recorded for a judge.
+RECORDING_SCORINGS: frozenset[str] = frozenset({RECORDED_SCORING, JUDGED_SCORING})
+#: The task types a judge can score from the learner's own recording. All three are
+#: rubric-scored, and all three are about speech when they are spoken.
+RECORDED_JUDGED_TASK_TYPES: tuple[str, ...] = (
+    "pronunciation-target",
+    "connected-speech",
+    "extended-productive",
+)
+#: The modality whose tasks are answered by speaking.
+SPOKEN_MODALITY = "speech"
+#: The task types a judge can score from the learner's typed answer, and the modality they
+#: are typed in. Rubric-scored, like the recorded ones, and read rather than heard.
+WRITTEN_JUDGED_TASK_TYPES: tuple[str, ...] = ("extended-productive",)
+WRITTEN_MODALITY = "writing"
 #: Why a machine run closes a dimension. Kept as named values because they are reported to
 #: the learner as the reason a dimension is `not-tested`, and a client may act on them.
 NO_MACHINE_SCORABLE_TASK = "no machine-scorable task"
 LISTENING_UNRECORDED = "its listening tasks ship no recording"
+RECORDING_NOT_PERMITTED = (
+    "its spoken tasks need a recording, and this track has not both said it can record "
+    "audio and agreed to the recording being kept"
+)
+WRITING_NOT_RETAINED = (
+    "its written tasks are judged from the whole answer, and this track has not agreed to "
+    "a written answer being kept in full -- by default only a short excerpt is kept, and "
+    "long writing judged from a fragment would be judged on something the learner did not "
+    "write"
+)
 #: The modality whose tasks are heard. A task in it with no recording to play is not
 #: servable to a machine run: drawing its prompt instead would turn a listening task into
 #: a reading one and credit the result to the wrong dimension.
@@ -640,37 +674,118 @@ def assert_scoring_condition(scoring: str) -> None:
         )
 
 
-def servable_candidate(candidate: Candidate, *, scoring: str, recorded: frozenset[str]) -> bool:
-    """Whether a run opened under `scoring` may serve this candidate at all."""
+def recording_permitted(preferences: Mapping[str, object]) -> bool:
+    """Whether a track lets a learner's own recording be made *and kept* for a judge.
 
-    if scoring == "any":
+    Two facts under two keys, and neither is the other. `audio_recording_available` is
+    equipment: the learner can record. `audio_retention_consent` is consent: the recording
+    may be kept. Both are needed, because registration deletes a recording the track has
+    not agreed to keep at the door, and a judge needs it to still exist. The modality list
+    adds `speech` from equipment alone, which answers a different question; this is the
+    one that gates capture.
+    """
+
+    return (
+        preferences.get("audio_recording_available") is True
+        and preferences.get("audio_retention_consent") is True
+    )
+
+
+def written_judging_permitted(preferences: Mapping[str, object]) -> bool:
+    """Whether a track lets a judge read the learner's *whole* typed answer -- the one
+    predicate for serving, submitting, and judging a written task under `machine+judged`.
+
+    `evidence.retain_response` keeps an answer `full` only on an explicit `True` for
+    `transcript_retention_consent`; an unset preference keeps an excerpt of
+    `EXCERPT_LIMIT` characters, and `False` keeps none. So "consent is `True`" and
+    "retention would keep the full text" are one condition, and this is it: an answer kept
+    as an excerpt would have its writing judged on a fragment. A test holds the two to
+    each other, so a change to the retention rule cannot leave this one behind.
+    """
+
+    return preferences.get("transcript_retention_consent") is True
+
+
+def judged_written_task(*, modality: str, task_type: str) -> bool:
+    """Whether a task is answered in writing and scored by a judge from that writing."""
+
+    return modality == WRITTEN_MODALITY and task_type in WRITTEN_JUDGED_TASK_TYPES
+
+
+def judged_spoken_task(*, modality: str, task_type: str) -> bool:
+    """Whether a task is answered by speaking and scored by a judge from the recording."""
+
+    return modality == SPOKEN_MODALITY and task_type in RECORDED_JUDGED_TASK_TYPES
+
+
+def servable_candidate(
+    candidate: Candidate,
+    *,
+    scoring: str,
+    recorded: frozenset[str],
+    recording: bool = False,
+    writing: bool = False,
+) -> bool:
+    """Whether a run opened under `scoring` may serve this candidate at all.
+
+    `recording` says whether the track satisfies `recording_permitted`, and `writing`
+    whether it satisfies `written_judging_permitted`. Each is read only under a condition
+    that serves the tasks it is about, and at serve time: consent withdrawn after a run
+    opened stops the next such task from being served.
+    """
+
+    if scoring == DEFAULT_SCORING:
         return True
-    if candidate.task_type not in MACHINE_SCORABLE_TASK_TYPES:
-        return False
-    return candidate.modality != PLAYED_MODALITY or candidate.content_id in recorded
+    if candidate.task_type in MACHINE_SCORABLE_TASK_TYPES:
+        return candidate.modality != PLAYED_MODALITY or candidate.content_id in recorded
+    if judged_spoken_task(modality=candidate.modality, task_type=candidate.task_type):
+        return scoring in RECORDING_SCORINGS and recording
+    if judged_written_task(modality=candidate.modality, task_type=candidate.task_type):
+        return scoring == JUDGED_SCORING and writing
+    return False
 
 
 def servable_under(
-    candidates: Sequence[Candidate], *, scoring: str, recorded: frozenset[str]
+    candidates: Sequence[Candidate],
+    *,
+    scoring: str,
+    recorded: frozenset[str],
+    recording: bool = False,
+    writing: bool = False,
 ) -> tuple[tuple[Candidate, ...], str | None]:
     """The candidates a run's scoring condition allows, and why none are left if none are.
 
     `recorded` names the tasks whose presentation declares a recording to play. Under
     `machine`, a task is servable only if its type is machine-scorable and, when it is
-    heard, it has something to be heard. The reason names the filter that emptied the list,
-    so a `not-tested` dimension says which of the two it was.
+    heard, it has something to be heard. `machine+recorded` also serves a spoken task a
+    judge can score from a recording, where the track permits one; `machine+judged` adds a
+    written task a judge can score from the whole answer, where the track keeps it whole.
+    The reason names the filter that emptied the list, so a `not-tested` dimension says
+    which it was.
     """
 
     assert_scoring_condition(scoring)
     allowed = tuple(
         candidate
         for candidate in candidates
-        if servable_candidate(candidate, scoring=scoring, recorded=recorded)
+        if servable_candidate(
+            candidate, scoring=scoring, recorded=recorded, recording=recording, writing=writing
+        )
     )
     if allowed or not candidates:
         return allowed, None
     if any(candidate.task_type in MACHINE_SCORABLE_TASK_TYPES for candidate in candidates):
         return (), LISTENING_UNRECORDED
+    if scoring in RECORDING_SCORINGS and any(
+        judged_spoken_task(modality=candidate.modality, task_type=candidate.task_type)
+        for candidate in candidates
+    ):
+        return (), RECORDING_NOT_PERMITTED
+    if scoring == JUDGED_SCORING and any(
+        judged_written_task(modality=candidate.modality, task_type=candidate.task_type)
+        for candidate in candidates
+    ):
+        return (), WRITING_NOT_RETAINED
     return (), NO_MACHINE_SCORABLE_TASK
 
 
@@ -679,17 +794,27 @@ __all__ = [
     "BUDGETS",
     "CONNECTED_SPEECH_BUDGET",
     "DEFAULT_SCORING",
+    "JUDGED_SCORING",
     "LISTENING_UNRECORDED",
     "MACHINE_SCORABLE_TASK_TYPES",
+    "MACHINE_SCORING",
     "MINIMUM_FAMILIES",
     "NO_MACHINE_SCORABLE_TASK",
     "PLAYED_MODALITY",
     "PRECISION_MASS",
     "PRECISION_WIDTH",
+    "RECORDED_JUDGED_TASK_TYPES",
+    "RECORDED_SCORING",
+    "RECORDING_NOT_PERMITTED",
+    "RECORDING_SCORINGS",
     "REUSE_WINDOW_MONTHS",
     "SCORING_CONDITIONS",
     "SCORING_POLICY_VERSION",
+    "SPOKEN_MODALITY",
     "TASK_TYPES",
+    "WRITING_NOT_RETAINED",
+    "WRITTEN_JUDGED_TASK_TYPES",
+    "WRITTEN_MODALITY",
     "Candidate",
     "DimensionState",
     "Selection",
@@ -705,10 +830,13 @@ __all__ = [
     "estimated_level",
     "expected_posterior_entropy",
     "initial_state",
+    "judged_spoken_task",
+    "judged_written_task",
     "posterior_mean",
     "posterior_median",
     "posterior_sd",
     "record_score",
+    "recording_permitted",
     "score_response",
     "scoring_form",
     "select_task",
@@ -718,4 +846,5 @@ __all__ = [
     "success_probability",
     "unavailable_reason",
     "update_posterior",
+    "written_judging_permitted",
 ]

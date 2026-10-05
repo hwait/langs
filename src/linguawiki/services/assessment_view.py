@@ -21,15 +21,27 @@ from linguawiki.contracts import ServedAsset, TaskPresentation
 from linguawiki.db.connection import Database, open_reader
 from linguawiki.models import ContractModel
 from linguawiki.paths import WorkspacePaths
-from linguawiki.placement import DEFAULT_SCORING, MACHINE_SCORABLE_TASK_TYPES, PLAYED_MODALITY
+from linguawiki.placement import (
+    DEFAULT_SCORING,
+    MACHINE_SCORABLE_TASK_TYPES,
+    PLAYED_MODALITY,
+    RECORDED_JUDGED_TASK_TYPES,
+    SPOKEN_MODALITY,
+)
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import learners as learner_service
+from linguawiki.services import recordings as recording_service
+from linguawiki.services.learners import RecordingPolicy
+from linguawiki.services.recordings import SubmissionReport
 
 #: How an outstanding task is answered. Derived from the served presentation rather than
 #: from the task type: `objective` and `short-response` are both machine-scorable, and
 #: whether the learner presses a button or types is a question about rendering. A client
 #: that read the task type would draw a field for a task that shipped choices.
-AnswerMode = Literal["choice", "text"]
+AnswerMode = Literal["choice", "text", "recording"]
+#: Where an outstanding task stands. `awaiting-judge` is an answer that has been submitted
+#: -- a recording, or a written answer (`submission.kind`) -- and that nobody has marked yet.
+TaskState = Literal["awaiting-answer", "awaiting-judge"]
 
 
 class OutstandingTask(ContractModel):
@@ -75,6 +87,12 @@ class OutstandingTask(ContractModel):
     #: show the same number -- nothing about plays lives only in a page.
     plays_used: int = 0
     plays_remaining: int | None = None
+    #: `awaiting-judge` once an answer has been submitted for it, recorded or written.
+    state: TaskState = "awaiting-answer"
+    #: The live submission answering this task: its `kind`, and the recording's artifact
+    #: ID or a written answer's digest. Never a written answer's text -- the page sent it,
+    #: and the read model does not carry a learner's words.
+    submission: SubmissionReport | None = None
 
 
 class RunScreen(ContractModel):
@@ -91,20 +109,39 @@ class RunScreen(ContractModel):
     framework_id: str
     framework_levels: tuple[str, ...] = ()
     available_modalities: tuple[str, ...] = ()
-    #: `any` or `machine`, as the run was opened. Under `any` an outstanding task can need a
-    #: judge, which a client without one must not offer to answer.
+    #: The scoring condition the run was opened under (`placement.SCORING_CONDITIONS`).
+    #: Under `any` an outstanding task can need a judge, which a client without one must not
+    #: offer to answer; under `machine+recorded` and `machine+judged` the judged tasks it
+    #: serves are answered by a recording or a written submission, and wait for the judge.
     scoring: str = DEFAULT_SCORING
     dimensions: tuple[assessment_service.DimensionReport, ...] = ()
     #: At most one per *open* dimension, after the serve-time guard, and possibly one more
     #: per dimension that closed while holding a task -- which `record` still accepts, so a
     #: screen that hid it would leave answerable work with no surface that mentions it.
     outstanding: tuple[OutstandingTask, ...] = ()
+    #: What is left in the run: `working`, `waiting`, `complete`, or `closed`
+    #: (`assessment.RunProgress`). `waiting` is every remaining dimension blocked on a
+    #: judgement; `complete` is nothing left, so finalizing is what remains. A client reads
+    #: this rather than inferring "finished" from a batch that served nothing.
+    progress: assessment_service.RunProgress = "working"
+    #: Every answer waiting on a judgement and what it waits on: unclaimed since a time,
+    #: claimed by a judge until a time, or held until the run resumes. The list a page
+    #: polls and compares: claim changes are in-place updates, so there is nothing to count.
+    #: Named apart from `outstanding`, which has always meant the *tasks* outstanding, and
+    #: which a page already reads. No learner text, ever.
+    outstanding_judgements: tuple[assessment_service.OutstandingJudgement, ...] = ()
     tasks_served: int = 0
     tasks_recorded: int = 0
+    results_invalidated: int = 0
+    #: Whether this track lets the learner record a spoken answer, and the retention policy
+    #: the recording will be kept under -- reported so the page can say it, never chosen.
+    recording: RecordingPolicy | None = None
     warnings: tuple[str, ...] = ()
 
 
-def _answer_mode(shown: TaskPresentation | None) -> AnswerMode:
+def _answer_mode(shown: TaskPresentation | None, *, modality: str, task_type: str) -> AnswerMode:
+    if modality == SPOKEN_MODALITY and task_type in RECORDED_JUDGED_TASK_TYPES:
+        return "recording"
     return "choice" if shown is not None and shown.choices else "text"
 
 
@@ -116,6 +153,7 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
     for content_id in assessment_service.outstanding_task_ids(database, run_id):
         shown = assessment_service.served_task_report(database, run_id, content_id=content_id)
         audio = None if shown.presentation is None else shown.presentation.audio
+        submitted = recording_service.live_submission(database, run_id, content_id)
         used = (
             0
             if audio is None
@@ -143,7 +181,9 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
                 rubric=shown.rubric,
                 rubric_version=shown.rubric_version,
                 permitted_help=shown.permitted_help,
-                answer_with=_answer_mode(shown.presentation),
+                answer_with=_answer_mode(
+                    shown.presentation, modality=shown.modality, task_type=shown.task_type
+                ),
                 plays_audio=audio is not None,
                 plays_used=used,
                 plays_remaining=(
@@ -153,6 +193,8 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
                 ),
                 needs_judge=shown.task_type not in MACHINE_SCORABLE_TASK_TYPES,
                 missing_recording=shown.modality == PLAYED_MODALITY and audio is None,
+                state="awaiting-judge" if submitted is not None else "awaiting-answer",
+                submission=submitted,
             )
         )
     # No bound and no `omissions`, and this is the place to say why: the guard in the serve
@@ -174,8 +216,12 @@ def run_screen_report(database: Database, run_id: str) -> RunScreen:
         scoring=run.scoring,
         dimensions=run.dimensions,
         outstanding=tuple(outstanding),
+        progress=run.progress,
+        outstanding_judgements=run.outstanding_judgements,
         tasks_served=run.tasks_served,
         tasks_recorded=run.tasks_recorded,
+        results_invalidated=run.results_invalidated,
+        recording=learner_service.track_recording_policy(database, run.track_id),
         warnings=run.warnings,
     )
 
@@ -196,4 +242,11 @@ def run_screen(
         )
 
 
-__all__ = ["AnswerMode", "OutstandingTask", "RunScreen", "run_screen", "run_screen_report"]
+__all__ = [
+    "AnswerMode",
+    "OutstandingTask",
+    "RunScreen",
+    "TaskState",
+    "run_screen",
+    "run_screen_report",
+]

@@ -27,6 +27,7 @@ from playwright import sync_api as playwright_api
 
 from linguawiki.client import server as server_module
 from linguawiki.db.connection import open_reader
+from linguawiki.services import learners as learner_service
 from tests.conftest import PolishWorkspace
 from tests.support.recordings import publish_pilot_with_recordings
 
@@ -76,6 +77,14 @@ class Served:
 @pytest.fixture
 def recorded(polish_workspace: PolishWorkspace, tmp_path: Path) -> PolishWorkspace:
     publish_pilot_with_recordings(polish_workspace, tmp_path, replay_allowance=2)
+    # A track that keeps no written answer whole, and records nothing: the page opens these
+    # runs `machine`, scored by the server alone. Where a judge can mark the learner's
+    # writing it opens `machine+judged` instead (`test_client_judging_browser.py`).
+    learner_service.update_track(
+        polish_workspace.paths,
+        preferences=learner_service.TrackPreferences(transcript_retention_consent=False),
+        clock=polish_workspace.clock,
+    )
     return polish_workspace
 
 

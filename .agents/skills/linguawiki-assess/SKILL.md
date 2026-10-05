@@ -12,16 +12,29 @@ estimate yourself or to round a range into a level.
 
 ```bash
 linguawiki assessment start    --workspace <path> [--run-type pilot-calibration|placement] \
-  [--dimension <name> ...] [--modality <name> ...] [--idempotency-key <key>] --format json
-linguawiki assessment next     --workspace <path> [--run <id>] --format json
-linguawiki assessment record   --workspace <path> --content <id> \
+  [--dimension <name> ...] [--modality <name> ...] \
+  [--scoring any|machine|machine+recorded|machine+judged] [--idempotency-key <key>] --format json
+linguawiki assessment next     --workspace <path> [--run <id>] \
+  [--batch --idempotency-key <key>] --format json
+linguawiki assessment submit   --workspace <path> [--run <id>] --content-id <id> \
+  --submission-key <key> (--response "<answer>" | --response-file <path>) --format json
+linguawiki assessment record   --workspace <path> --content-id <id> \
   [--response "<what the learner answered>" | --response-file <path>] [--score <0..1>] \
-  [--response-visibility withheld|excerpt|full] [--input rubric.json] \
+  [--response-visibility withheld|excerpt|full] [--rubric rubric.json] \
+  [--audio-artifact <artifact-id>] [--submission <id> --claim <id>] \
   [--assessor-kind deterministic|ai|learner|human] [--assessor <who>] \
-  [--confidence low|medium|high] --format json
+  [--confidence low|medium|high] [--idempotency-key <key>] --format json
+linguawiki assessment pending  --workspace <path> [--run <id>] --format json
+linguawiki assessment claim    --workspace <path> [--run <id>] --judge <your name> \
+  [--lease <seconds, default 600>] [--limit <n>] --format json
+linguawiki assessment release  --workspace <path> --claim <id> --reason <why> \
+  [--terminal --code <code>] --format json
 linguawiki assessment pause    --workspace <path> [--run <id>] --format json
 linguawiki assessment resume   --workspace <path> [--run <id>] --format json
-linguawiki assessment finalize --workspace <path> [--run <id>] [--reason <why>] --format json
+linguawiki assessment finalize --workspace <path> [--run <id>] [--reason <why>] \
+  [--exclude-outstanding] [--idempotency-key <key>] --format json
+linguawiki assessment abandon  --workspace <path> [--run <id>] --format json
+linguawiki assessment screen   --workspace <path> [--run <id>] --format json
 linguawiki assessment report   --workspace <path> [--run <id>] --format json
 ```
 
@@ -31,8 +44,21 @@ linguawiki assessment report   --workspace <path> [--run <id>] --format json
    dimension the pack or the learner's equipment cannot serve is closed as `not-tested`
    immediately, with the reason.
 2. `next` serves one task and says why it chose it: `informativeness`, `content-family
-   diversity`, or `boundary probe`. When no dimension is still open it returns the run report
-   instead of a task — that is the signal to finalize.
+   diversity`, or `boundary probe`. When it has no task to serve it returns the **run
+   report** instead -- and a report is *not* by itself the signal to finalize. Read the
+   report's `progress`:
+   - `complete` -- nothing is left and no judgement is owed: `finalize`.
+   - `waiting` -- every remaining dimension is blocked on a judgement. The report lists
+     them as `outstanding_judgements` (`unclaimed since`, `claimed by <judge> until`, or
+     `held until the run resumes`). Either judge them yourself (see "Judging: claim,
+     judge, record" below) or stop and tell the learner what the run is waiting on.
+     Never finalize a waiting run to make the wait go away; if the learner wants to
+     finish without them, that is `--exclude-outstanding` (below), their decision.
+   - `working` -- a dimension is open or a task is still in hand; serve or record.
+   - `closed` -- the run is finalized or abandoned.
+
+   Each dimension carries its own `progress` too (`open`, `waiting`, `closed`), beside its
+   `status`; `status` is unchanged.
 3. Present the task exactly as `prompt` gives it. Respect `permitted_help`. Do not rephrase an
    objective item, add examples, or hint.
 4. `record` scores the served task: the learner's answer for a machine-scorable one, your
@@ -41,6 +67,100 @@ linguawiki assessment report   --workspace <path> [--run <id>] --format json
 
 `next` and `record` are the only way tasks enter a run: recording a task that was not served
 is refused, and re-recording an answered task is an idempotent no-op, so a retry is safe.
+
+`next --batch --idempotency-key <key>` serves one task per open dimension in a single call.
+Within a dimension it is still strictly sequential, and a batch serves what one-at-a-time
+serving would. It reports `outstanding` (dimensions that already hold a task) and
+`exhausted` (nothing left in the bank). Retry a lost response with the **same key**: it
+returns the same tasks with their current state and serves nothing new.
+
+**Relay the warnings.** Every writer (`next`, `pause`/`resume`, `finalize`, `record`,
+`claim`, `release`, `submit`) first settles any judgement whose attempts have run out, in its
+own transaction, and says what it withdrew in the report's `warnings` -- or in the refusal's
+details if it then refuses. That is a learner's observation lost to a judge's failure; pass
+it on rather than letting it go by.
+
+## Judging: claim, judge, record
+
+Some tasks are not scored by the CLI: a spoken answer recorded in the browser (where the
+track both can record and agreed to the recording being kept), and a written answer on a
+`machine+judged` run (where the track keeps written answers whole). The page hands them in;
+nothing scores them until a judge does. You may be that judge. Core never judges, and you
+hold no database connection while you do.
+
+1. `assessment claim --run <id> --judge <your name>` hands you the answers waiting for a
+   judge, each under a lease (600 seconds unless you ask with `--lease`; `--limit` takes
+   fewer). Each entry is what `pending` lists -- the served task as it was served (`prompt`,
+   `rubric`, `dimension`), the submission and its `kind` -- plus its `claim_id`:
+   - a **recording** has `audio_path`, the path inside the workspace, already checked to be
+     the bytes the learner submitted. **Read the audio only through that path.** Never guess
+     one from a directory listing.
+   - a **written answer** has `response_text`, the learner's words. Judge from it, and do
+     not copy it anywhere else: not into a file, a note, a rubric field, or the
+     conversation beyond what the judgement needs. The verdict row stores no text of its own.
+   The command returns before you judge. Entries the CLI could not hand out are listed under
+   `withdrawn` (with why) and `waiting`.
+2. Judge it against the snapshotted rubric.
+3. `assessment record --content-id <id> --submission <submission_id> --claim <claim_id>
+   --idempotency-key <claim_id> --score <0..1> --rubric <file> --assessor-kind ai
+   --assessor <your name> --confidence low|medium`. The claim ID is the key, so a retry
+   after a lost response replays rather than scoring twice. Pass no `--response` for a
+   written answer: the CLI reads it from the submission. To keep less of it than the track
+   allows, say so with `--response-visibility withheld|excerpt`. An `ai` verdict on
+   pronunciation or spoken production **must name its assessor and may not claim more than
+   `medium`**: `assessor_required` and `assessor_confidence_ceiling` refuse it.
+4. If you cannot judge it now (you crashed, timed out, the tool failed), give it back:
+   `assessment release --claim <id> --reason <why>`. If it can never be judged (the
+   recording is silence, or not the task), `--terminal --code <code> --reason <why>`
+   withdraws it and skips its task. Pick a code of your own, such as
+   `assessment_audio_unintelligible` or `assessment_response_off_task`; the codes the system
+   uses for its own withdrawals are refused (`assessment_release_code_reserved`). Doing
+   nothing is the same as a non-terminal release once the lease runs out. A verdict after
+   the lease ran out still lands if nothing else happened to the submission.
+
+`assessment pending` is the read-only listing of the same entries, with `attempts`,
+`claimed_by`, and `lease_expires_at`; it hands nothing out. Never judge an entry whose
+`judgeable` is false; its `problem` says why, and that reason is what to report -- `claim`
+withdraws such a recording rather than hand it out, and lists it under `withdrawn`.
+
+**Handing in a written answer** is `assessment submit --content-id <id> --submission-key
+<key> --response ...`. It registers the answer and does not score it: the task stays
+`served` and reports `awaiting-judge`. Resending under the same key replays; a second answer
+for the same task is refused (`assessment_task_already_submitted`). Only a track that keeps
+written answers whole can have one judged; otherwise `start --scoring machine+judged` leaves
+written tasks out and names the filter.
+
+**A run that is paused.** A verdict recorded on a paused run is *held* (`held: true`): it
+changes nothing until `resume`, which applies held verdicts in the order they arrived. One
+that no longer holds (the recording was purged or replaced meanwhile) is voided with its
+reason, the resume still succeeds, and its report lists what was applied and voided.
+
+**Finishing with work outstanding.** `finalize` is refused with
+`assessment_judgement_outstanding` while any answer waits on a judge or any verdict is held,
+and lists them. The choices are to wait (judge them, or `resume` if paused) or to finish
+without them: `finalize --exclude-outstanding`, which withdraws them as
+`assessment_run_finalized` and names them under `excluded`. That costs the learner those
+observations, so offer the choice; do not make it. `abandon` withdraws them the same way. A
+verdict arriving after the run closes is refused against it, never applied.
+
+Each claim is an attempt. After the attempts run out with no verdict, the submission is
+withdrawn as `assessment_judging_exhausted`: the learner loses that observation, and the
+dimension serves another task. Relay that; it is not a learner error.
+
+Withdrawing consent counts too. Turning off audio retention purges every waiting recording
+(`assessment_audio_purged`); turning off transcript retention withdraws waiting written
+answers and clears their text. A held or in-flight verdict for either is refused or voided.
+
+The recording is checked again when your verdict arrives. If it was purged, altered, or is
+no longer kept while you were listening, the verdict is refused by that reason
+(`assessment_audio_purged`, `assessment_audio_altered`, ...), the submission is withdrawn,
+and the task is skipped -- relay that; do not try again with another recording. Other
+refusals name what happened instead: `assessment_submission_superseded` (the learner
+answered again; judge the successor it names), `assessment_submission_withdrawn` (with its
+code), `assessment_claim_released` (your claim was released; claim again),
+`assessment_verdict_conflict` (another judge's different verdict landed first). A verdict
+for a task whose result was invalidated is refused as `assessment_result_invalidated`: a
+fresh measurement belongs to a fresh run.
 
 ## Scoring
 
@@ -51,10 +171,11 @@ is refused, and re-recording an answered task is an idempotent no-op, so a retry
   can you. Pass the answer *as given*: do not correct, tidy, or excerpt it. Use
   `--response-file` when the answer is long enough that argv is awkward.
 - Extended productive tasks: score each rubric dimension, pass the whole rubric result through
-  `--input`, and set `--score` to the weighted total. Store the rubric detail, not only the
-  total.
+  `--rubric`, and set `--score` to the weighted total. Store the rubric detail, not only the
+  total. (`--input` is the older spelling of the same payload; pass one, not both.)
 - Pronunciation tasks: **audio is required**. A correct transcript proves nothing about
-  pronunciation. If you have no linked audio, do not score the task — leave the dimension to
+  pronunciation. Judge only from a recording `assessment claim` hands you, and name it
+  with `--submission` and `--claim`. If there is none, do not score the task — leave the dimension to
   stop as under-evidenced, or pause the run until audio is available.
 
 `--score` stays available for the judged types and for a verdict you reached yourself. A
@@ -63,7 +184,13 @@ carries the scoring policy version, because `--assessor-kind` has only ever *lab
 score rather than saying who reached it.
 
 Set `--assessor-kind` truthfully. `ai` means you scored it; `human` means a person did.
-`--confidence low` on an AI-scored productive task is the honest default.
+`--confidence low` on an AI-scored productive task is the honest default, and on a spoken
+one `medium` is the ceiling.
+
+**When a recording goes, so does what rested on it.** Purging a recording -- or a retention
+sweep doing it -- marks every result judged from it invalidated, replays the run without it,
+and rebuilds the estimate from what survives; the history it shaped is annotated, not
+rewritten. Report an invalidated result as withdrawn evidence, never as a score.
 
 **The response is an input, not something you decide to store.** It is compared in memory
 and reaches the database only through the track's retention rule: no consent keeps a hash

@@ -1,0 +1,14 @@
+[
+  {
+    "aggregate_id": "wsp_01M3ZSMY12JD38H4MWC4QJ5C96",
+    "aggregate_type": "workspace",
+    "correlation_id": "evt_01M3ZSMY11E1KT5699JR8AVCJH",
+    "event_id": "evt_01M3ZSMYC1GJ8B8AYB6G59FYPE",
+    "event_type": "workspace.initialized",
+    "idempotency_key": "workspace.initialized:wsp_01M3ZSMY12JD38H4MWC4QJ5C96",
+    "occurred_at": "2026-10-03T02:31:48.865846Z",
+    "payload_json": "{\"core_version\": \"0.1.0\", \"history_policy\": \"git-wiki\"}",
+    "recorded_at": "2026-10-03T02:31:48.865846Z",
+    "schema_version": 1
+  }
+]
