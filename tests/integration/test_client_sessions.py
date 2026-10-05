@@ -1221,3 +1221,36 @@ def test_the_cli_abandon_and_recover_take_keys_and_replay(
 
     assert again["data"]["replayed"]
     assert first["data"]["recovered"] == 1 and replay["data"]["replayed"]
+
+
+def test_a_batch_gap_refuses_a_complete_close_and_its_remedy_works(
+    onboarded: PolishWorkspace,
+) -> None:
+    report = running(onboarded)
+    block = core_blocks(report)[0]
+    log(onboarded, report.session_id, batch(block, sequence=2, key="batch-2"))
+    digest = session_service.screen(
+        onboarded.paths, session=report.session_id, clock=onboarded.clock
+    ).staging.digest
+
+    with pytest.raises(LinguaWikiError) as failure:
+        session_service.close(
+            onboarded.paths,
+            session=report.session_id,
+            expected_staging=digest,
+            idempotency_key="close-1",
+            clock=onboarded.clock,
+        )
+    partial = session_service.close(
+        onboarded.paths,
+        session=report.session_id,
+        outcome="partial",
+        expected_staging=digest,
+        idempotency_key="close-2",
+        clock=onboarded.clock,
+    )
+
+    assert failure.value.payload.code == "session_batch_gap"
+    assert partial.attempts_written == 1
+    # The lost flush stays visible to `db check` after the partial close, by design.
+    assert failures(onboarded) == ["session_batch_sequence"]
