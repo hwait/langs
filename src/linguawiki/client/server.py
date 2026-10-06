@@ -101,6 +101,12 @@ class ClientServer:
         reference = "" if self.run is None else f"&{LAUNCH_RUN}{self.run}"
         return f"{self.origin}/#{LAUNCH_FRAGMENT}{self.token}{reference}"
 
+    @property
+    def sessions_url(self) -> str:
+        """The session page, carrying the token the same way the launch URL does."""
+
+        return f"{self.origin}/sessions.html#{LAUNCH_FRAGMENT}{self.token}"
+
     def serve_forever(self) -> None:
         """Serve until `close`, recording that `shutdown` is now safe to call."""
 
@@ -227,7 +233,7 @@ def _handler_class(client: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
                 attempts = (
                     DEFAULT_ATTEMPTS
                     if route.upload is None
-                    and (not route.mutates or request.optional(route.key_field, str) is not None)
+                    and (not route.mutates or request.key(route.key_field) is not None)
                     else 1
                 )
                 report = with_retry(lambda: route.handler(request), attempts=attempts)

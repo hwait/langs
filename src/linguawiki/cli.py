@@ -956,6 +956,12 @@ def _session_parser(subcommands: Any) -> None:
     staged_action = actions.add_parser("staged", help="the provisional events not yet credited")
     staged_action.add_argument("--session")
     staged_action.add_argument("--limit", type=int, default=100)
+    staged_action.add_argument("--offset", type=int, default=0)
+    staged_action.add_argument(
+        "--status",
+        choices=session_service.STAGED_STATUSES,
+        help="only events in this status; the total counts the filtered set",
+    )
     _add_track_selector(staged_action)
     _add_workspace(staged_action)
     for name, help_text in (
@@ -978,11 +984,16 @@ def _session_parser(subcommands: Any) -> None:
             help="exclude a reviewed block's staged events from this close",
         )
         entry.add_argument("--idempotency-key")
+        entry.add_argument(
+            "--expect-staging",
+            help="the staging digest `session status` printed; refuse if the staged work changed",
+        )
         _add_track_selector(entry)
         _add_workspace(entry)
     abandon = actions.add_parser("abandon", help="abandon a session, keeping its staged work")
     abandon.add_argument("--session")
     abandon.add_argument("--reason")
+    abandon.add_argument("--idempotency-key")
     _add_track_selector(abandon)
     _add_workspace(abandon)
     recover = actions.add_parser(
@@ -991,6 +1002,7 @@ def _session_parser(subcommands: Any) -> None:
     recover.add_argument("--from", dest="source", required=True)
     recover.add_argument("--into", dest="target")
     recover.add_argument("--event", action="append", default=[])
+    recover.add_argument("--idempotency-key")
     _add_track_selector(recover)
     _add_workspace(recover)
     ingest = actions.add_parser(
@@ -2744,6 +2756,7 @@ def _run_client(args: argparse.Namespace, clock: Clock, command: str) -> int:
         print(f"warning: {finding}", file=sys.stderr)
     print(f"LinguaWiki client listening on {client.origin}", file=sys.stderr)
     print(f"open {client.launch_url}", file=sys.stderr)
+    print(f"sessions {client.sessions_url}", file=sys.stderr)
     if not args.no_open:
         import webbrowser
 
@@ -3217,6 +3230,10 @@ def _session_lines(report: session_service.SessionReport) -> str:
                 else ""
             )
         )
+    if report.status in ("active", "closing") and report.staging_digest:
+        lines.append(
+            f"  staging digest {report.staging_digest} (pass to `session close --expect-staging`)"
+        )
     close = report.finalization
     if close is not None:
         lines.append(
@@ -3331,21 +3348,23 @@ def _run_session(args: argparse.Namespace, clock: Clock, command: str) -> int:
         _print(_envelope(command, batch, clock, batch.warnings), "\n".join(lines), args.format)
         return 0
     if args.action == "staged":
-        events = session_service.staged(
+        listing = session_service.staged_listing(
             paths,
             session=args.session,
             track=args.track,
             limit=args.limit,
+            offset=args.offset,
+            status=args.status,
             clock=clock,
         )
-        listing = session_service.StagedListing(events=events, total=len(events))
-        lines = [f"{len(events)} staged event(s)"]
+        events = listing.events
+        lines = [f"{len(events)} of {listing.total} staged event(s)"]
         lines.extend(
             f"  {event.batch_sequence}.{event.sequence} {event.kind:26} {event.status:13} "
             f"{event.evidence_basis:10} {event.summary}"
             for event in events
         )
-        _print(_envelope(command, listing, clock, ()), "\n".join(lines), args.format)
+        _print(_envelope(command, listing, clock, listing.warnings), "\n".join(lines), args.format)
         return 0
     if args.action in ("close", "partial-close"):
         outcome = getattr(args, "outcome", "partial")
@@ -3359,6 +3378,7 @@ def _run_session(args: argparse.Namespace, clock: Clock, command: str) -> int:
             summary=args.summary,
             discard_blocks=args.discard_block,
             idempotency_key=args.idempotency_key,
+            expected_staging=args.expect_staging,
             clock=clock,
             command=command,
         )
@@ -3374,6 +3394,7 @@ def _run_session(args: argparse.Namespace, clock: Clock, command: str) -> int:
             session=args.session,
             track=args.track,
             reason=args.reason,
+            idempotency_key=args.idempotency_key,
             clock=clock,
             command=command,
         )
@@ -3390,6 +3411,7 @@ def _run_session(args: argparse.Namespace, clock: Clock, command: str) -> int:
             target=args.target,
             events=args.event,
             track=args.track,
+            idempotency_key=args.idempotency_key,
             clock=clock,
             command=command,
         )

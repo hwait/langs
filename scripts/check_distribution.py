@@ -37,6 +37,9 @@ WHEEL_RESOURCES = {
     "linguawiki/client/static/index.html",
     "linguawiki/client/static/app.js",
     "linguawiki/client/static/app.css",
+    "linguawiki/client/static/transport.js",
+    "linguawiki/client/static/sessions.html",
+    "linguawiki/client/static/sessions.js",
 }
 
 

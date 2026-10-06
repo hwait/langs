@@ -1,4 +1,4 @@
-"""The public shell: the three files a browser fetches before it can hold the token.
+"""The public shell: the files a browser fetches before it can hold the token.
 
 The launch token rides in the URL fragment, which a browser never sends, so the first
 navigation cannot carry the token header -- and `server._dispatch` checks the token before
@@ -23,6 +23,13 @@ SHELL_FILES: dict[str, tuple[str, str]] = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
+    # The request transport both pages import, so the rule for when a request may be sent
+    # again is written once.
+    "/transport.js": ("transport.js", "text/javascript; charset=utf-8"),
+    # The session page. Not `/sessions`, which is the discovery route and must go through
+    # the token check like every other read.
+    "/sessions.html": ("sessions.html", "text/html; charset=utf-8"),
+    "/sessions.js": ("sessions.js", "text/javascript; charset=utf-8"),
 }
 
 #: No inline script or style anywhere, so nothing injected into a page can run. Audio is

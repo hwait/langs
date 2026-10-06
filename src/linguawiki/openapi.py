@@ -183,6 +183,7 @@ def _path_template(pattern: str) -> str:
         template.replace(client_routes.RUN_ID, "{run_id}")
         .replace(client_routes.CONTENT_ID, "{content_id}")
         .replace(client_routes.CAPTURE_ID, "{capture_id}")
+        .replace(client_routes.SESSION_ID, "{session_id}")
     )
 
 
@@ -216,6 +217,18 @@ CONTENT_ID_PARAMETER: dict[str, Any] = {
     "required": True,
     "description": "A task this run served, by its content identifier.",
     "schema": {"type": "string", "pattern": "^cnt_[0-9A-HJKMNP-TV-Z]{26}$"},
+}
+
+
+SESSION_ID_PARAMETER: dict[str, Any] = {
+    "name": "session_id",
+    "in": "path",
+    "required": True,
+    "description": (
+        "The session this operation acts on. Its track is resolved from the session, so a "
+        "workspace with more than one active track needs no track beside it."
+    ),
+    "schema": {"type": "string", "pattern": "^ses_[0-9A-HJKMNP-TV-Z]{26}$"},
 }
 
 
@@ -317,6 +330,8 @@ def document(schema_directory: Path) -> dict[str, Any]:
             parameters.append(CONTENT_ID_PARAMETER)
         if "{capture_id}" in template:
             parameters.append(CAPTURE_ID_PARAMETER)
+        if "{session_id}" in template:
+            parameters.append(SESSION_ID_PARAMETER)
         if route.query_schema is not None:
             parameters.extend(
                 {"name": name, "in": "query", "required": False, "schema": dict(schema)}

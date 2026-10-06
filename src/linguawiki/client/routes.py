@@ -1,4 +1,4 @@
-"""The route table: thirteen operations, each one service call wide.
+"""The route table: every operation one service call wide.
 
 A handler resolves its arguments, calls one service function, and returns the report. There
 is no business logic here and there must not be -- selection, scoring, the stop rule, the
@@ -24,7 +24,9 @@ from linguawiki.paths import WorkspacePaths
 from linguawiki.placement import DEFAULT_SCORING, SCORING_CONDITIONS
 from linguawiki.services import assessment as assessment_service
 from linguawiki.services import assessment_view as view_service
+from linguawiki.services import learners as learner_service
 from linguawiki.services import recordings as recording_service
+from linguawiki.services import sessions as session_service
 from linguawiki.services import written_answers as written_service
 
 #: The actor recorded against every mutation this server drives. The command name does not
@@ -65,6 +67,10 @@ CONTENT_ID = r"(?P<content_id>cnt_[0-9A-HJKMNP-TV-Z]{26})"
 #: learner pressed stop. It is the upload's idempotency key, so it sits in the path where
 #: a retry cannot drop it.
 CAPTURE_ID = r"(?P<capture_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+#: A session identifier in a path, matched as narrowly as a run's.
+SESSION_ID = r"(?P<session_id>ses_[0-9A-HJKMNP-TV-Z]{26})"
+#: A non-negative integer in a query string, which arrives as text.
+_COUNT = {"type": "string", "pattern": "^[0-9]{1,6}$"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +119,28 @@ class Request:
             )
         return value
 
+    def key(self, field_path: str) -> str | None:
+        """The idempotency key at `field_path`, a dotted path into the body, or `None`.
+
+        Dotted because an imported batch carries its producer's key *inside* the batch,
+        at `batch.idempotency_key`, and copying it to the top level would make two copies
+        that could disagree. A path that does not lead to a non-empty string is no key:
+        the request is then keyless and is not retried, exactly as a missing key is.
+        """
+
+        value: Any = self.body
+        for part in field_path.split("."):
+            if not isinstance(value, Mapping) or part not in value:
+                return None
+            value = value[part]
+        return value if isinstance(value, str) and value.strip() else None
+
+    def count(self, name: str, default: int) -> int:
+        """A non-negative integer query parameter; the query schema has checked its form."""
+
+        raw = self.query.get(name)
+        return default if raw is None else int(raw)
+
     def strings(self, name: str) -> list[str]:
         value = self.body.get(name)
         if value is None:
@@ -160,6 +188,8 @@ class Route:
     #: producer's own identifier for the answer, stored on the submission, and it is the
     #: key in exactly the sense the others are -- the same request under it replays, a
     #: different one conflicts -- so the server retries on it the way it retries on them.
+    #: A dotted path reaches into the body: an imported batch's key is its producer's,
+    #: at `batch.idempotency_key`.
     key_field: str = "idempotency_key"
 
 
@@ -242,6 +272,322 @@ def _finalize(request: Request) -> Any:
         command="assessment.finalize",
         actor=ACTOR,
     )
+
+
+# --- Sessions ---------------------------------------------------------------------------
+#
+# A session is named by ID in the path, and its services resolve the track *from the
+# session*: a workspace with two active tracks cannot pick one for a caller that did not
+# say, and a session already belongs to exactly one.
+
+
+def _tracks(request: Request) -> Any:
+    return learner_service.discover_tracks(request.paths, clock=request.clock)
+
+
+def _session_discover(request: Request) -> Any:
+    state = request.query.get("state")
+    return session_service.discover(
+        request.paths,
+        track=request.query.get("track"),
+        states=("open", "recoverable") if state is None else tuple(state.split(",")),
+        clock=request.clock,
+    )
+
+
+def _plan(request: Request) -> Any:
+    return session_service.create(
+        request.paths,
+        track=request.optional("track", str),
+        minutes=request.required("minutes", int),
+        mode=request.optional("mode", str) or "mixed",
+        energy=request.optional("energy", str) or "normal",
+        intent=request.optional("intent", str),
+        correction_mode=request.optional("correction_mode", str),
+        idempotency_key=request.optional("idempotency_key", str),
+        clock=request.clock,
+        command="plan.create",
+        actor=ACTOR,
+    )
+
+
+def _session_screen(request: Request) -> Any:
+    return session_service.screen(
+        request.paths, session=request.path_values["session_id"], clock=request.clock
+    )
+
+
+def _session_staged(request: Request) -> Any:
+    return session_service.staged_listing(
+        request.paths,
+        session=request.path_values["session_id"],
+        status=request.query.get("status"),
+        limit=request.count("limit", 100),
+        offset=request.count("offset", 0),
+        clock=request.clock,
+    )
+
+
+def _session_start(request: Request) -> Any:
+    return session_service.start(
+        request.paths,
+        session=request.path_values["session_id"],
+        clock=request.clock,
+        command="session.start",
+    )
+
+
+def _session_resume(request: Request) -> Any:
+    return session_service.resume(
+        request.paths,
+        session=request.path_values["session_id"],
+        clock=request.clock,
+        command="session.resume",
+    )
+
+
+def _session_import(request: Request) -> Any:
+    return session_service.log(
+        request.paths,
+        batch=request.required("batch", dict),
+        session=request.path_values["session_id"],
+        require_declared_assessor=True,
+        clock=request.clock,
+        command="session.log",
+        actor=ACTOR,
+    )
+
+
+def _session_close(request: Request) -> Any:
+    return session_service.close(
+        request.paths,
+        session=request.path_values["session_id"],
+        outcome=request.optional("outcome", str) or "completed",
+        actual_minutes=request.optional("actual_minutes", int),
+        fatigue=request.optional("fatigue", str),
+        summary=request.optional("summary", str),
+        discard_blocks=request.strings("discard_blocks"),
+        expected_staging=request.optional("expected_staging", str),
+        idempotency_key=request.optional("idempotency_key", str),
+        clock=request.clock,
+        command="session.close",
+        actor=ACTOR,
+    )
+
+
+def _session_abandon(request: Request) -> Any:
+    return session_service.abandon(
+        request.paths,
+        session=request.path_values["session_id"],
+        reason=request.optional("reason", str),
+        idempotency_key=request.optional("idempotency_key", str),
+        clock=request.clock,
+        command="session.abandon",
+        actor=ACTOR,
+    )
+
+
+def _session_recover(request: Request) -> Any:
+    return session_service.recover(
+        request.paths,
+        source=request.path_values["session_id"],
+        target=request.required("into", str),
+        events=request.strings("events"),
+        idempotency_key=request.optional("idempotency_key", str),
+        clock=request.clock,
+        command="session.recover",
+        actor=ACTOR,
+    )
+
+
+SESSION_ROUTES: tuple[Route, ...] = (
+    Route(
+        "GET",
+        re.compile(r"^/tracks$"),
+        "track.discover",
+        _tracks,
+        mutates=False,
+        summary="The tracks a page can offer, and the one it may take without asking",
+        response_models=(learner_service.TrackListReport,),
+    ),
+    Route(
+        "GET",
+        re.compile(r"^/sessions$"),
+        "session.discover",
+        _session_discover,
+        mutates=False,
+        summary="One track's open and recoverable sessions, newest first",
+        query_schema=_body(
+            {
+                "track": {"type": "string", "minLength": 1},
+                "state": {
+                    "type": "string",
+                    "pattern": "^(open|recoverable)(,(open|recoverable))*$",
+                    "description": "Comma-separated; both when absent.",
+                },
+            }
+        ),
+        response_models=(session_service.SessionListReport,),
+    ),
+    Route(
+        "POST",
+        re.compile(r"^/sessions$"),
+        "plan.create",
+        _plan,
+        mutates=True,
+        summary="Plan one session for a track, recording why each block is there",
+        request_schema=_body(
+            {
+                "track": {"type": "string", "minLength": 1},
+                "minutes": {"type": "integer"},
+                "mode": {"type": "string", "minLength": 1},
+                "energy": {"type": "string", "minLength": 1},
+                "intent": {"type": "string"},
+                "correction_mode": {"type": "string", "minLength": 1},
+                "idempotency_key": IDEMPOTENCY_KEY,
+            },
+            required=["minutes"],
+        ),
+        response_models=(session_service.SessionReport,),
+    ),
+    Route(
+        "GET",
+        re.compile(rf"^/sessions/{SESSION_ID}/screen$"),
+        "session.screen",
+        _session_screen,
+        mutates=False,
+        summary="Everything a page needs to draw a session, in one read",
+        response_models=(session_service.SessionScreen,),
+    ),
+    Route(
+        "GET",
+        re.compile(rf"^/sessions/{SESSION_ID}/staged$"),
+        "session.staged",
+        _session_staged,
+        mutates=False,
+        summary="A page of a session's staged events, filtered by status, with the filtered total",
+        query_schema=_body(
+            {
+                "status": {"enum": list(session_service.STAGED_STATUSES)},
+                "limit": _COUNT,
+                "offset": _COUNT,
+            }
+        ),
+        response_models=(session_service.StagedListing,),
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/sessions/{SESSION_ID}/start$"),
+        "session.start",
+        _session_start,
+        mutates=True,
+        summary="Begin a planned session; starting an active one returns it unchanged",
+        request_schema=_body({}),
+        response_models=(session_service.SessionReport,),
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/sessions/{SESSION_ID}/resume$"),
+        "session.resume",
+        _session_resume,
+        mutates=True,
+        summary="Pick a session back up and say what state it is in",
+        request_schema=_body({}),
+        response_models=(session_service.SessionReport,),
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/sessions/{SESSION_ID}/batches$"),
+        "session.import",
+        _session_import,
+        mutates=True,
+        summary=(
+            "Stage a batch another producer wrote, under the producer's own key, sequence, "
+            "and event identifiers; nothing is credited until the session closes"
+        ),
+        request_schema=_body(
+            {
+                "batch": {
+                    "type": "object",
+                    "description": (
+                        "A lingua.session.events.v1 batch. Its idempotency_key is this "
+                        "operation's key: the same batch under it replays, a different one "
+                        "is refused with idempotency_conflict. Every attempt must declare "
+                        "its assessor_kind."
+                    ),
+                }
+            },
+            required=["batch"],
+        ),
+        response_models=(session_service.SessionBatchReport,),
+        key_field="batch.idempotency_key",
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/sessions/{SESSION_ID}/close$"),
+        "session.close",
+        _session_close,
+        mutates=True,
+        summary=(
+            "Finalize a session, crediting its staged work exactly once, and only the "
+            "staged set the caller confirmed"
+        ),
+        request_schema=_body(
+            {
+                "outcome": {"enum": ["completed", "partial"]},
+                "actual_minutes": {"type": "integer"},
+                "fatigue": {"type": "string"},
+                "summary": {"type": "string"},
+                "discard_blocks": {"type": "array", "items": {"type": "string"}},
+                "expected_staging": {
+                    "type": "string",
+                    "description": (
+                        "The staging digest from the screen the caller confirmed. A close "
+                        "is refused with session_staging_changed when the staged set "
+                        "differs, before anything is written."
+                    ),
+                },
+                "idempotency_key": IDEMPOTENCY_KEY,
+            }
+        ),
+        response_models=(session_service.CloseReport,),
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/sessions/{SESSION_ID}/abandon$"),
+        "session.abandon",
+        _session_abandon,
+        mutates=True,
+        summary="Abandon a session, keeping its staged work for review and crediting none",
+        request_schema=_body({"reason": {"type": "string"}, "idempotency_key": IDEMPOTENCY_KEY}),
+        response_models=(session_service.SessionReport,),
+    ),
+    Route(
+        "POST",
+        re.compile(rf"^/sessions/{SESSION_ID}/recover$"),
+        "session.recover",
+        _session_recover,
+        mutates=True,
+        summary=(
+            "Move reviewed staged events from this finished session into an open one; a "
+            "retry under the same key replays what it moved"
+        ),
+        request_schema=_body(
+            {
+                "into": {"type": "string", "minLength": 1},
+                "events": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "uniqueItems": True,
+                },
+                "idempotency_key": IDEMPOTENCY_KEY,
+            },
+            required=["into", "events"],
+        ),
+        response_models=(session_service.RecoverReport,),
+    ),
+)
 
 
 def _discover(request: Request) -> Any:
@@ -513,6 +859,7 @@ ROUTES: tuple[Route, ...] = (
         ),
         response_models=(assessment_service.AssessmentRunReport,),
     ),
+    *SESSION_ROUTES,
 )
 
 

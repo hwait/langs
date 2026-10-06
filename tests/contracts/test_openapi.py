@@ -148,6 +148,7 @@ def test_every_route_the_server_serves_is_declared() -> None:
             .replace(client_routes.RUN_ID, "{run_id}")
             .replace(client_routes.CONTENT_ID, "{content_id}")
             .replace(client_routes.CAPTURE_ID, "{capture_id}")
+            .replace(client_routes.SESSION_ID, "{session_id}")
         )
         assert template in whole["paths"], template
         assert route.method.lower() in whole["paths"][template], template
@@ -173,12 +174,19 @@ def test_every_operation_that_reaches_the_database_declares_the_retryable_respon
     assert "Retry-After" in busy["headers"]
 
 
-#: The one mutating route that takes no idempotency key, and why it does not need one. A
-#: status transition is idempotent by *state*: `RUN_TRANSITIONS` permits `paused -> paused`,
-#: so repeating the request reaches the state it asked for rather than doing something twice.
-#: Every other mutation accumulates -- a second serve spends an exposure, a second score
-#: moves a posterior -- and must be keyed.
-IDEMPOTENT_BY_STATE = "/runs/{run_id}/status"
+#: The mutating routes that take no idempotency key, and why they do not need one. Each is
+#: idempotent by *state*: `RUN_TRANSITIONS` permits `paused -> paused`, starting an active
+#: session returns it unchanged, and resuming one reports where it stands -- so repeating
+#: the request reaches the state it asked for rather than doing something twice. Every
+#: other mutation accumulates -- a second serve spends an exposure, a second score moves a
+#: posterior -- and must be keyed.
+IDEMPOTENT_BY_STATE = frozenset(
+    {
+        "/runs/{run_id}/status",
+        "/sessions/{session_id}/start",
+        "/sessions/{session_id}/resume",
+    }
+)
 
 
 def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_conflict() -> None:
@@ -194,6 +202,7 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
             .replace(client_routes.RUN_ID, "{run_id}")
             .replace(client_routes.CONTENT_ID, "{content_id}")
             .replace(client_routes.CAPTURE_ID, "{capture_id}")
+            .replace(client_routes.SESSION_ID, "{session_id}")
         )
         operation = whole["paths"][template][route.method.lower()]
         if route.upload is not None:
@@ -209,14 +218,16 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
             assert "409" in operation["responses"], template
             continue
         body = operation["requestBody"]["content"]["application/json"]["schema"]
-        if template == IDEMPOTENT_BY_STATE:
+        if template in IDEMPOTENT_BY_STATE:
             assert "idempotency_key" not in body["properties"]
             continue
         keyed.append(template)
         # The key is `idempotency_key` beside the request, or -- for a written answer -- the
-        # producer's own `submission_key`; either way the document says it replays.
-        assert route.key_field in body["properties"], template
-        assert "replays" in body["properties"][route.key_field]["description"], template
+        # producer's own `submission_key`, or -- for an imported batch -- the producer's
+        # key inside the batch; whichever, the document says the operation replays.
+        holder, _, _ = route.key_field.partition(".")
+        assert holder in body["properties"], template
+        assert "replays" in body["properties"][holder]["description"], template
         assert "409" in operation["responses"], template
 
     # Named rather than counted, so a new mutating route added without a key fails here
@@ -230,6 +241,11 @@ def test_every_accumulating_mutation_declares_the_idempotency_key_and_its_confli
         "/runs/{run_id}/tasks/{content_id}/captures/{capture_id}",
         "/runs/{run_id}/tasks/{content_id}/plays",
         "/runs/{run_id}/tasks/{content_id}/submission",
+        "/sessions",
+        "/sessions/{session_id}/abandon",
+        "/sessions/{session_id}/batches",
+        "/sessions/{session_id}/close",
+        "/sessions/{session_id}/recover",
     ]
 
 
@@ -247,7 +263,7 @@ def test_the_token_is_required_by_the_document_not_only_by_the_server() -> None:
         for operation in path.values()
         if operation.get("security") == []
     )
-    assert public == ["/", "/app.css", "/app.js"]
+    assert public == ["/", "/app.css", "/app.js", "/sessions.html", "/sessions.js", "/transport.js"]
 
 
 def test_the_document_says_it_describes_shapes_rather_than_sequences() -> None:

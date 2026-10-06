@@ -18,20 +18,27 @@
 // no way to tell the page. So while anything waits on a judge the page re-reads `/screen`
 // on a backoff, and a change it finds never disturbs the task the learner is on.
 
-const TOKEN_HEADER = "X-LinguaWiki-Token";
+import {
+  Refusal,
+  STALE_TOKEN,
+  TOKEN_HEADER,
+  TOKEN_KEY,
+  createTransport,
+  sleep,
+  store,
+  stored,
+} from "/transport.js";
+
 const PENDING_KEY = "linguawiki.pending";
-// The launch token and the run on screen, kept per tab so a reload can carry on. Not in
-// the URL, which reaches history; sessionStorage is this origin's, this tab's, and goes
-// when the tab does. A token from a newer launch URL replaces it, and a refused one is
+// The run on screen, kept per tab so a reload can carry on (the token is kept the same way,
+// by the transport). A token from a newer launch URL replaces it, and a refused one is
 // dropped.
-const TOKEN_KEY = "linguawiki.token";
 const RUN_KEY = "linguawiki.run";
 // The batch being worked through: `{run, idempotency_key, batch_id, content_ids}`. Its own
 // slot, not the pending one: the pending slot is cleared the moment an operation is
 // answered, and a batch is a round of answers long. Written before the batch is sent, so a
 // reload that lost the answer replays the same key rather than serving a second round.
 const BATCH_KEY = "linguawiki.batch";
-const STALE_TOKEN = new Set(["client_token_required", "client_token_invalid"]);
 const MACHINE_RUN = { scoring: "machine", modalities: ["text", "audio"] };
 // Where the track lets a judge mark something the learner makes here -- a recording it has
 // both said it can make and agreed to keep, or a written answer it agrees to keep whole --
@@ -86,24 +93,19 @@ const state = {
   servedNothing: false,
 };
 
+// The transport is shared with every page; what it needs from this one is the token, the
+// status banner, and what to do when the token is refused.
+const { request, send, keyed, loadPending } = createTransport({
+  token: () => state.token,
+  onStatus: (status) => showStatus(status),
+  onStale: () => {
+    state.stale = true;
+    store(TOKEN_KEY, null);
+  },
+  pendingKey: PENDING_KEY,
+});
+
 // --- the fragment ----------------------------------------------------------------------
-
-function stored(name) {
-  try {
-    return sessionStorage.getItem(name);
-  } catch {
-    return null;
-  }
-}
-
-function store(name, value) {
-  try {
-    if (value === null) sessionStorage.removeItem(name);
-    else sessionStorage.setItem(name, value);
-  } catch {
-    // No storage: the page still works, it just cannot survive a reload.
-  }
-}
 
 function readFragment() {
   const params = new URLSearchParams(location.hash.replace(/^#/, ""));
@@ -123,171 +125,10 @@ function readFragment() {
 
 // --- the transport ---------------------------------------------------------------------
 
-class Refusal extends Error {
-  constructor(status, error) {
-    super(error.message);
-    this.status = status;
-    this.code = error.code;
-    this.retryable = Boolean(error.retryable);
-  }
-}
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function savePending(operation) {
-  try {
-    sessionStorage.setItem(PENDING_KEY, JSON.stringify(operation));
-  } catch {
-    // No storage: the operation still runs, it just cannot survive a reload.
-  }
-}
-
-function clearPending() {
-  try {
-    sessionStorage.removeItem(PENDING_KEY);
-  } catch {
-    /* nothing to clear */
-  }
-}
-
-function loadPending() {
-  try {
-    const raw = sessionStorage.getItem(PENDING_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
 function showStatus(status) {
   if (state.status !== status) {
     state.status = status;
     drawStatus();
-  }
-}
-
-// One request, retried only where a retry is a replay: a read, or a mutation that carries
-// its key. A retryable refusal waits the server's `Retry-After` and sends the same body.
-//
-// `quiet` is for a poll: it never changes the status banner and never waits out a busy
-// database. A poll the writer lock refuses -- usually the judge's own `record` -- is a poll
-// to try at the next tick, not a wait to show the learner.
-async function request(method, path, body, { binary = false, attempts = Infinity, quiet = false } = {}) {
-  // A written answer's key is its `submission_key`, and it makes a resend a replay exactly
-  // as `idempotency_key` does elsewhere.
-  const keyed =
-    body !== undefined && (typeof body.idempotency_key === "string" || typeof body.submission_key === "string");
-  const mayRetry = method === "GET" || keyed;
-  const setStatus = quiet ? () => {} : showStatus;
-  for (let attempt = 0; ; attempt += 1) {
-    let response;
-    try {
-      response = await fetch(path, {
-        method,
-        headers: {
-          [TOKEN_HEADER]: state.token,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        cache: "no-store",
-        credentials: "omit",
-        referrerPolicy: "no-referrer",
-      });
-    } catch {
-      if (!mayRetry) {
-        setStatus("unknown");
-        throw new Refusal(0, {
-          code: "client_unreachable",
-          message: "The LinguaWiki server did not answer, so whether that landed is unknown.",
-        });
-      }
-      if (attempt + 1 >= attempts) {
-        setStatus("");
-        throw new Refusal(0, {
-          code: "client_unreachable",
-          message: "The LinguaWiki server did not answer.",
-        });
-      }
-      setStatus("offline");
-      await sleep(Math.min(1000 * (attempt + 1), 5000));
-      continue;
-    }
-    const type = response.headers.get("Content-Type") || "";
-    // An answer that cannot be read is not an answer. The request may have landed -- a
-    // response cut off mid-body is exactly that -- so it is handled like a connection that
-    // dropped: a read or a keyed mutation is resent unchanged, which the key makes a
-    // replay; a keyless mutation's outcome is reported as unknown. Treating it as a
-    // refusal discarded the key, and the next press opened a second run.
-    let envelope = null;
-    try {
-      if (binary && response.ok && !type.startsWith("application/json")) {
-        const blob = await response.blob();
-        setStatus("");
-        return blob;
-      }
-      envelope = await response.json();
-    } catch {
-      envelope = null;
-    }
-    const readable =
-      envelope !== null && typeof envelope === "object" && (envelope.ok === true || envelope.error);
-    if (!readable) {
-      if (!mayRetry || attempt + 1 >= attempts) {
-        setStatus("unknown");
-        throw new Refusal(response.status, {
-          code: "client_unreachable",
-          message: "The server's answer could not be read, so whether that landed is unknown.",
-        });
-      }
-      setStatus("offline");
-      await sleep(Math.min(1000 * (attempt + 1), 5000));
-      continue;
-    }
-    if (response.ok && envelope.ok) {
-      setStatus("");
-      return envelope.data;
-    }
-    const error = envelope.error;
-    if (STALE_TOKEN.has(error.code)) {
-      state.stale = true;
-      store(TOKEN_KEY, null);
-      setStatus("");
-      throw new Refusal(response.status, error);
-    }
-    if (response.status === 503 && error.retryable && mayRetry && !quiet) {
-      setStatus("waiting");
-      const after = Number(response.headers.get("Retry-After")) || 1;
-      await sleep(after * 1000);
-      continue;
-    }
-    if (response.status === 503) {
-      // A keyless mutation whose outcome the server cannot vouch for. Not retried: a
-      // second attempt could repeat work that landed. The screen is re-read instead.
-      setStatus("unknown");
-    } else {
-      setStatus("");
-    }
-    throw new Refusal(response.status, error);
-  }
-}
-
-// A keyed operation: persisted before it is sent, cleared on a definitive answer.
-async function keyed(method, path, fields = {}) {
-  const operation = { method, path, body: { ...fields, idempotency_key: crypto.randomUUID() } };
-  return send(operation);
-}
-
-async function send(operation) {
-  savePending(operation);
-  try {
-    const data = await request(operation.method, operation.path, operation.body);
-    clearPending();
-    return data;
-  } catch (refusal) {
-    // A refusal is an answer, and the operation is over. Only an unreachable server
-    // leaves it pending, because then nobody knows whether it landed.
-    if (refusal.code !== "client_unreachable") clearPending();
-    throw refusal;
   }
 }
 
