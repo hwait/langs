@@ -644,6 +644,10 @@ Rulings made during implementation, where the code differs from the text above:
 - Found in final review and fixed: a batch key that another operation already used, a recovery that
   names one event twice, and a recovery whose derived batch key is taken are each refused by name
   rather than reaching the unique index.
+- Found in a second review and fixed: the close report is drawn only on the session it closed, further
+  pages of staged work are reloaded after a close or recovery, the recovery record is mirrored in
+  memory when the tab cannot store it, and a keyed recovery that moved nothing records its answer
+  so a retry replays it.
 
 Deferred, with nothing in the release gate depending on them:
 
