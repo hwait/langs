@@ -4579,12 +4579,35 @@ def recover(
         else:
             chosen = list(rows)
         if not chosen:
-            return RecoverReport(
+            empty = RecoverReport(
                 source_session_id=source_id,
                 target_session_id=target_id,
                 recovered=0,
                 warnings=("this session holds no staged events to recover",),
             )
+            if idempotency_key is not None:
+                # A keyed call that moved nothing still answered, and its retry must get the
+                # same answer -- not a refusal because the target has closed since.
+                with database.transaction() as transaction:
+                    migration_module.record_domain_event(
+                        transaction,
+                        event_type="session.staged_recovered",
+                        aggregate_type="session",
+                        aggregate_id=target_id,
+                        correlation_id=EventId.new(),
+                        payload_json=idempotency.payload(
+                            request,
+                            source_session_id=source_id,
+                            target_session_id=target_id,
+                            batch_id=None,
+                            recovered=0,
+                            skipped=0,
+                            recovered_events=[],
+                            warnings=list(empty.warnings),
+                        ),
+                        idempotency_key=idempotency_key,
+                    )
+            return empty
         sequence = int(
             database.scalar(
                 "SELECT coalesce(max(sequence), 0) + 1 FROM session_event_batches "

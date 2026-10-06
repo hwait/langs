@@ -54,6 +54,8 @@ const state = {
   closeReport: null,
   review: null, // a recovery being reviewed
   importPrompt: null, // an import a reload interrupted
+  recoveryRecord: null, // the recovery workflow, mirrored here in case storage refuses it
+  storageless: false, // storage refused a write this page needed
   planForm: null,
 };
 
@@ -97,7 +99,7 @@ async function act(work) {
 async function chooseTrack() {
   const listing = await request("GET", "/tracks");
   state.tracks = listing.tracks;
-  const record = storedJson(RECOVERY_KEY);
+  const record = loadRecord();
   if (record) {
     // A recovery belongs to the source's track, whatever this tab was last showing.
     state.track = record.track_id;
@@ -138,7 +140,7 @@ function pickTrack(trackId) {
 }
 
 function switchTrack() {
-  if (storedJson(RECOVERY_KEY)) {
+  if (loadRecord()) {
     state.notice = "Finish or cancel the recovery in progress before switching track.";
     state.view = "review";
     draw();
@@ -169,8 +171,21 @@ async function openSession(sessionId) {
   state.view = "session";
 }
 
+// Every page of staged work drawn is read again, not only the first: a close or a recovery
+// changes the status of rows on later pages too, and a page kept from before would go on
+// calling credited work "not yet credited".
 async function refresh() {
-  if (state.session) state.screen = await request("GET", `/sessions/${state.session}/screen`);
+  if (!state.session) return;
+  const further = state.extra.length;
+  state.screen = await request("GET", `/sessions/${state.session}/screen`);
+  state.extra = [];
+  if (further) {
+    const page = await request(
+      "GET",
+      `/sessions/${state.session}/staged?limit=${further}&offset=${state.screen.staged.events.length}`,
+    );
+    state.extra = page.events;
+  }
 }
 
 function planSession(form) {
@@ -421,18 +436,33 @@ function beginRecovery() {
     keys: { plan: crypto.randomUUID(), recover: crypto.randomUUID() },
     steps: { planned: !fresh, started: false, recovered: false },
   };
-  storeJson(RECOVERY_KEY, record);
+  saveRecord(record);
   return act(() => runRecovery());
 }
 
+// The workflow record is kept in memory as well as in sessionStorage. Storage can refuse every
+// write -- a private window, a locked-down profile -- and a recovery that read its record
+// only from storage did nothing at all and said nothing. In memory it still runs; it just
+// cannot survive a reload, and the page says so.
+function loadRecord() {
+  return state.recoveryRecord ?? storedJson(RECOVERY_KEY);
+}
+
 function saveRecord(record) {
+  state.recoveryRecord = record;
   storeJson(RECOVERY_KEY, record);
+  if (stored(RECOVERY_KEY) !== JSON.stringify(record)) state.storageless = true;
+}
+
+function clearRecord() {
+  state.recoveryRecord = null;
+  store(RECOVERY_KEY, null);
 }
 
 // Each step under its stored key, from the first one not acknowledged. A step marked done
 // is never re-sent; the target's state is read again before the next one.
 async function runRecovery() {
-  const record = storedJson(RECOVERY_KEY);
+  const record = loadRecord();
   if (!record) return;
   state.track = record.track_id;
   store(TRACK_KEY, record.track_id);
@@ -489,9 +519,12 @@ async function runRecovery() {
     state.notice =
       `Recovered ${report.recovered} event(s) into session ${report.target_session_id}. ` +
       "They are staged and credited to nothing until that session closes." +
-      (report.replayed ? " (Confirmed after a reload: this recovery had already happened.)" : "");
+      (report.replayed ? " (Confirmed after a reload: this recovery had already happened.)" : "") +
+      (state.storageless
+        ? " This tab cannot store anything, so a recovery interrupted here cannot survive a reload."
+        : "");
   }
-  store(RECOVERY_KEY, null);
+  clearRecord();
   state.review = null;
   await openSession(target);
 }
@@ -499,8 +532,8 @@ async function runRecovery() {
 // A refusal mid-flow keeps the learner's choices: a new selection keeps the destination, a
 // new destination keeps the selection. Either is a new request, so the recover key is new.
 async function recoveryNeeds(what, message) {
-  const record = storedJson(RECOVERY_KEY);
-  store(RECOVERY_KEY, null);
+  const record = loadRecord();
+  clearRecord();
   await loadReview(record.source_session_id);
   if (state.review) {
     if (what === "selection") {
@@ -516,8 +549,8 @@ async function recoveryNeeds(what, message) {
 }
 
 function cancelRecovery() {
-  const record = storedJson(RECOVERY_KEY);
-  store(RECOVERY_KEY, null);
+  const record = loadRecord();
+  clearRecord();
   state.review = null;
   if (record && record.destination.kind === "new" && record.steps.planned) {
     state.notice = `The session planned for this recovery (${record.destination.session_id}) is left in place.`;
@@ -767,8 +800,13 @@ function blockName(blockId) {
   return block ? `${block.sequence}. ${block.block_type}` : blockId;
 }
 
+// The report belongs to one session: the one this page just closed, or else whatever the
+// session on screen recorded when it was finalized. A report kept from another session is
+// never drawn under this one.
 function closeReportPanel() {
-  const report = state.closeReport;
+  const fresh = state.closeReport;
+  const report =
+    fresh && fresh.session_id === state.screen.session.session_id ? fresh : state.screen.session.finalization;
   if (!report) return null;
   return h(
     "section",
@@ -988,7 +1026,7 @@ function sessionView() {
 }
 
 function reviewView() {
-  const record = storedJson(RECOVERY_KEY);
+  const record = loadRecord();
   if (record && !state.review) {
     return h(
       "section",
@@ -1151,7 +1189,7 @@ async function boot() {
     }
     await settleImportMarker();
     await chooseTrack();
-    if (storedJson(RECOVERY_KEY)) {
+    if (loadRecord()) {
       try {
         await runRecovery();
       } catch (refusal) {

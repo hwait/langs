@@ -1332,3 +1332,24 @@ def test_a_recovery_whose_batch_key_is_taken_is_a_named_conflict(
         )
         == 1
     )
+
+
+def test_a_keyed_recovery_that_moved_nothing_still_replays(onboarded: PolishWorkspace) -> None:
+    source = running(onboarded, "plan-empty")
+    session_service.abandon(onboarded.paths, session=source.session_id, clock=onboarded.clock)
+    target = running(onboarded, "plan-target")
+    arguments: dict[str, Any] = {
+        "source": source.session_id,
+        "target": target.session_id,
+        "idempotency_key": "nothing-1",
+        "clock": onboarded.clock,
+    }
+
+    first = session_service.recover(onboarded.paths, **arguments)
+    session_service.close(onboarded.paths, session=target.session_id, clock=onboarded.clock)
+    again = session_service.recover(onboarded.paths, **arguments)
+
+    assert first.recovered == 0 and not first.replayed
+    assert again.replayed and again.recovered == 0
+    assert again.target_session_id == target.session_id
+    assert count(onboarded, "SELECT count(*) FROM session_event_batches") == 0

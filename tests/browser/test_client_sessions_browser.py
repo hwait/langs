@@ -743,3 +743,78 @@ def test_a_recovery_refused_because_events_moved_reviews_what_is_left(
     page.click("[data-role=recover]")
     page.wait_for_selector("[data-role=staged][data-count='3']")
     assert _count(onboarded, "SELECT count(*) FROM sessions") == 2
+
+
+# --- Page state that belongs to one session ------------------------------------------
+
+
+def test_a_close_report_is_drawn_only_on_the_session_it_closed(
+    page: Any, served: Served, onboarded: PolishWorkspace
+) -> None:
+    first = running(onboarded, "plan-first")
+    second = running(onboarded, "plan-second")
+    launch(page, served)
+    page.click(f"[data-role=open-sessions] li[data-session={first}] [data-role=open-session]")
+    page.wait_for_selector(f"[data-role=session][data-session={first}]")
+    page.click("[data-role=close]")
+    page.click("[data-role=confirm-close]")
+    page.wait_for_selector("[data-role=close-report]")
+
+    page.click("[data-role=home]")
+    page.click(f"[data-role=open-sessions] li[data-session={second}] [data-role=open-session]")
+    page.wait_for_selector(f"[data-role=session][data-session={second}]")
+
+    assert page.locator("[data-role=close-report]").count() == 0
+
+
+def test_further_pages_of_staged_work_follow_the_close(
+    page: Any, served: Served, onboarded: PolishWorkspace
+) -> None:
+    session = running(onboarded, "plan-1")
+    block = core_blocks(onboarded, session)[0]
+    events = []
+    for index in range(101):
+        event = attempt(block, 0)
+        event["event_id"] = f"evt_01ARZ3NDEKTSV4RRFFQ69G{index:04d}"
+        events.append(event)
+    session_service.log(
+        onboarded.paths,
+        batch={"sequence": 1, "idempotency_key": "many", "block": block.block_id, "events": events},
+        session=session,
+        clock=onboarded.clock,
+    )
+    launch(page, served)
+    page.click("[data-role=more]")
+    page.wait_for_function(
+        "() => document.querySelectorAll('[data-role=staged-event]').length === 101"
+    )
+
+    page.click("[data-role=close]")
+    page.click("[data-role=confirm-close]")
+    page.wait_for_selector("[data-role=close-report]")
+
+    assert page.locator("[data-role=staged-event]").count() == 101
+    assert page.locator("[data-role=staged-event][data-status=staged]").count() == 0
+
+
+def test_a_recovery_runs_when_the_tab_cannot_store_anything(
+    page: Any, served: Served, onboarded: PolishWorkspace
+) -> None:
+    source = abandoned(onboarded, "plan-src", [0])
+    target = running(onboarded, "plan-target")
+    page.add_init_script(
+        "Storage.prototype.setItem = function() {"
+        " throw new DOMException('disabled', 'SecurityError'); };"
+    )
+    page.goto(served.server.sessions_url)
+    settle(page)
+    page.click("[data-role=home]")
+    page.click(f"[data-role=recoverable-sessions] li[data-session={source}] [data-role=review]")
+    page.wait_for_selector("[data-role=recovery-review]")
+    page.check(f"[data-role=destination][data-session={target}]")
+
+    page.click("[data-role=recover]")
+
+    page.wait_for_selector(f"[data-role=session][data-session={target}]")
+    page.wait_for_selector("[data-role=staged][data-count='1']")
+    assert "cannot survive a reload" in page.inner_text("[data-role=notice]")
